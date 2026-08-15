@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "tool": {"version": "contract-test"},
+  "target": {"floci_version": "1.6.0", "image": "floci/floci:1.6.0"},
+  "source": {"account_id": "123456789012", "region": "eu-west-1"},
+  "capture": {"captured_at": "2026-08-14T12:00:00Z"},
+  "selected": [],
+  "snapshots": [
+    {
+      "resource": {"service": "s3", "type": "bucket", "id": "assets", "arn": "arn:aws:s3:::assets"},
+      "service": "s3",
+      "structure_version": 1,
+      "structure": {"name": "assets", "region": "eu-west-1", "versioning": "Enabled"}
+    },
+    {
+      "resource": {"service": "dynamodb", "type": "table", "id": "records"},
+      "service": "dynamodb",
+      "structure_version": 1,
+      "structure": {
+        "name": "records",
+        "attribute_definitions": [{"name": "id", "type": "S"}],
+        "key_schema": [{"name": "id", "type": "HASH"}],
+        "stream": {"enabled": false},
+        "ttl": {"enabled": false},
+        "billing_mode": "PAY_PER_REQUEST",
+        "source_billing_mode": "PAY_PER_REQUEST"
+      }
+    }
+  ],
+  "operations": []
+}

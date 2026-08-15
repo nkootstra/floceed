@@ -1,0 +1,8 @@
+/floceed
+/.floceed/bundle/data/
+/.floceed-capture-*/
+/.floceed.stage-*/
+/.floceed.backup/
+*.test
+coverage.out
+

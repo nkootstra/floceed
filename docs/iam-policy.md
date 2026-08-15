@@ -1,0 +1,75 @@
+# Source IAM policy
+
+Floceed is a read-only source client. Start from the policy below and remove
+service sections that are not selected. Resource-level scoping varies by API;
+AWS requires `ListAllMyBuckets` and `ListTables` on `*`.
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ConfirmIdentity",
+      "Effect": "Allow",
+      "Action": "sts:GetCallerIdentity",
+      "Resource": "*"
+    },
+    {
+      "Sid": "DiscoverS3",
+      "Effect": "Allow",
+      "Action": [
+        "s3:ListAllMyBuckets",
+        "s3:GetBucketLocation"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "ReadSelectedS3",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetBucketTagging",
+        "s3:GetBucketVersioning",
+        "s3:GetBucketCORS",
+        "s3:GetLifecycleConfiguration",
+        "s3:GetEncryptionConfiguration",
+        "s3:GetBucketPolicy",
+        "s3:GetBucketWebsite",
+        "s3:GetBucketPublicAccessBlock",
+        "s3:GetObjectLockConfiguration",
+        "s3:GetBucketNotification",
+        "s3:GetReplicationConfiguration",
+        "s3:GetBucketLogging",
+        "s3:ListBucket",
+        "s3:GetObject",
+        "s3:GetObjectTagging"
+      ],
+      "Resource": [
+        "arn:aws:s3:::BUCKET",
+        "arn:aws:s3:::BUCKET/*"
+      ]
+    },
+    {
+      "Sid": "DiscoverDynamoDB",
+      "Effect": "Allow",
+      "Action": "dynamodb:ListTables",
+      "Resource": "*"
+    },
+    {
+      "Sid": "ReadSelectedDynamoDB",
+      "Effect": "Allow",
+      "Action": [
+        "dynamodb:DescribeTable",
+        "dynamodb:DescribeTimeToLive",
+        "dynamodb:ListTagsOfResource",
+        "dynamodb:Scan"
+      ],
+      "Resource": "arn:aws:dynamodb:REGION:ACCOUNT_ID:table/TABLE"
+    }
+  ]
+}
+```
+
+Structure-only projects can omit `s3:GetObject`, `s3:GetObjectTagging`, and
+`dynamodb:Scan`. An optional configuration permission denied for one resource
+is reported as a finding instead of hiding that resource.
+
