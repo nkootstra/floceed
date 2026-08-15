@@ -31,7 +31,17 @@ type Backend interface {
 	SaveAndPull(context.Context, ProjectRequest) (model.Manifest, error)
 }
 
-type ApplicationBackend struct{ App *app.Application }
+// application is satisfied by *app.Application; it exists so SaveAndPull's
+// write path is testable without AWS.
+type application interface {
+	Identity(context.Context, string, string) (awsconfig.Identity, error)
+	Scan(context.Context, app.ScanRequest) (app.ScanResult, error)
+	Plan(context.Context, config.Project, string, string) (app.Plan, error)
+	Pull(context.Context, config.Project, string, string, string) (model.Manifest, error)
+}
+
+// ApplicationBackend adapts *app.Application to the TUI Backend interface.
+type ApplicationBackend struct{ App application }
 
 func (b ApplicationBackend) Profiles(context.Context) ([]Profile, error) {
 	names, err := awsconfig.AvailableProfiles()
@@ -79,20 +89,29 @@ func (b ApplicationBackend) SaveAndPull(ctx context.Context, req ProjectRequest)
 	}
 	tmpName := tmp.Name()
 	defer os.Remove(tmpName)
-	if err := tmp.Chmod(0600); err == nil {
-		_, err = tmp.Write(data)
+	writeErr := writeAndSync(tmp, data)
+	closeErr := tmp.Close()
+	if writeErr != nil {
+		return model.Manifest{}, writeErr
 	}
-	if err == nil {
-		err = tmp.Sync()
-	}
-	if closeErr := tmp.Close(); err == nil {
-		err = closeErr
-	}
-	if err != nil {
-		return model.Manifest{}, err
+	if closeErr != nil {
+		return model.Manifest{}, closeErr
 	}
 	if err := os.Rename(tmpName, abs); err != nil {
 		return model.Manifest{}, err
 	}
 	return b.App.Pull(ctx, req.Project, dir, req.Project.Source.Profile, req.Project.Source.Region)
+}
+
+// writeAndSync applies restrictive permissions, writes the payload, and
+// fsyncs it. It returns the first failure so a truncated project file is
+// never renamed into place.
+func writeAndSync(f *os.File, data []byte) error {
+	if err := f.Chmod(0600); err != nil {
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		return err
+	}
+	return f.Sync()
 }

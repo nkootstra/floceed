@@ -49,7 +49,11 @@ func main() {
 			return tui.Run(ctx, in, out, backend, tui.Options{NoColor: noColor})
 		},
 	})
-	os.Exit(execute(ctx, cmd, os.Stderr))
+	// os.Exit does not run deferred functions, so deregister the signal
+	// handler explicitly before exiting.
+	code := execute(ctx, cmd, os.Stderr)
+	stop()
+	os.Exit(code)
 }
 
 func execute(ctx context.Context, cmd *cobra.Command, stderr io.Writer) int {

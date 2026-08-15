@@ -26,6 +26,17 @@ func TestProfilesReadsOnlyProfileSections(t *testing.T) {
 	}
 }
 
+func TestProfilesMissingFilesReturnsEmpty(t *testing.T) {
+	d := t.TempDir()
+	got, err := Profiles(filepath.Join(d, "missing-config"), filepath.Join(d, "missing-credentials"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("got %v, want empty", got)
+	}
+}
+
 func TestClassifyAccessDenied(t *testing.T) {
 	err := &smithy.GenericAPIError{Code: "AccessDeniedException", Message: "no"}
 	var source *SourceError

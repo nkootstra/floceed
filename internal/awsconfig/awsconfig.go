@@ -86,28 +86,7 @@ func Profiles(configFile, credentialsFile string) ([]string, error) {
 		if err != nil {
 			return nil, fmt.Errorf("read AWS profile names: %w", err)
 		}
-		s := bufio.NewScanner(file)
-		for s.Scan() {
-			line := strings.TrimSpace(s.Text())
-			if len(line) < 3 || line[0] != '[' || line[len(line)-1] != ']' {
-				continue
-			}
-			name := strings.TrimSpace(line[1 : len(line)-1])
-			if f.config {
-				if name == "default" {
-				} else if strings.HasPrefix(name, "profile ") {
-					name = strings.TrimSpace(strings.TrimPrefix(name, "profile "))
-				} else {
-					continue
-				}
-			}
-			if name != "" {
-				seen[name] = struct{}{}
-			}
-		}
-		err = s.Err()
-		file.Close()
-		if err != nil {
+		if err := collectProfileNames(file, f.config, seen); err != nil {
 			return nil, fmt.Errorf("read AWS profile names: %w", err)
 		}
 	}
@@ -117,6 +96,31 @@ func Profiles(configFile, credentialsFile string) ([]string, error) {
 	}
 	sort.Strings(out)
 	return out, nil
+}
+
+func collectProfileNames(file *os.File, configFile bool, seen map[string]struct{}) error {
+	defer file.Close()
+	s := bufio.NewScanner(file)
+	for s.Scan() {
+		line := strings.TrimSpace(s.Text())
+		if len(line) < 3 || line[0] != '[' || line[len(line)-1] != ']' {
+			continue
+		}
+		name := strings.TrimSpace(line[1 : len(line)-1])
+		// In the config file only `default` and `profile NAME` sections name
+		// profiles; sections such as `sso-session NAME` are not profiles.
+		if configFile && name != "default" {
+			if strings.HasPrefix(name, "profile ") {
+				name = strings.TrimSpace(strings.TrimPrefix(name, "profile "))
+			} else {
+				continue
+			}
+		}
+		if name != "" {
+			seen[name] = struct{}{}
+		}
+	}
+	return s.Err()
 }
 
 func DefaultProfilePaths() (string, string) {
