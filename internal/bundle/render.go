@@ -41,7 +41,7 @@ func Render(ctx context.Context, target string, project config.Project, manifest
 		if validate == nil {
 			validate = ValidateCompose
 		}
-		return validate(ctx, filepath.Join(stage, "compose.generated.yaml"))
+		return validate(ctx, filepath.Join(stage, ComposeFile))
 	})
 }
 
@@ -63,7 +63,7 @@ func renderStage(stage string, project config.Project, manifest model.Manifest, 
 		data []byte
 		mode os.FileMode
 	}{manifestJSON, 0o600}
-	files["compose.generated.yaml"] = struct {
+	files[ComposeFile] = struct {
 		data []byte
 		mode os.FileMode
 	}{composeYAML, 0o600}

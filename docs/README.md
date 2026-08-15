@@ -66,6 +66,22 @@ starts containers. `pull` captures and atomically installs a new bundle.
 wrapper around the generated Compose project and waits for Floci's
 `/_floci/init` ready state.
 
+### JSON output envelope
+
+`--output json` writes exactly one envelope per invocation:
+
+```json
+{"schema_version":1,"command":"scan","status":"success","data":{}}
+```
+
+`status` is `success`, `success_with_findings`, or `error`. On failure the
+envelope also carries an `error` object with a stable `code`, a human
+`message`, and an optional `remediation`, and the process exits with a code
+specific to the failure category: usage 2, source 3, partial 4, plan 5,
+filesystem 6, local 7, unexpected 1, cancellation 130. Failures still deliver
+the successful part of the command's payload in `data`; `doctor` attaches its
+check results so consumers can see exactly which prerequisite failed.
+
 ## Safety defaults
 
 - Imports are structure-only unless fixture data is explicitly enabled.
@@ -126,6 +142,10 @@ arbitrary strings that look like ARNs.
 - Increase `target.hook_timeout_seconds` for larger bounded fixture imports.
 - A checksum or manifest-schema error means the bundle/runtime pair is not
   trustworthy; run `floceed pull` again instead of editing generated files.
+- `floceed up` refuses to start when the generated bundle is missing or
+  `compose.generated.yaml` is not a regular file (`BUNDLE_MISSING` /
+  `BUNDLE_INVALID`); run `floceed render` (local manifest) or `floceed pull`
+  (AWS) to install the bundle.
 - If persistent local state conflicts with immutable captured structure, choose
   a fresh persistence volume or resolve the local conflict explicitly.
 

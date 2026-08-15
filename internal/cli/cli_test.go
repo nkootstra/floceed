@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -34,6 +35,7 @@ type fakeService struct {
 	doctored  bool
 	started   bool
 	wait      time.Duration
+	doctor    app.DoctorResult
 	doctorErr error
 }
 
@@ -55,11 +57,17 @@ func (f *fakeService) Render(context.Context, config.Project, string) (model.Man
 }
 func (f *fakeService) Doctor(context.Context, config.Project, string, string, string) (app.DoctorResult, error) {
 	f.doctored = true
-	return app.DoctorResult{}, f.doctorErr
+	return f.doctor, f.doctorErr
 }
 
 func TestDoctorJSONFailureDoesNotEmitSuccessEnvelope(t *testing.T) {
-	fake := &fakeService{doctorErr: &app.Error{Kind: app.ErrorLocal, Code: "DOCKER_UNAVAILABLE", Message: "Docker is unavailable"}}
+	fake := &fakeService{
+		doctor: app.DoctorResult{Checks: []app.Check{
+			{Name: "project", OK: true, Message: "configuration is valid"},
+			{Name: "docker", OK: false, Message: "Docker is unavailable"},
+		}},
+		doctorErr: &app.Error{Kind: app.ErrorLocal, Code: "DOCTOR_FAILED", Message: "one or more prerequisite checks failed"},
+	}
 	var out bytes.Buffer
 	cmd := New(Options{Stdout: &out, Stderr: &bytes.Buffer{}, App: fake})
 	cmd.SetArgs([]string{"doctor", "--project", writeProject(t), "--output", "json"})
@@ -70,6 +78,53 @@ func TestDoctorJSONFailureDoesNotEmitSuccessEnvelope(t *testing.T) {
 	}
 	if out.Len() != 0 {
 		t.Fatalf("doctor emitted output before returning its error: %s", out.String())
+	}
+	written, writeErr := WriteInvocationError(cmd, err)
+	if !written || writeErr != nil {
+		t.Fatalf("WriteInvocationError() = (%t, %v)", written, writeErr)
+	}
+	var envelope Envelope
+	if err := json.Unmarshal(out.Bytes(), &envelope); err != nil {
+		t.Fatalf("decode envelope: %v", err)
+	}
+	result, ok := envelope.Data.(map[string]any)
+	if !ok {
+		t.Fatalf("data = %#v, want doctor result", envelope.Data)
+	}
+	checks, ok := result["checks"].([]any)
+	if !ok || len(checks) != 2 {
+		t.Fatalf("checks = %#v, want successful and failed checks", result["checks"])
+	}
+	wantChecks := []map[string]any{
+		{"name": "project", "ok": true, "message": "configuration is valid"},
+		{"name": "docker", "ok": false, "message": "Docker is unavailable"},
+	}
+	for i, want := range wantChecks {
+		got, ok := checks[i].(map[string]any)
+		if !ok || !reflect.DeepEqual(got, want) {
+			t.Fatalf("check %d = %#v, want %#v", i, checks[i], want)
+		}
+	}
+	if envelope.Status != StatusError || envelope.Error == nil || envelope.Error.Code != "DOCTOR_FAILED" {
+		t.Fatalf("unexpected envelope: %#v", envelope)
+	}
+}
+
+func TestDoctorTextFailurePrintsChecksBeforeReturningError(t *testing.T) {
+	fake := &fakeService{
+		doctor:    app.DoctorResult{Checks: []app.Check{{Name: "aws", OK: false, Message: "credentials unavailable"}}},
+		doctorErr: &app.Error{Kind: app.ErrorLocal, Code: "DOCTOR_FAILED", Message: "one or more prerequisite checks failed"},
+	}
+	var out bytes.Buffer
+	cmd := New(Options{Stdout: &out, Stderr: &bytes.Buffer{}, App: fake})
+	cmd.SetArgs([]string{"doctor", "--project", writeProject(t)})
+
+	err := cmd.ExecuteContext(context.Background())
+	if err == nil || ExitCode(err) != 7 {
+		t.Fatalf("got %v", err)
+	}
+	if got := out.String(); !strings.Contains(got, `"name": "aws"`) || !strings.Contains(got, `"ok": false`) {
+		t.Fatalf("doctor output omitted checks: %s", got)
 	}
 }
 func (f *fakeService) Up(_ context.Context, _ config.Project, _ string, wait time.Duration) error {

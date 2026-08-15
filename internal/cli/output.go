@@ -27,6 +27,7 @@ type Envelope struct {
 	Findings      any          `json:"findings,omitempty"`
 	Error         *ErrorDetail `json:"error,omitempty"`
 }
+
 type ErrorDetail struct {
 	Code        string `json:"code"`
 	Message     string `json:"message"`
@@ -59,7 +60,12 @@ type CommandError struct {
 	Code        string
 	Message     string
 	Remediation string
-	Err         error
+	// Data is the payload attached to the JSON error envelope by
+	// withData. Currently only doctor sets it, to deliver its partial
+	// check results on a failing run; every other command leaves it nil
+	// so the field is omitted from the envelope.
+	Data any
+	Err  error
 }
 
 func (e *CommandError) Error() string {
@@ -124,7 +130,11 @@ func WriteInvocationError(cmd *cobra.Command, err error) (bool, error) {
 	} else if errors.Is(err, context.Canceled) {
 		detail.Code = "CANCELED"
 	}
-	return true, WriteJSON(cmd.OutOrStdout(), Envelope{Command: command, Status: StatusError, Error: &detail})
+	var data any
+	if commandErr != nil {
+		data = commandErr.Data
+	}
+	return true, WriteJSON(cmd.OutOrStdout(), Envelope{Command: command, Status: StatusError, Data: data, Error: &detail})
 }
 
 func jsonOutputCommand(cmd *cobra.Command) (string, bool) {

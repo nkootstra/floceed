@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"runtime/debug"
 	"strings"
 	"testing"
 
 	"github.com/nkootstra/floceed/internal/cli"
+	"github.com/spf13/cobra"
 )
 
 func TestResolveVersion(t *testing.T) {
@@ -72,5 +74,27 @@ func TestExecutePreservesTextInvocationError(t *testing.T) {
 	}
 	if got := stderr.String(); !strings.Contains(got, "--region is required") {
 		t.Fatalf("unexpected stderr: %s", got)
+	}
+}
+
+func TestExecuteKeepsDoctorChecksOnStdoutAndSummaryOnStderr(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	cmd := &cobra.Command{
+		Use: "doctor",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			fmt.Fprintln(cmd.OutOrStdout(), `{"checks":[{"name":"aws","ok":false}]}`)
+			return &cli.CommandError{Kind: cli.KindLocal, Code: "DOCTOR_FAILED", Message: "one or more prerequisite checks failed"}
+		},
+	}
+	cmd.SetOut(&stdout)
+
+	if code := execute(context.Background(), cmd, &stderr); code != 7 {
+		t.Fatalf("exit code = %d, want 7", code)
+	}
+	if got := stdout.String(); !strings.Contains(got, `"name":"aws"`) {
+		t.Fatalf("stdout omitted checks: %s", got)
+	}
+	if got := stderr.String(); got != "one or more prerequisite checks failed\n" {
+		t.Fatalf("stderr = %q", got)
 	}
 }

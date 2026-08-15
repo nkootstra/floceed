@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/nkootstra/floceed/internal/bundle"
 	"github.com/nkootstra/floceed/internal/compose"
 	"github.com/nkootstra/floceed/internal/config"
 )
@@ -149,14 +151,43 @@ type initStatus struct {
 }
 
 func (a *Application) Up(ctx context.Context, p config.Project, projectDir string, wait time.Duration) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	target := filepath.Join(projectDir, p.Output.Directory)
+	composeFile := filepath.Join(target, bundle.ComposeFile)
+	// The bundle is installed atomically by render/pull, so a regular
+	// Compose entry implies the rest of the bundle exists. Gate on it
+	// before invoking Docker to fail fast with actionable remediation.
+	// These structural errors intentionally carry no wrapped cause; the
+	// message includes the offending path. Lstat (not Stat) so a symlink
+	// cannot masquerade as a rendered entry.
+	info, err := os.Lstat(composeFile)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return &Error{
+				Kind:        ErrorFilesystem,
+				Code:        "BUNDLE_MISSING",
+				Message:     fmt.Sprintf("generated Compose file not found: %s", composeFile),
+				Remediation: "Run floceed render if a valid local manifest exists; otherwise run floceed pull for this project.",
+			}
+		}
+		return filesystemError(err)
+	}
+	if !info.Mode().IsRegular() {
+		return &Error{
+			Kind:        ErrorFilesystem,
+			Code:        "BUNDLE_INVALID",
+			Message:     fmt.Sprintf("generated Compose path is not a regular file: %s", composeFile),
+			Remediation: "Run floceed render if a valid local manifest exists; otherwise run floceed pull for this project.",
+		}
+	}
 	if wait <= 0 {
 		wait = time.Duration(p.Target.HookTimeoutSeconds+30) * time.Second
 	}
 	upCtx, cancel := context.WithTimeout(ctx, wait)
 	defer cancel()
 
-	target := filepath.Join(projectDir, p.Output.Directory)
-	composeFile := filepath.Join(target, "compose.generated.yaml")
 	if output, err := a.localRuntime.Start(upCtx, target, composeFile); err != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -174,7 +205,7 @@ func (a *Application) Up(ctx context.Context, p config.Project, projectDir strin
 		return flociReadyTimeoutError()
 	}
 	url := fmt.Sprintf("http://127.0.0.1:%d/_floci/init", p.Target.Port)
-	err := a.localRuntime.WaitReady(upCtx, url, remaining)
+	err = a.localRuntime.WaitReady(upCtx, url, remaining)
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}

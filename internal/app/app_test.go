@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/nkootstra/floceed/internal/awsconfig"
+	"github.com/nkootstra/floceed/internal/bundle"
 	"github.com/nkootstra/floceed/internal/catalog"
 	"github.com/nkootstra/floceed/internal/compose"
 	"github.com/nkootstra/floceed/internal/config"
@@ -271,6 +272,19 @@ func requireAppError(t *testing.T, err error, kind ErrorKind, code string) *Erro
 	return appErr
 }
 
+func projectWithComposeFile(t *testing.T, p config.Project) string {
+	t.Helper()
+	projectDir := t.TempDir()
+	target := filepath.Join(projectDir, p.Output.Directory)
+	if err := os.MkdirAll(target, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(target, bundle.ComposeFile), []byte("services: {}\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	return projectDir
+}
+
 func TestPullWritesDeterministicBundleWithoutDataArtifacts(t *testing.T) {
 	projectDir := t.TempDir()
 	p := testProject()
@@ -305,7 +319,7 @@ func TestPullWritesDeterministicBundleWithoutDataArtifacts(t *testing.T) {
 		t.Fatalf("manifest snapshots = %#v", manifest.Snapshots)
 	}
 	target := filepath.Join(projectDir, p.Output.Directory)
-	if filepath.Base(validatedCompose) != "compose.generated.yaml" || filepath.Dir(filepath.Dir(validatedCompose)) != projectDir {
+	if filepath.Base(validatedCompose) != bundle.ComposeFile || filepath.Dir(filepath.Dir(validatedCompose)) != projectDir {
 		t.Fatalf("validated compose = %q", validatedCompose)
 	}
 	manifestJSON, err := os.ReadFile(filepath.Join(target, "bundle", "manifest.json"))
@@ -485,6 +499,7 @@ func readyResponse(body string) *http.Response {
 
 func TestUpClassifiesComposeFailure(t *testing.T) {
 	p := testProject()
+	projectDir := projectWithComposeFile(t, p)
 	service := New("test")
 	service.localRuntime = &fakeLocalRuntime{start: func(_ context.Context, target, composeFile string) ([]byte, error) {
 		if filepath.Dir(composeFile) != target {
@@ -492,15 +507,83 @@ func TestUpClassifiesComposeFailure(t *testing.T) {
 		}
 		return []byte("daemon unavailable"), errors.New("exit status 1")
 	}}
-	err := service.Up(context.Background(), p, t.TempDir(), time.Second)
+	err := service.Up(context.Background(), p, projectDir, time.Second)
 	appErr := requireAppError(t, err, ErrorLocal, "COMPOSE_UP_FAILED")
 	if !strings.Contains(appErr.Message, "daemon unavailable") {
 		t.Fatalf("error message = %q", appErr.Message)
 	}
 }
 
+func TestUpRejectsMissingGeneratedComposeFileBeforeDocker(t *testing.T) {
+	p := testProject()
+	service := New("test")
+	service.localRuntime = &fakeLocalRuntime{start: func(context.Context, string, string) ([]byte, error) {
+		t.Fatal("Start() called without a generated Compose file")
+		return nil, nil
+	}}
+
+	err := service.Up(context.Background(), p, t.TempDir(), time.Second)
+	appErr := requireAppError(t, err, ErrorFilesystem, "BUNDLE_MISSING")
+	if !strings.Contains(appErr.Message, bundle.ComposeFile) ||
+		!strings.Contains(appErr.Remediation, "floceed render") ||
+		!strings.Contains(appErr.Remediation, "floceed pull") {
+		t.Fatalf("error = %#v, want missing path and remediation", appErr)
+	}
+}
+
+func TestUpPreservesCancellationBeforeCheckingBundle(t *testing.T) {
+	p := testProject()
+	service := New("test")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if err := service.Up(ctx, p, t.TempDir(), time.Second); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Up() error = %v, want context canceled", err)
+	}
+}
+
+func TestUpRejectsNonRegularGeneratedComposeFileBeforeDocker(t *testing.T) {
+	p := testProject()
+	projectDir := t.TempDir()
+	composePath := filepath.Join(projectDir, p.Output.Directory, bundle.ComposeFile)
+	if err := os.MkdirAll(composePath, 0700); err != nil {
+		t.Fatal(err)
+	}
+	service := New("test")
+	service.localRuntime = &fakeLocalRuntime{start: func(context.Context, string, string) ([]byte, error) {
+		t.Fatal("Start() called with a non-regular Compose path")
+		return nil, nil
+	}}
+
+	err := service.Up(context.Background(), p, projectDir, time.Second)
+	appErr := requireAppError(t, err, ErrorFilesystem, "BUNDLE_INVALID")
+	if !strings.Contains(appErr.Message, "not a regular file") {
+		t.Fatalf("error message = %q", appErr.Message)
+	}
+}
+
+func TestUpClassifiesStatFailure(t *testing.T) {
+	p := testProject()
+	projectDir := t.TempDir()
+	// Make the output directory path a regular file so Lstat fails with
+	// ENOTDIR, exercising the generic filesystem error branch.
+	target := filepath.Join(projectDir, p.Output.Directory)
+	if err := os.WriteFile(target, []byte("not a directory"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	service := New("test")
+	service.localRuntime = &fakeLocalRuntime{start: func(context.Context, string, string) ([]byte, error) {
+		t.Fatal("Start() called without a stattable Compose path")
+		return nil, nil
+	}}
+
+	err := service.Up(context.Background(), p, projectDir, time.Second)
+	requireAppError(t, err, ErrorFilesystem, "BUNDLE_FAILED")
+}
+
 func TestUpBoundsComposeStartupByWaitTimeout(t *testing.T) {
 	p := testProject()
+	projectDir := projectWithComposeFile(t, p)
 	service := New("test")
 	startCanceled := make(chan struct{})
 	service.localRuntime = &fakeLocalRuntime{
@@ -515,7 +598,7 @@ func TestUpBoundsComposeStartupByWaitTimeout(t *testing.T) {
 		},
 	}
 
-	err := service.Up(context.Background(), p, t.TempDir(), 10*time.Millisecond)
+	err := service.Up(context.Background(), p, projectDir, 10*time.Millisecond)
 	requireAppError(t, err, ErrorLocal, "FLOCI_READY_TIMEOUT")
 	select {
 	case <-startCanceled:
@@ -526,6 +609,7 @@ func TestUpBoundsComposeStartupByWaitTimeout(t *testing.T) {
 
 func TestUpPreservesContextCancellationWhileWaiting(t *testing.T) {
 	p := testProject()
+	projectDir := projectWithComposeFile(t, p)
 	service := New("test")
 	service.localRuntime = &fakeLocalRuntime{
 		start: func(context.Context, string, string) ([]byte, error) { return nil, nil },
@@ -536,13 +620,14 @@ func TestUpPreservesContextCancellationWhileWaiting(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if err := service.Up(ctx, p, t.TempDir(), time.Second); !errors.Is(err, context.Canceled) {
+	if err := service.Up(ctx, p, projectDir, time.Second); !errors.Is(err, context.Canceled) {
 		t.Fatalf("Up() error = %v, want context canceled", err)
 	}
 }
 
 func TestUpReturnsReadyWithoutCallingRealDockerOrHTTP(t *testing.T) {
 	p := testProject()
+	projectDir := projectWithComposeFile(t, p)
 	service := New("test")
 	service.localRuntime = &fakeLocalRuntime{
 		start: func(context.Context, string, string) ([]byte, error) { return nil, nil },
@@ -553,13 +638,14 @@ func TestUpReturnsReadyWithoutCallingRealDockerOrHTTP(t *testing.T) {
 			return nil
 		},
 	}
-	if err := service.Up(context.Background(), p, t.TempDir(), time.Second); err != nil {
+	if err := service.Up(context.Background(), p, projectDir, time.Second); err != nil {
 		t.Fatal(err)
 	}
 }
 
 func TestUpClassifiesFailedReadyHook(t *testing.T) {
 	p := testProject()
+	projectDir := projectWithComposeFile(t, p)
 	service := New("test")
 	runtime := newDockerLocalRuntime()
 	runtime.pollInterval = time.Nanosecond
@@ -570,7 +656,7 @@ func TestUpClassifiesFailedReadyHook(t *testing.T) {
 		start:     func(context.Context, string, string) ([]byte, error) { return nil, nil },
 		waitReady: runtime.WaitReady,
 	}
-	err := service.Up(context.Background(), p, t.TempDir(), time.Second)
+	err := service.Up(context.Background(), p, projectDir, time.Second)
 	appErr := requireAppError(t, err, ErrorLocal, "FLOCI_INIT_FAILED")
 	if !strings.Contains(appErr.Message, "seed.py") {
 		t.Fatalf("error message = %q", appErr.Message)
@@ -579,6 +665,7 @@ func TestUpClassifiesFailedReadyHook(t *testing.T) {
 
 func TestUpTimesOutWithoutReadiness(t *testing.T) {
 	p := testProject()
+	projectDir := projectWithComposeFile(t, p)
 	service := New("test")
 	service.localRuntime = &fakeLocalRuntime{
 		start: func(context.Context, string, string) ([]byte, error) { return nil, nil },
@@ -586,6 +673,6 @@ func TestUpTimesOutWithoutReadiness(t *testing.T) {
 			return &Error{Kind: ErrorLocal, Code: "FLOCI_READY_TIMEOUT", Message: "Floci initialization did not complete before the timeout"}
 		},
 	}
-	err := service.Up(context.Background(), p, t.TempDir(), time.Nanosecond)
+	err := service.Up(context.Background(), p, projectDir, time.Nanosecond)
 	requireAppError(t, err, ErrorLocal, "FLOCI_READY_TIMEOUT")
 }

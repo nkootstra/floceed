@@ -15,6 +15,11 @@ import (
 	"strings"
 )
 
+// ComposeFile is the generated Compose project installed into the bundle
+// output directory. It is the entry floceed up gates on and floceed render
+// produces, so it lives here rather than as a literal in each caller.
+const ComposeFile = "compose.generated.yaml"
+
 type Checksum struct {
 	Path   string `json:"path"`
 	SHA256 string `json:"sha256"`

@@ -196,7 +196,19 @@ func doctorCommand(service Service) *cobra.Command {
 		}
 		result, err := service.Doctor(cmd.Context(), definition, dir, source.profile, source.region)
 		if err != nil {
-			return convert(err)
+			converted := convert(err)
+			if format == "text" {
+				// Doctor always returns partial checks with a failure; print
+				// them before returning so the summary lands on stderr while
+				// the machine-readable details stay on stdout.
+				if len(result.Checks) > 0 {
+					if emitErr := emit(cmd, "doctor", format, result, nil); emitErr != nil {
+						return fmt.Errorf("%w (write failed: %v)", converted, emitErr)
+					}
+				}
+				return converted
+			}
+			return withData(converted, result)
 		}
 		return emit(cmd, "doctor", format, result, nil)
 	}}
@@ -295,6 +307,21 @@ func convert(err error) error {
 		return &CommandError{Kind: kind, Code: e.Code, Message: e.Message, Remediation: e.Remediation, Err: err}
 	}
 	return err
+}
+
+// withData attaches a payload to a *CommandError so WriteInvocationError
+// emits structured data alongside the error detail. Only doctor uses it, to
+// deliver its partial check results in the JSON error envelope; it passes
+// errors through unchanged when they are not CommandErrors (for example,
+// context cancellation).
+func withData(err error, data any) error {
+	var commandErr *CommandError
+	if !errors.As(err, &commandErr) {
+		return err
+	}
+	copy := *commandErr
+	copy.Data = data
+	return &copy
 }
 
 type fdHolder interface{ Fd() uintptr }

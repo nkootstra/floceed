@@ -31,7 +31,7 @@ func TestRenderIsDeterministicAndComplete(t *testing.T) {
 	if string(first) != string(second) {
 		t.Fatal("checksums changed")
 	}
-	for _, name := range []string{"compose.generated.yaml", "bundle/manifest.json", "runtime/replay.py", "init/ready.d/10-base-resources.py", "init/ready.d/30-resource-links.py", "init/ready.d/60-seed-data.py", ".gitignore"} {
+	for _, name := range []string{ComposeFile, "bundle/manifest.json", "runtime/replay.py", "init/ready.d/10-base-resources.py", "init/ready.d/30-resource-links.py", "init/ready.d/60-seed-data.py", ".gitignore"} {
 		if _, err := os.Stat(filepath.Join(target, filepath.FromSlash(name))); err != nil {
 			t.Errorf("missing %s: %v", name, err)
 		}
