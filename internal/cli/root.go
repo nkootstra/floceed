@@ -138,6 +138,33 @@ func fixtureCommand() *cobra.Command {
 	admit.Flags().StringVar(&policyPath, "policy", "", "admission policy file")
 	admit.Flags().StringVar(&output, "output", "text", "output format: text or json")
 	root.AddCommand(admit)
+	var archive, target string
+	pack := &cobra.Command{Use: "pack", Short: "Pack a verified fixture into a deterministic archive", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, args []string) error {
+		if strings.TrimSpace(input) == "" || strings.TrimSpace(archive) == "" {
+			return usage("FIXTURE_PATH_REQUIRED", "--input and --archive are required")
+		}
+		if err := bundle.PackFixture(cmd.Context(), input, archive); err != nil {
+			return &CommandError{Kind: KindFilesystem, Code: "FIXTURE_PACK_FAILED", Message: err.Error()}
+		}
+		return emit(cmd, "fixture pack", output, map[string]any{"archive": archive}, nil)
+	}}
+	pack.Flags().StringVar(&input, "input", "", "verified fixture directory")
+	pack.Flags().StringVar(&archive, "archive", "", "output archive path")
+	pack.Flags().StringVar(&output, "output", "text", "output format: text or json")
+	root.AddCommand(pack)
+	unpack := &cobra.Command{Use: "unpack", Short: "Safely unpack a fixture archive", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, args []string) error {
+		if strings.TrimSpace(archive) == "" || strings.TrimSpace(target) == "" {
+			return usage("FIXTURE_PATH_REQUIRED", "--archive and --target are required")
+		}
+		if err := bundle.UnpackFixture(cmd.Context(), archive, target); err != nil {
+			return &CommandError{Kind: KindFilesystem, Code: "FIXTURE_UNPACK_FAILED", Message: err.Error()}
+		}
+		return emit(cmd, "fixture unpack", output, map[string]any{"target": target}, nil)
+	}}
+	unpack.Flags().StringVar(&archive, "archive", "", "input archive path")
+	unpack.Flags().StringVar(&target, "target", "", "output fixture directory")
+	unpack.Flags().StringVar(&output, "output", "text", "output format: text or json")
+	root.AddCommand(unpack)
 	return root
 }
 
