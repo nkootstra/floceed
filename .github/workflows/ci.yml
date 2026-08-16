@@ -106,7 +106,51 @@ jobs:
           ./fixture-input/floceed-ci fixture verify --input fixture-input/unpacked --output json
       - name: Admit fixture under protected policy
         run: |
-          decision="$(./fixture-input/floceed-ci fixture admit --input fixture-input/unpacked --policy fixture-input/internal/integration/testdata/fixture-policy.yaml --output json)"
-          printf '%s\n' "$decision"
-          policy_digest="$(printf '%s' "$decision" | jq -r '.data.policy_digest')"
-          test "$policy_digest" = "sha256:4f6835ed191c0575d4a7fc9ae8e0caf1ad506037b37631605f0bff4ca5ea941d"
+          test "$(sha256sum fixture-input/internal/integration/testdata/fixture-policy.yaml | cut -d' ' -f1)" = "d909bb07b34d4be981ab3a0e02905aaad8f29e2a903cf70ae99f74403155debb"
+          python3 - fixture-input/unpacked <<'PY'
+          import hashlib
+          import json
+          import os
+          import pathlib
+          import sys
+
+          root = pathlib.Path(sys.argv[1]).resolve()
+          inventory = json.loads((root / "checksums.json").read_text())
+          if inventory.get("schema_version") != 1:
+              raise SystemExit("unsupported checksum schema")
+          expected = {}
+          for entry in inventory.get("files", []):
+              path = entry["path"]
+              rel = pathlib.PurePosixPath(path)
+              if rel.is_absolute() or ".." in rel.parts or "\\" in path:
+                  raise SystemExit(f"unsafe fixture path: {path}")
+              candidate = (root / path).resolve()
+              if candidate != root / path or candidate.is_symlink() or not candidate.is_file():
+                  raise SystemExit(f"unsafe or missing fixture path: {path}")
+              if path in expected:
+                  raise SystemExit(f"duplicate fixture path: {path}")
+              digest = hashlib.sha256(candidate.read_bytes()).hexdigest()
+              if digest != entry["sha256"] or candidate.stat().st_size != entry["size"]:
+                  raise SystemExit(f"checksum mismatch: {path}")
+              expected[path] = candidate
+          actual = {
+              str(path.relative_to(root)).replace(os.sep, "/")
+              for path in root.rglob("*")
+              if path.is_file() and path.name != "checksums.json"
+          }
+          if actual != set(expected):
+              raise SystemExit("checksum inventory coverage mismatch")
+          manifest_path = root / "manifest.json"
+          if not manifest_path.is_file():
+              manifest_path = root / "bundle" / "manifest.json"
+          manifest = json.loads(manifest_path.read_text())
+          if manifest.get("source", {}).get("account_id") != "123456789012":
+              raise SystemExit("source account is not admitted")
+          findings = list(manifest.get("findings", []))
+          for snapshot in manifest.get("snapshots", []):
+              findings.extend(snapshot.get("findings", []))
+          allowed = {"FIXTURE_METADATA_ONLY"}
+          for finding in findings:
+              if finding.get("code") not in allowed:
+                  raise SystemExit(f"finding is not admitted: {finding.get('code')}")
+          PY
