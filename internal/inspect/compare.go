@@ -1,6 +1,9 @@
 package inspect
 
-import "sort"
+import (
+	"reflect"
+	"sort"
+)
 
 // Compare returns a deterministic, disclosure-safe semantic receipt. It uses
 // only the canonical projection's identities and component digests.
@@ -9,6 +12,7 @@ func Compare(baseline, current Projection) Receipt {
 		SchemaVersion: ReceiptSchemaVersion,
 		Baseline:      baseline.Digest,
 		Current:       current.Digest,
+		Categories:    changedBundleCategories(baseline, current),
 	}
 	base := indexResources(baseline.Resources)
 	next := indexResources(current.Resources)
@@ -51,6 +55,26 @@ func Compare(baseline, current Projection) Receipt {
 		receipt.Resources = append(receipt.Resources, change)
 	}
 	return receipt
+}
+
+func changedBundleCategories(before, after Projection) []ChangeCategory {
+	var categories []ChangeCategory
+	if !reflect.DeepEqual(before.Governance, after.Governance) {
+		categories = append(categories, CategoryGovernance)
+	}
+	if !reflect.DeepEqual(before.Operations, after.Operations) {
+		categories = append(categories, CategoryOperations)
+	}
+	if !reflect.DeepEqual(before.Findings, after.Findings) {
+		categories = append(categories, CategoryFindings)
+	}
+	if before.Source != after.Source {
+		categories = append(categories, CategorySource)
+	}
+	if before.Target != after.Target {
+		categories = append(categories, CategoryTarget)
+	}
+	return categories
 }
 
 func indexResources(resources []ProjectedResource) map[string]ProjectedResource {

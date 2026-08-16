@@ -51,7 +51,10 @@ func (a *Application) InspectWithOptions(ctx context.Context, project config.Pro
 	}
 	if options.Runtime {
 		url := fmt.Sprintf("http://127.0.0.1:%d/_floci/init", project.Target.Port)
-		result.Runtime = a.localRuntime.InspectStatus(ctx, url, 2*time.Second)
+		result.Runtime, err = a.localRuntime.InspectStatus(ctx, url, 2*time.Second)
+		if err != nil {
+			return inspection.Inspection{}, inspectError(err)
+		}
 	}
 	return result, nil
 }
@@ -180,7 +183,7 @@ func inspectError(err error) error {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return &Error{Kind: ErrorFilesystem, Code: "INSPECTION_CANCELED", Message: err.Error(), Remediation: "Retry inspection when the operation can complete.", Err: err}
 	}
-	if errors.Is(err, os.ErrNotExist) {
+	if errors.Is(err, bundle.ErrGeneratedRootMissing) {
 		return &Error{Kind: ErrorFilesystem, Code: "BUNDLE_NOT_FOUND", Message: err.Error(), Remediation: "Run floceed pull to generate the bundle, then retry inspection.", Err: err}
 	}
 	if errors.Is(err, bundle.ErrGeneratedSchema) || errors.Is(err, model.ErrSchema) {

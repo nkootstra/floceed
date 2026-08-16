@@ -33,7 +33,7 @@ type localRuntime interface {
 	DoctorChecks(context.Context) []Check
 	Start(context.Context, string, string) ([]byte, error)
 	WaitReady(context.Context, string, time.Duration) error
-	InspectStatus(context.Context, string, time.Duration) inspection.Runtime
+	InspectStatus(context.Context, string, time.Duration) (inspection.Runtime, error)
 }
 type progressRuntime interface {
 	WatchProgress(context.Context, string, string, time.Time, func(model.ProgressEvent)) func()
@@ -324,24 +324,33 @@ func (r *dockerLocalRuntime) WaitReady(ctx context.Context, url string, wait tim
 // InspectStatus performs one bounded, read-only readiness query. Runtime
 // failures are data, not artifact failures, so callers can retain a valid
 // offline inspection result.
-func (r *dockerLocalRuntime) InspectStatus(ctx context.Context, url string, wait time.Duration) inspection.Runtime {
+func (r *dockerLocalRuntime) InspectStatus(ctx context.Context, url string, wait time.Duration) (inspection.Runtime, error) {
+	if err := ctx.Err(); err != nil {
+		return inspection.Runtime{}, err
+	}
 	probeCtx, cancel := context.WithTimeout(ctx, wait)
 	defer cancel()
 	req, err := http.NewRequestWithContext(probeCtx, http.MethodGet, url, nil)
 	if err != nil {
-		return unavailableRuntime(err)
+		return unavailableRuntime(err), nil
 	}
 	response, err := r.httpClient.Do(req)
 	if err != nil {
-		return unavailableRuntime(err)
+		if parentErr := ctx.Err(); parentErr != nil {
+			return inspection.Runtime{}, parentErr
+		}
+		return unavailableRuntime(err), nil
 	}
 	defer response.Body.Close()
 	if response.StatusCode/100 != 2 {
-		return unavailableRuntime(fmt.Errorf("runtime returned HTTP %d", response.StatusCode))
+		return unavailableRuntime(fmt.Errorf("runtime returned HTTP %d", response.StatusCode)), nil
 	}
 	var status initStatus
 	if err := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&status); err != nil {
-		return unavailableRuntime(fmt.Errorf("invalid runtime response"))
+		if parentErr := ctx.Err(); parentErr != nil {
+			return inspection.Runtime{}, parentErr
+		}
+		return unavailableRuntime(fmt.Errorf("invalid runtime response")), nil
 	}
 	failed := make([]string, 0)
 	for _, script := range status.Scripts.Ready {
@@ -351,9 +360,9 @@ func (r *dockerLocalRuntime) InspectStatus(ctx context.Context, url string, wait
 	}
 	sort.Strings(failed)
 	if status.Completed.Ready && len(failed) == 0 {
-		return inspection.Runtime{State: inspection.RuntimeReady}
+		return inspection.Runtime{State: inspection.RuntimeReady}, nil
 	}
-	return inspection.Runtime{State: inspection.RuntimeNotReady, FailedScripts: failed}
+	return inspection.Runtime{State: inspection.RuntimeNotReady, FailedScripts: failed}, nil
 }
 
 func unavailableRuntime(err error) inspection.Runtime {

@@ -274,6 +274,14 @@ func (m Manifest) Validate() error {
 	if m.Source.AccountID != "" && !accountPattern.MatchString(m.Source.AccountID) {
 		return fmt.Errorf("source account ID must be 12 digits: %w", ErrValidation)
 	}
+	selected := make(map[struct{ service, resourceType, id string }]struct{}, len(m.Selected))
+	for index, resource := range m.Selected {
+		identity := struct{ service, resourceType, id string }{resource.Service, resource.Type, resource.ID}
+		if _, exists := selected[identity]; exists {
+			return fmt.Errorf("selected resource %d duplicates an earlier identity: %w", index, ErrValidation)
+		}
+		selected[identity] = struct{}{}
+	}
 	for index := range m.Snapshots {
 		if err := validateSnapshot(m.Snapshots[index]); err != nil {
 			return fmt.Errorf("snapshot %d: %w", index, err)

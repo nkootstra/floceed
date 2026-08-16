@@ -61,13 +61,17 @@ func TestCompareReportsOnlyStableSemanticCategories(t *testing.T) {
 	current := Projection{Digest: "new", Source: SourceProjection{Region: "two"}, Target: TargetProjection{Image: "two"}, Resources: []ProjectedResource{{
 		Identity: id, Selected: true, StructureDigest: "s2", DatasetDigest: "d2", GovernanceDigest: "g2", OperationsDigest: "o2", FindingsDigest: "f2",
 	}}}
-	want := []ChangeCategory{CategoryStructure, CategoryDataset, CategoryGovernance, CategoryOperations, CategoryFindings, CategorySelection, CategorySource, CategoryTarget}
+	wantBundle := []ChangeCategory{CategorySource, CategoryTarget}
+	wantResource := []ChangeCategory{CategoryStructure, CategoryDataset, CategoryGovernance, CategoryOperations, CategoryFindings, CategorySelection, CategorySource, CategoryTarget}
 	got := Compare(baseline, current)
 	if len(got.Resources) != 1 || got.Resources[0].Outcome != OutcomeChanged {
 		t.Fatalf("Compare() = %#v", got)
 	}
-	if strings.Join(categories(got.Resources[0]), ",") != strings.Join(categoryStrings(want), ",") {
-		t.Fatalf("categories = %v, want %v", got.Resources[0].Categories, want)
+	if strings.Join(categoryStrings(got.Categories), ",") != strings.Join(categoryStrings(wantBundle), ",") {
+		t.Fatalf("receipt categories = %v, want %v", got.Categories, wantBundle)
+	}
+	if strings.Join(categories(got.Resources[0]), ",") != strings.Join(categoryStrings(wantResource), ",") {
+		t.Fatalf("resource categories = %v, want %v", got.Resources[0].Categories, wantResource)
 	}
 	payload, err := json.Marshal(got)
 	if err != nil {
@@ -98,9 +102,37 @@ func TestCompareReportsGovernanceOperationAndFindingChangesIndependently(t *test
 			test.mutate(&after)
 			got := Compare(Projection{Digest: "old", Resources: []ProjectedResource{before}}, Projection{Digest: "new", Resources: []ProjectedResource{after}})
 			if len(got.Resources) != 1 || len(got.Resources[0].Categories) != 1 || got.Resources[0].Categories[0] != test.want {
-				t.Fatalf("Compare() = %#v, want only %q", got, test.want)
+				t.Fatalf("Compare() = %#v, want resource category %q", got, test.want)
 			}
 		})
+	}
+}
+
+func TestCompareExplainsBundleLevelSemanticChangesWithoutResources(t *testing.T) {
+	baseline := Projection{
+		Digest:     "old",
+		Source:     SourceProjection{Region: "eu-west-1"},
+		Target:     TargetProjection{Image: "floci:old"},
+		Governance: &GovernanceSummary{Profile: "safe", PolicyIdentity: "policy-old"},
+		Operations: []ProjectedOperation{{ID: "old-operation"}},
+		Findings:   []Finding{{Code: "OLD_FINDING"}},
+	}
+	current := Projection{
+		Digest:     "new",
+		Source:     SourceProjection{Region: "eu-central-1"},
+		Target:     TargetProjection{Image: "floci:new"},
+		Governance: &GovernanceSummary{Profile: "safe", PolicyIdentity: "policy-new"},
+		Operations: []ProjectedOperation{{ID: "new-operation"}},
+		Findings:   []Finding{{Code: "NEW_FINDING"}},
+	}
+
+	got := Compare(baseline, current)
+	want := []ChangeCategory{CategoryGovernance, CategoryOperations, CategoryFindings, CategorySource, CategoryTarget}
+	if strings.Join(categoryStrings(got.Categories), ",") != strings.Join(categoryStrings(want), ",") {
+		t.Fatalf("receipt categories = %v, want %v", got.Categories, want)
+	}
+	if len(got.Resources) != 0 || got.Counts != (ReceiptCounts{}) {
+		t.Fatalf("unexpected resource changes: %#v", got)
 	}
 }
 

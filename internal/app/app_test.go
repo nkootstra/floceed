@@ -183,6 +183,32 @@ type factory struct {
 	request SourceRequest
 }
 
+type adapterFactory struct{ adapter catalog.Adapter }
+
+func (f adapterFactory) Open(_ context.Context, req SourceRequest) (Source, error) {
+	r, err := catalog.New(f.adapter)
+	if err != nil {
+		return Source{}, err
+	}
+	return Source{Scope: model.SourceScope{Profile: req.Profile, Region: req.Region, AccountID: "123456789012"}, Identity: awsconfig.Identity{AccountID: "123456789012"}, Registry: r}, nil
+}
+
+type blockingCaptureAdapter struct {
+	adapter
+	started chan<- struct{}
+	release <-chan struct{}
+}
+
+func (a *blockingCaptureAdapter) Capture(ctx context.Context, scope model.SourceScope, ref model.ResourceRef, opts model.CaptureOptions) (*model.Snapshot, error) {
+	a.started <- struct{}{}
+	select {
+	case <-a.release:
+		return a.adapter.Capture(ctx, scope, ref, opts)
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
 func (f *factory) Open(_ context.Context, req SourceRequest) (Source, error) {
 	f.calls++
 	f.request = req
@@ -566,6 +592,61 @@ func TestPullReturnsChangedReceiptAfterSuccessfulReplacement(t *testing.T) {
 	}
 }
 
+func TestPullReceiptUsesBundleActuallyReplacedByConcurrentWriter(t *testing.T) {
+	projectDir := t.TempDir()
+	p := testProject()
+	newService := func(adapter catalog.Adapter) *Application {
+		service := New("test")
+		service.Factory = adapterFactory{adapter: adapter}
+		service.ComposeValidator = func(context.Context, string) error { return nil }
+		return service
+	}
+
+	if _, err := newService(&adapter{}).Pull(context.Background(), p, projectDir, "", "eu-west-1"); err != nil {
+		t.Fatal(err)
+	}
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	slow := newService(&blockingCaptureAdapter{started: started, release: release})
+	type pullOutcome struct {
+		result PullResult
+		err    error
+	}
+	done := make(chan pullOutcome, 1)
+	go func() {
+		result, err := slow.PullWithOptions(context.Background(), p, projectDir, "", "us-east-1", PullOptions{WorkDir: filepath.Join(projectDir, "slow-work")})
+		done <- pullOutcome{result: result, err: err}
+	}()
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("slow pull did not reach capture")
+	}
+
+	concurrent, err := newService(&adapter{}).PullWithOptions(context.Background(), p, projectDir, "", "ap-southeast-2", PullOptions{WorkDir: filepath.Join(projectDir, "writer-work")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	concurrentProjection, err := inspection.ProjectManifest(concurrent.Manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	outcome := <-done
+	if outcome.err != nil {
+		t.Fatal(outcome.err)
+	}
+	if outcome.result.Baseline != BaselinePresent || outcome.result.Receipt == nil {
+		t.Fatalf("slow pull result = %#v", outcome.result)
+	}
+	if outcome.result.Receipt.Baseline != concurrentProjection.Digest {
+		t.Fatalf("receipt baseline = %q, want concurrent bundle %q", outcome.result.Receipt.Baseline, concurrentProjection.Digest)
+	}
+	if outcome.result.Receipt.Baseline == outcome.result.Receipt.Current {
+		t.Fatalf("receipt did not distinguish replaced and installed bundles: %#v", outcome.result.Receipt)
+	}
+}
+
 func TestPullRenderFailurePreservesInstalledBundleAndReturnsNoResult(t *testing.T) {
 	projectDir := t.TempDir()
 	p := testProject()
@@ -709,8 +790,8 @@ func (f *fakeLocalRuntime) WaitReady(ctx context.Context, url string, wait time.
 	return f.waitReady(ctx, url, wait)
 }
 
-func (f *fakeLocalRuntime) InspectStatus(context.Context, string, time.Duration) inspection.Runtime {
-	return inspection.Runtime{State: inspection.RuntimeNotRequested}
+func (f *fakeLocalRuntime) InspectStatus(context.Context, string, time.Duration) (inspection.Runtime, error) {
+	return inspection.Runtime{State: inspection.RuntimeNotRequested}, nil
 }
 
 func TestDoctorOrchestratesAllChecksWithoutExternalCommands(t *testing.T) {

@@ -2,6 +2,7 @@ package model
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"testing"
 )
@@ -91,6 +92,23 @@ func TestManifestOlderSchemasRemainValidWithoutGovernance(t *testing.T) {
 		if err := manifest.Validate(); err != nil {
 			t.Fatalf("schema %d should remain valid: %v", version, err)
 		}
+	}
+}
+
+func TestManifestValidateRejectsDuplicateSelectedResourceIdentitiesInEverySchema(t *testing.T) {
+	for _, version := range []int{1, 2, 3} {
+		t.Run(fmt.Sprintf("schema-%d", version), func(t *testing.T) {
+			manifest := Manifest{
+				SchemaVersion: version,
+				Selected: []ResourceRef{
+					{Service: "s3", Type: "bucket", ID: "assets", ARN: "arn:first"},
+					{Service: "s3", Type: "bucket", ID: "assets", ARN: "arn:second"},
+				},
+			}
+			if err := manifest.Validate(); err == nil {
+				t.Fatal("expected duplicate selected resource identity to be rejected")
+			}
+		})
 	}
 }
 

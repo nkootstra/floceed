@@ -149,6 +149,7 @@ type Receipt struct {
 	SchemaVersion int              `json:"schema_version"`
 	Baseline      string           `json:"baseline,omitempty"`
 	Current       string           `json:"current"`
+	Categories    []ChangeCategory `json:"categories,omitempty"`
 	Counts        ReceiptCounts    `json:"counts"`
 	Resources     []ResourceChange `json:"resources"`
 }

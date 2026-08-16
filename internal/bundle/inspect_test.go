@@ -22,7 +22,7 @@ func TestLoadGeneratedValidatesAndLoadsSupportedManifest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Manifest.SchemaVersion != 1 || len(got.Checksums.Files) != 1 {
+	if got.Manifest.SchemaVersion != 1 || len(got.Checksums.Files) != len(requiredGeneratedFiles) {
 		t.Fatalf("LoadGenerated() = %#v", got)
 	}
 }
@@ -37,6 +37,18 @@ func TestLoadGeneratedSupportsEveryReadableManifestSchema(t *testing.T) {
 				t.Fatalf("LoadGenerated() schema %d = %#v, %v", schema, got, err)
 			}
 		})
+	}
+}
+
+func TestLoadGeneratedDistinguishesMissingRootFromCorruptBundle(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "missing")
+	if _, err := LoadGenerated(context.Background(), missing); !errors.Is(err, ErrGeneratedRootMissing) {
+		t.Fatalf("missing root error = %v, want ErrGeneratedRootMissing", err)
+	}
+
+	corrupt := t.TempDir()
+	if _, err := LoadGenerated(context.Background(), corrupt); err == nil || errors.Is(err, ErrGeneratedRootMissing) {
+		t.Fatalf("corrupt bundle error = %v, must not be ErrGeneratedRootMissing", err)
 	}
 }
 
@@ -123,6 +135,110 @@ func TestLoadGeneratedRejectsFileMissingFromChecksumIndex(t *testing.T) {
 	}
 }
 
+func TestLoadGeneratedRequiresEveryRuntimeFileEvenWhenIndexMatches(t *testing.T) {
+	for _, relative := range requiredGeneratedFiles {
+		t.Run(relative, func(t *testing.T) {
+			root := t.TempDir()
+			writeGeneratedFixture(t, root, model.Manifest{SchemaVersion: 1})
+			if err := os.Remove(filepath.Join(root, filepath.FromSlash(relative))); err != nil {
+				t.Fatal(err)
+			}
+			sums, err := BuildChecksums(root, "checksums.json")
+			if err != nil {
+				t.Fatal(err)
+			}
+			b, _ := CanonicalJSON(sums)
+			if err := os.WriteFile(filepath.Join(root, "checksums.json"), b, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := LoadGenerated(context.Background(), root); err == nil || !strings.Contains(err.Error(), "required file") {
+				t.Fatalf("LoadGenerated() error = %v, want missing required file", err)
+			}
+		})
+	}
+}
+
+func TestLoadGeneratedRejectsOversizedMetadataBeforeReadingIt(t *testing.T) {
+	root := t.TempDir()
+	checksums := filepath.Join(root, "checksums.json")
+	f, err := os.Create(checksums)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(maxChecksumsBytes + 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadGenerated(context.Background(), root); err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("LoadGenerated() error = %v, want metadata size rejection", err)
+	}
+}
+
+func TestLoadGeneratedRejectsOversizedSparseManifest(t *testing.T) {
+	root := t.TempDir()
+	writeGeneratedFixture(t, root, model.Manifest{SchemaVersion: 1})
+	manifestPath := filepath.Join(root, "bundle", "manifest.json")
+	if err := os.Truncate(manifestPath, maxManifestBytes+1); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(root, "checksums.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sums Checksums
+	if err := json.Unmarshal(data, &sums); err != nil {
+		t.Fatal(err)
+	}
+	for index := range sums.Files {
+		if sums.Files[index].Path == "bundle/manifest.json" {
+			sums.Files[index].Size = maxManifestBytes + 1
+		}
+	}
+	data, _ = CanonicalJSON(sums)
+	if err := os.WriteFile(filepath.Join(root, "checksums.json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadGenerated(context.Background(), root); err == nil || !strings.Contains(err.Error(), "manifest exceeds") {
+		t.Fatalf("LoadGenerated() error = %v, want manifest size rejection", err)
+	}
+}
+
+func TestLoadGeneratedRejectsSymlinkedParentDirectory(t *testing.T) {
+	root := t.TempDir()
+	writeGeneratedFixture(t, root, model.Manifest{SchemaVersion: 1})
+	runtimeDir := filepath.Join(root, "runtime")
+	outside := t.TempDir()
+	data, err := os.ReadFile(filepath.Join(runtimeDir, "replay.py"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(outside, "replay.py"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(runtimeDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, runtimeDir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadGenerated(context.Background(), root); err == nil || !errors.Is(err, ErrGeneratedPath) {
+		t.Fatalf("LoadGenerated() error = %v, want unsafe path rejection", err)
+	}
+}
+
+func TestVerifyChecksumRejectsDeclaredSizeBeforeReadingBody(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "payload"), []byte("body"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := verifyChecksum(context.Background(), root, Checksum{Path: "payload", Size: 5}, make([]byte, 8))
+	if err == nil || !strings.Contains(err.Error(), "checksum mismatch") {
+		t.Fatalf("verifyChecksum() error = %v, want size mismatch", err)
+	}
+}
+
 func TestLoadGeneratedRejectsManifestArtifactChecksumDisagreement(t *testing.T) {
 	root := t.TempDir()
 	content := []byte("fixture")
@@ -165,12 +281,24 @@ func writeGeneratedFixture(t *testing.T, root string, manifest model.Manifest) {
 	if err := os.WriteFile(manifestPath, b, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	sum, err := SumFile(manifestPath)
+	for relative, content := range map[string][]byte{
+		ComposeFile:                 []byte("services: {}\n"),
+		"runtime/replay.py":         []byte("# replay\n"),
+		"init/ready.d/10-replay.py": []byte("# ready\n"),
+	} {
+		filename := filepath.Join(root, filepath.FromSlash(relative))
+		if err := os.MkdirAll(filepath.Dir(filename), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filename, content, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sums, err := BuildChecksums(root, "checksums.json")
 	if err != nil {
 		t.Fatal(err)
 	}
-	sum.Path = "bundle/manifest.json"
-	checksums, err := json.Marshal(Checksums{SchemaVersion: 1, Files: []Checksum{sum}})
+	checksums, err := json.Marshal(sums)
 	if err != nil {
 		t.Fatal(err)
 	}

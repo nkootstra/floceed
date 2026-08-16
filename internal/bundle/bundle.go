@@ -131,6 +131,12 @@ func VerifyChecksums(root string, sums Checksums) error {
 // WriteAtomic builds a complete directory beside target and replaces target only
 // after build succeeds. When replacement fails, it restores the prior directory.
 func WriteAtomic(target string, build func(stage string) error) error {
+	return WriteAtomicGuarded(target, build, nil)
+}
+
+// WriteAtomicGuarded builds a complete replacement and invokes beforeInstall
+// while the target lock is held, immediately before the target is replaced.
+func WriteAtomicGuarded(target string, build func(stage string) error, beforeInstall func() error) error {
 	parent := filepath.Dir(target)
 	base := filepath.Base(target)
 	if err := os.MkdirAll(parent, 0o700); err != nil {
@@ -156,6 +162,11 @@ func WriteAtomic(target string, build func(stage string) error) error {
 	}
 	if err := build(stage); err != nil {
 		return fmt.Errorf("build staged bundle: %w", err)
+	}
+	if beforeInstall != nil {
+		if err := beforeInstall(); err != nil {
+			return fmt.Errorf("validate bundle before install: %w", err)
+		}
 	}
 	backup := target + ".backup"
 	if _, err := os.Stat(backup); err == nil {

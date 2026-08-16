@@ -18,6 +18,8 @@ jobs:
           cache: true
       - name: Test
         run: go test ./...
+      - name: Race test inspection surfaces
+        run: go test -race ./internal/inspect ./internal/bundle ./internal/app ./internal/cli
       - name: Check deterministic inspect fixtures
         run: go test ./internal/testfixture -run TestCommittedInspectFixturesMatchGenerator -count=1
       - name: Smoke test offline inspect CLI

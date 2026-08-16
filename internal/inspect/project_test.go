@@ -131,6 +131,21 @@ func TestProjectManifestRejectsMalformedStructureAndAudit(t *testing.T) {
 	}
 }
 
+func TestProjectManifestRejectsDuplicateSelectedResourceIdentitiesInEveryManifestSchema(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		version int
+	}{{"schema-1", 1}, {"schema-2", 2}, {"schema-3", 3}} {
+		t.Run(test.name, func(t *testing.T) {
+			manifest := testManifest(t, test.version)
+			manifest.Selected = append(manifest.Selected, manifest.Selected[0])
+			if _, err := ProjectManifest(manifest); err == nil {
+				t.Fatal("expected duplicate selected identity to prevent inspection")
+			}
+		})
+	}
+}
+
 func TestPublicContractsDoNotDiscloseFixtureOrGovernanceSecrets(t *testing.T) {
 	manifest := testManifest(t, 3)
 	manifest.Snapshots[0].Structure = json.RawMessage(`{"name":"assets","region":"eu-west-1","fixture":"FIXTURE-CANARY"}`)

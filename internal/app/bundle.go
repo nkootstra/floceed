@@ -38,7 +38,7 @@ const (
 // PullResult describes the bundle that was installed and, when replacing an
 // existing bundle, its disclosure-safe semantic effect.
 type PullResult struct {
-	Manifest model.Manifest      `json:"manifest"`
+	model.Manifest
 	Baseline BaselineState       `json:"baseline"`
 	Receipt  *inspection.Receipt `json:"receipt,omitempty"`
 }
@@ -181,7 +181,29 @@ func (a *Application) PullWithOptions(ctx context.Context, p config.Project, pro
 		return PullResult{}, &Error{Kind: ErrorPlan, Code: "MANIFEST_INVALID", Message: err.Error(), Err: err}
 	}
 	report(model.ProgressEvent{Operation: "pull", Phase: "install", Message: "validating and installing bundle"})
-	if err := bundle.Render(ctx, target, p, manifest, bundle.RenderOptions{ArtifactRoot: filepath.Join(tmp, "artifacts"), ValidateCompose: a.ComposeValidator}); err != nil {
+	beforeInstall := func() error {
+		generated, loadErr := bundle.LoadGenerated(ctx, target)
+		if loadErr != nil {
+			if errors.Is(loadErr, bundle.ErrGeneratedRootMissing) {
+				baselineState = BaselineAbsent
+				baselineProjection = inspection.Projection{}
+				return nil
+			}
+			return invalidBaselineError(loadErr)
+		}
+		projection, projectErr := inspection.ProjectManifest(generated.Manifest)
+		if projectErr != nil {
+			return inspectError(projectErr)
+		}
+		baselineState = BaselinePresent
+		baselineProjection = projection
+		return nil
+	}
+	if err := bundle.Render(ctx, target, p, manifest, bundle.RenderOptions{ArtifactRoot: filepath.Join(tmp, "artifacts"), ValidateCompose: a.ComposeValidator, BeforeInstall: beforeInstall}); err != nil {
+		var appErr *Error
+		if errors.As(err, &appErr) {
+			return PullResult{}, appErr
+		}
 		return PullResult{}, filesystemError(err)
 	}
 	if err := os.RemoveAll(tmp); err != nil {
@@ -197,12 +219,10 @@ func (a *Application) PullWithOptions(ctx context.Context, p config.Project, pro
 }
 
 func invalidBaselineError(err error) error {
-	mapped := inspectError(err)
-	var appErr *Error
-	if errors.As(mapped, &appErr) && appErr.Code == "BUNDLE_NOT_FOUND" {
-		return &Error{Kind: ErrorFilesystem, Code: "BUNDLE_INTEGRITY_INVALID", Message: fmt.Sprintf("installed baseline is invalid: %v", err), Remediation: "Repair or remove the invalid generated bundle before pulling again.", Err: err}
+	if errors.Is(err, bundle.ErrGeneratedRootMissing) {
+		return inspectError(err)
 	}
-	return mapped
+	return &Error{Kind: ErrorFilesystem, Code: "BUNDLE_INTEGRITY_INVALID", Message: fmt.Sprintf("installed baseline is invalid: %v", err), Remediation: "Repair or remove the invalid generated bundle before pulling again.", Err: err}
 }
 
 func captureFingerprint(p config.Project, directory, profile, region, accountID string, policy *governance.EffectivePolicy) [32]byte {

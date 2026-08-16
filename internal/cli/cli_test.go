@@ -95,9 +95,10 @@ func TestInspectTextIsConciseDeterministicAndHasNoANSI(t *testing.T) {
 		Source: inspection.SourceProjection{AccountID: "123456789012", Region: "eu-west-1"},
 		Target: inspection.TargetProjection{FlociVersion: "1.6.0"}, Artifacts: inspection.ArtifactSummary{Files: 2, Bytes: 42},
 		Services:  []inspection.ServiceSummary{{Service: "s3", Resources: 1, Selected: 1, Records: 2, SourceBytes: 21}},
-		Resources: []inspection.Resource{{Identity: inspection.ResourceIdentity{Service: "s3", Type: "bucket", ID: "assets"}, Selected: true}},
+		Findings:  []inspection.Finding{{Code: "BUNDLE_WARNING", Severity: "warning", Support: "bundle support", Resource: "assets", Property: "versioning"}},
+		Resources: []inspection.Resource{{Identity: inspection.ResourceIdentity{Service: "s3", Type: "bucket", ID: "assets"}, Selected: true, Findings: []inspection.Finding{{Code: "RESOURCE_WARNING", Severity: "warning", Support: "resource support", Resource: "assets", Property: "policy"}}}},
 		Runtime:   inspection.Runtime{State: inspection.RuntimeNotRequested},
-		Receipt:   &inspection.Receipt{SchemaVersion: 1, Baseline: "sha256:baseline", Current: "sha256:current", Counts: inspection.ReceiptCounts{Changed: 1}, Resources: []inspection.ResourceChange{{Resource: inspection.ResourceIdentity{Service: "s3", Type: "bucket", ID: "assets"}, Outcome: inspection.OutcomeChanged, Categories: []inspection.ChangeCategory{inspection.CategoryDataset}}}},
+		Receipt:   &inspection.Receipt{SchemaVersion: 1, Baseline: "sha256:baseline", Current: "sha256:current", Categories: []inspection.ChangeCategory{inspection.CategoryDataset, inspection.CategoryFindings}, Counts: inspection.ReceiptCounts{Changed: 1}, Resources: []inspection.ResourceChange{{Resource: inspection.ResourceIdentity{Service: "s3", Type: "bucket", ID: "assets"}, Outcome: inspection.OutcomeChanged, Categories: []inspection.ChangeCategory{inspection.CategoryDataset}}}},
 	}}
 	var out bytes.Buffer
 	cmd := New(Options{Stdout: &out, Stderr: &bytes.Buffer{}, App: fake})
@@ -105,12 +106,64 @@ func TestInspectTextIsConciseDeterministicAndHasNoANSI(t *testing.T) {
 	if err := cmd.ExecuteContext(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	want := "Bundle: valid\nIdentity: sha256:current\nManifest schema: 3\nSource: 123456789012 / eu-west-1\nTarget: Floci 1.6.0\nResources: 1 selected\nArtifacts: 2 files, 42 bytes\nRuntime: not requested\n\nServices\ns3: 1 resources, 1 selected, 2 records, 21 bytes\n\nResources\ns3/bucket/assets: selected\n\nComparison\nBaseline: sha256:baseline\nCurrent: sha256:current\nChanges: 0 added, 0 removed, 1 changed, 0 unchanged\ns3/bucket/assets: changed (dataset)\n"
+	want := "Bundle: valid\nIdentity: sha256:current\nManifest schema: 3\nSource: 123456789012 / eu-west-1\nTarget: Floci 1.6.0\nResources: 1 selected\nArtifacts: 2 files, 42 bytes\nRuntime: not requested\n\nFindings\nWARNING BUNDLE_WARNING: bundle support [resource=assets, property=versioning]\n\nServices\ns3: 1 resources, 1 selected, 2 records, 21 bytes\n\nResources\ns3/bucket/assets: selected\n  Findings\n  WARNING RESOURCE_WARNING: resource support [resource=assets, property=policy]\n\nComparison\nBaseline: sha256:baseline\nCurrent: sha256:current\nCategories: dataset, findings\nChanges: 0 added, 0 removed, 1 changed, 0 unchanged\ns3/bucket/assets: changed (dataset)\n"
 	if out.String() != want {
 		t.Fatalf("text output:\n%s\nwant:\n%s", out.String(), want)
 	}
 	if strings.Contains(out.String(), "\x1b[") {
 		t.Fatalf("text contains ANSI: %q", out.String())
+	}
+}
+
+func TestInspectTextEscapesManifestAndRuntimeControlsWhileJSONRemainsExact(t *testing.T) {
+	canary := "safe\nFORGED\x1b[31m\t\u0085end"
+	result := inspection.Inspection{
+		SchemaVersion: 1, Valid: true, BundleIdentity: canary,
+		Source:   inspection.SourceProjection{AccountID: canary, Region: canary},
+		Target:   inspection.TargetProjection{FlociVersion: canary},
+		Services: []inspection.ServiceSummary{{Service: canary}},
+		Resources: []inspection.Resource{{
+			Identity: inspection.ResourceIdentity{Service: canary, Type: canary, ID: canary},
+			Findings: []inspection.Finding{{Code: canary, Severity: canary, Support: canary, Resource: canary, Property: canary}},
+		}},
+		Findings: []inspection.Finding{{Code: canary, Severity: canary, Support: canary, Resource: canary, Property: canary}},
+		Runtime:  inspection.Runtime{State: inspection.RuntimeUnavailable, FailedScripts: []string{canary}, Diagnostic: canary},
+		Receipt: &inspection.Receipt{
+			Baseline: canary, Current: canary, Categories: []inspection.ChangeCategory{inspection.ChangeCategory(canary)},
+			Resources: []inspection.ResourceChange{{Resource: inspection.ResourceIdentity{Service: canary, Type: canary, ID: canary}, Outcome: inspection.Outcome(canary), Categories: []inspection.ChangeCategory{inspection.ChangeCategory(canary)}}},
+		},
+	}
+
+	var textOut bytes.Buffer
+	textCommand := New(Options{Stdout: &textOut, Stderr: &bytes.Buffer{}, App: &fakeService{inspectResult: result}})
+	textCommand.SetArgs([]string{"inspect", "--project", writeProject(t)})
+	if err := textCommand.ExecuteContext(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	text := textOut.String()
+	if strings.Contains(text, "\nFORGED") || strings.Contains(text, "\x1b") || strings.Contains(text, "\t") || strings.ContainsRune(text, '\u0085') {
+		t.Fatalf("text contains unescaped control data: %q", text)
+	}
+	for _, escaped := range []string{`safe\x0AFORGED\x1B[31m\x09\x85end`, "Categories: safe"} {
+		if !strings.Contains(text, escaped) {
+			t.Fatalf("text does not contain %q: %q", escaped, text)
+		}
+	}
+
+	var jsonOut bytes.Buffer
+	jsonCommand := New(Options{Stdout: &jsonOut, Stderr: &bytes.Buffer{}, App: &fakeService{inspectResult: result}})
+	jsonCommand.SetArgs([]string{"inspect", "--project", writeProject(t), "--output", "json"})
+	if err := jsonCommand.ExecuteContext(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var envelope struct {
+		Data inspection.Inspection `json:"data"`
+	}
+	if err := json.Unmarshal(jsonOut.Bytes(), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if envelope.Data.BundleIdentity != canary || envelope.Data.Runtime.Diagnostic != canary || envelope.Data.Findings[0].Support != canary {
+		t.Fatalf("JSON inspection was sanitized: %#v", envelope.Data)
 	}
 }
 
@@ -206,8 +259,28 @@ func (f *fakeService) PullWithOptions(_ context.Context, _ config.Project, _ str
 type progressService struct{ fakeService }
 
 func (f *progressService) PullWithOptions(_ context.Context, _ config.Project, _ string, _ string, _ string, options app.PullOptions) (app.PullResult, error) {
-	options.Progress(model.ProgressEvent{Operation: "pull", Phase: "capture", Service: "dynamodb", Resource: "orders", CompletedRecords: 5, TotalRecords: 10, TotalPrecision: "estimated"})
-	return app.PullResult{Manifest: model.Manifest{SchemaVersion: model.CurrentManifestSchemaVersion}, Baseline: app.BaselineAbsent}, nil
+	if options.Progress != nil {
+		options.Progress(model.ProgressEvent{Operation: "pull", Phase: "capture", Service: "dynamodb", Resource: "orders", CompletedRecords: 5, TotalRecords: 10, TotalPrecision: "estimated"})
+	}
+	return pullReceiptResult(), nil
+}
+
+func pullReceiptResult() app.PullResult {
+	return app.PullResult{
+		Manifest: model.Manifest{SchemaVersion: model.CurrentManifestSchemaVersion, Source: model.SourceMetadata{AccountID: "123456789012", Region: "eu-west-1"}, Findings: []model.Finding{{Code: "DATA_CAPTURE_PARTIAL", Severity: "warning"}}},
+		Baseline: app.BaselinePresent,
+		Receipt: &inspection.Receipt{
+			SchemaVersion: 1,
+			Baseline:      "sha256:baseline",
+			Current:       "sha256:current",
+			Counts:        inspection.ReceiptCounts{Added: 1, Removed: 2, Changed: 3, Unchanged: 4},
+			Resources: []inspection.ResourceChange{{
+				Resource:   inspection.ResourceIdentity{Service: "dynamodb", Type: "table", ID: "orders"},
+				Outcome:    inspection.OutcomeChanged,
+				Categories: []inspection.ChangeCategory{inspection.CategoryDataset, inspection.CategoryGovernance},
+			}},
+		},
+	}
 }
 
 func TestPullJSONProgressUsesStderrWithoutCorruptingFinalEnvelope(t *testing.T) {
@@ -222,12 +295,25 @@ func TestPullJSONProgressUsesStderrWithoutCorruptingFinalEnvelope(t *testing.T) 
 	if err := json.Unmarshal(stdout.Bytes(), &envelope); err != nil {
 		t.Fatalf("stdout is not one JSON envelope: %q: %v", stdout.String(), err)
 	}
-	if envelope.Command != "pull" || envelope.Status != StatusSuccess {
+	if envelope.Command != "pull" || envelope.Status != StatusSuccessWithFindings {
 		t.Fatalf("pull envelope = %#v", envelope)
 	}
 	payload, ok := envelope.Data.(map[string]any)
-	if !ok || payload["baseline"] != string(app.BaselineAbsent) || payload["manifest"] == nil {
+	if !ok || payload["baseline"] != string(app.BaselinePresent) || payload["schema_version"] != float64(model.CurrentManifestSchemaVersion) || payload["source"] == nil || payload["findings"] == nil || payload["manifest"] != nil {
 		t.Fatalf("pull payload = %#v", envelope.Data)
+	}
+	receipt, ok := payload["receipt"].(map[string]any)
+	if !ok || receipt["baseline"] != "sha256:baseline" || receipt["current"] != "sha256:current" {
+		t.Fatalf("pull receipt = %#v", payload["receipt"])
+	}
+	counts := receipt["counts"].(map[string]any)
+	if counts["added"] != float64(1) || counts["removed"] != float64(2) || counts["changed"] != float64(3) || counts["unchanged"] != float64(4) {
+		t.Fatalf("pull receipt counts = %#v", counts)
+	}
+	resources := receipt["resources"].([]any)
+	change := resources[0].(map[string]any)
+	if !reflect.DeepEqual(change["categories"], []any{"dataset", "governance"}) {
+		t.Fatalf("pull receipt categories = %#v", change["categories"])
 	}
 	if strings.Contains(stdout.String(), "secret-canary") {
 		t.Fatalf("pull output disclosed privacy canary: %s", stdout.String())
@@ -238,6 +324,24 @@ func TestPullJSONProgressUsesStderrWithoutCorruptingFinalEnvelope(t *testing.T) 
 	}
 	if event.Resource != "orders" || event.TotalPrecision != "estimated" {
 		t.Fatalf("event = %#v", event)
+	}
+}
+
+func TestPullTextIncludesExactReceiptWithoutPrivacyCanary(t *testing.T) {
+	service := &progressService{}
+	var stdout, stderr bytes.Buffer
+	cmd := New(Options{Stdin: strings.NewReader(""), Stdout: &stdout, Stderr: &stderr, App: service})
+	cmd.SetArgs([]string{"pull", "--project", writeProject(t), "--yes", "--progress", "off", "--work-dir", t.TempDir()})
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{`"baseline": "present"`, `"baseline": "sha256:baseline"`, `"current": "sha256:current"`, `"added": 1`, `"removed": 2`, `"changed": 3`, `"unchanged": 4`, `"service": "dynamodb"`, `"id": "orders"`, `"dataset"`, `"governance"`} {
+		if !strings.Contains(stdout.String(), expected) {
+			t.Fatalf("text output missing %s:\n%s", expected, stdout.String())
+		}
+	}
+	if strings.Contains(stdout.String(), "secret-canary") || stderr.Len() != 0 {
+		t.Fatalf("text output disclosed canary or emitted progress: stdout=%q stderr=%q", stdout.String(), stderr.String())
 	}
 }
 

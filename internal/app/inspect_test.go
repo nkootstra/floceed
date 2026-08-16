@@ -36,12 +36,13 @@ func (panicInspectRuntime) Start(context.Context, string, string) ([]byte, error
 func (panicInspectRuntime) WaitReady(context.Context, string, time.Duration) error {
 	panic("inspect must not call runtime readiness")
 }
-func (panicInspectRuntime) InspectStatus(context.Context, string, time.Duration) inspection.Runtime {
+func (panicInspectRuntime) InspectStatus(context.Context, string, time.Duration) (inspection.Runtime, error) {
 	panic("inspect must not call runtime status")
 }
 
 type inspectRuntimeStub struct {
 	result inspection.Runtime
+	err    error
 	calls  int
 	url    string
 }
@@ -49,10 +50,10 @@ type inspectRuntimeStub struct {
 func (r *inspectRuntimeStub) DoctorChecks(context.Context) []Check                   { return nil }
 func (r *inspectRuntimeStub) Start(context.Context, string, string) ([]byte, error)  { return nil, nil }
 func (r *inspectRuntimeStub) WaitReady(context.Context, string, time.Duration) error { return nil }
-func (r *inspectRuntimeStub) InspectStatus(_ context.Context, url string, _ time.Duration) inspection.Runtime {
+func (r *inspectRuntimeStub) InspectStatus(_ context.Context, url string, _ time.Duration) (inspection.Runtime, error) {
 	r.calls++
 	r.url = url
-	return r.result
+	return r.result, r.err
 }
 
 func TestInspectReadsCustomOutputWithoutOpeningSource(t *testing.T) {
@@ -87,7 +88,7 @@ func TestInspectReadsCustomOutputWithoutOpeningSource(t *testing.T) {
 	if len(got.Resources) != 1 || got.Resources[0].Identity.ID != "assets" {
 		t.Fatalf("resources = %#v", got.Resources)
 	}
-	if got.Artifacts.Files != 1 || got.Artifacts.Bytes == 0 || len(got.Services) != 1 || got.Services[0].Selected != 1 || len(got.Operations) != 1 {
+	if got.Artifacts.Files != 4 || got.Artifacts.Bytes == 0 || len(got.Services) != 1 || got.Services[0].Selected != 1 || len(got.Operations) != 1 {
 		t.Fatalf("inspection summaries = artifacts %#v, services %#v, operations %#v", got.Artifacts, got.Services, got.Operations)
 	}
 }
@@ -137,7 +138,10 @@ func TestRuntimeStatusClassifiesReadinessAndBoundsDiagnostics(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			runtime := newDockerLocalRuntime()
 			runtime.httpClient = test.do
-			got := runtime.InspectStatus(context.Background(), "http://127.0.0.1/_floci/init", time.Millisecond)
+			got, err := runtime.InspectStatus(context.Background(), "http://127.0.0.1/_floci/init", time.Millisecond)
+			if err != nil {
+				t.Fatal(err)
+			}
 			if got.State != test.want || (test.failed != nil && !reflect.DeepEqual(got.FailedScripts, test.failed)) || (test.failed == nil && len(got.FailedScripts) != 0) {
 				t.Fatalf("status = %#v, want %s / %v", got, test.want, test.failed)
 			}
@@ -145,6 +149,45 @@ func TestRuntimeStatusClassifiesReadinessAndBoundsDiagnostics(t *testing.T) {
 				t.Fatalf("diagnostic is not bounded/sanitized: %q", got.Diagnostic)
 			}
 		})
+	}
+}
+
+func TestInspectRuntimePropagatesParentCancellation(t *testing.T) {
+	projectDir := t.TempDir()
+	project := config.NewProject()
+	project.Source.Region = "eu-west-1"
+	writeInspectableBundle(t, filepath.Join(projectDir, project.Output.Directory), comparableManifest(t, "current"))
+	runtime := &inspectRuntimeStub{err: context.Canceled}
+	service := New("test")
+	service.localRuntime = runtime
+
+	got, err := service.InspectWithOptions(context.Background(), project, projectDir, InspectOptions{Runtime: true})
+	var appErr *Error
+	if !errors.As(err, &appErr) || appErr.Code != "INSPECTION_CANCELED" || !errors.Is(err, context.Canceled) {
+		t.Fatalf("InspectWithOptions() = %#v, %v; want typed cancellation", got, err)
+	}
+	if got.Valid {
+		t.Fatalf("canceled runtime inspection returned valid result: %#v", got)
+	}
+}
+
+func TestRuntimeStatusPropagatesParentDeadlineButOwnTimeoutIsUnavailable(t *testing.T) {
+	runtime := newDockerLocalRuntime()
+	runtime.httpClient = httpDoerFunc(func(req *http.Request) (*http.Response, error) {
+		<-req.Context().Done()
+		return nil, req.Context().Err()
+	})
+
+	parent, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := runtime.InspectStatus(parent, "http://127.0.0.1/_floci/init", time.Second)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("parent cancellation error = %v", err)
+	}
+
+	got, err := runtime.InspectStatus(context.Background(), "http://127.0.0.1/_floci/init", time.Millisecond)
+	if err != nil || got.State != inspection.RuntimeUnavailable {
+		t.Fatalf("owned timeout = %#v, %v; want unavailable success", got, err)
 	}
 }
 
@@ -297,12 +340,33 @@ func writeInspectableBundle(t *testing.T, root string, manifest model.Manifest) 
 	if err := os.WriteFile(path, b, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	sum, err := bundle.SumFile(path)
+	manifestSum, err := bundle.SumFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	sum.Path = "bundle/manifest.json"
-	index, err := bundle.CanonicalJSON(bundle.Checksums{SchemaVersion: 1, Files: []bundle.Checksum{sum}})
+	manifestSum.Path = "bundle/manifest.json"
+	sums := []bundle.Checksum{manifestSum}
+	for _, artifact := range []struct{ name, contents string }{
+		{bundle.ComposeFile, "services: {}\n"},
+		{"runtime/replay.py", "# replay\n"},
+		{"init/ready.d/10-replay.py", "# ready\n"},
+	} {
+		name, contents := artifact.name, artifact.contents
+		artifactPath := filepath.Join(root, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(artifactPath), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(artifactPath, []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		sum, err := bundle.SumFile(artifactPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sum.Path = name
+		sums = append(sums, sum)
+	}
+	index, err := bundle.CanonicalJSON(bundle.Checksums{SchemaVersion: 1, Files: sums})
 	if err != nil {
 		t.Fatal(err)
 	}
