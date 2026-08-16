@@ -2,6 +2,7 @@ package bundle
 
 import (
 	"archive/tar"
+	"bytes"
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
@@ -82,6 +83,16 @@ func PackFixture(ctx context.Context, source, destination string) error {
 			return err
 		}
 		filename := filepath.Join(source, filepath.FromSlash(rel))
+		if rel == "checksums.json" {
+			h := &tar.Header{Name: rel, Mode: 0o600, Size: int64(len(checksumsBytes)), ModTime: time.Unix(0, 0).UTC(), Typeflag: tar.TypeReg}
+			if err := tw.WriteHeader(h); err != nil {
+				return err
+			}
+			if _, err := io.Copy(tw, bytes.NewReader(checksumsBytes)); err != nil {
+				return err
+			}
+			continue
+		}
 		f, err := openRegularNoFollow(filename)
 		if err != nil {
 			return err
