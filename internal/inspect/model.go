@@ -97,6 +97,14 @@ type ArtifactSummary struct {
 	Bytes int64 `json:"bytes"`
 }
 
+type ServiceSummary struct {
+	Service     string `json:"service"`
+	Resources   int    `json:"resources"`
+	Selected    int    `json:"selected"`
+	Records     int64  `json:"records"`
+	SourceBytes int64  `json:"source_bytes"`
+}
+
 type Runtime struct {
 	State         RuntimeState `json:"state"`
 	FailedScripts []string     `json:"failed_scripts,omitempty"`
@@ -104,21 +112,24 @@ type Runtime struct {
 }
 
 type Inspection struct {
-	SchemaVersion  int                `json:"schema_version"`
-	Valid          bool               `json:"valid"`
-	ManifestSchema int                `json:"manifest_schema"`
-	BundleIdentity string             `json:"bundle_identity"`
-	ToolVersion    string             `json:"tool_version,omitempty"`
-	CapturedAt     string             `json:"captured_at,omitempty"`
-	Partial        bool               `json:"partial,omitempty"`
-	Source         SourceProjection   `json:"source"`
-	Target         TargetProjection   `json:"target"`
-	Artifacts      ArtifactSummary    `json:"artifacts"`
-	Resources      []Resource         `json:"resources"`
-	Governance     *GovernanceSummary `json:"governance,omitempty"`
-	Findings       []Finding          `json:"findings,omitempty"`
-	Runtime        Runtime            `json:"runtime"`
-	Receipt        *Receipt           `json:"receipt,omitempty"`
+	SchemaVersion     int                  `json:"schema_version"`
+	Valid             bool                 `json:"valid"`
+	ManifestSchema    int                  `json:"manifest_schema"`
+	BundleIdentity    string               `json:"bundle_identity"`
+	ToolVersion       string               `json:"tool_version,omitempty"`
+	CapturedAt        string               `json:"captured_at,omitempty"`
+	Partial           bool                 `json:"partial,omitempty"`
+	SelectedResources int                  `json:"selected_resources"`
+	Source            SourceProjection     `json:"source"`
+	Target            TargetProjection     `json:"target"`
+	Artifacts         ArtifactSummary      `json:"artifacts"`
+	Services          []ServiceSummary     `json:"services,omitempty"`
+	Resources         []Resource           `json:"resources"`
+	Governance        *GovernanceSummary   `json:"governance,omitempty"`
+	Operations        []ProjectedOperation `json:"operations,omitempty"`
+	Findings          []Finding            `json:"findings,omitempty"`
+	Runtime           Runtime              `json:"runtime"`
+	Receipt           *Receipt             `json:"receipt,omitempty"`
 }
 
 type ReceiptCounts struct {
