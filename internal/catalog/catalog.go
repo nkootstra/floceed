@@ -46,8 +46,9 @@ type ReusableAdapter interface {
 }
 
 type ReuseRequest struct {
-	Candidates         []captureledger.Resource
+	Candidate          *captureledger.Resource
 	InvalidationReason captureledger.Reason
+	Validate           func(captureledger.Artifact) error
 	Materialize        func(captureledger.Artifact) error
 }
 

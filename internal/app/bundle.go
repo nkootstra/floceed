@@ -168,7 +168,7 @@ func (a *Application) PullWithOptions(ctx context.Context, p config.Project, pro
 		options.Progress(event)
 	}
 	report(model.ProgressEvent{Operation: "pull", Phase: "prepare", Message: "preparing capture"})
-	planned, snapshots, err := a.capture(ctx, captureRequest{
+	captured, err := a.capture(ctx, captureRequest{
 		Project:        p,
 		Profile:        profile,
 		Governance:     policy,
@@ -184,13 +184,14 @@ func (a *Application) PullWithOptions(ctx context.Context, p config.Project, pro
 	if err != nil {
 		return PullResult{}, err
 	}
+	planned, snapshots := captured.Plan, captured.Snapshots
 	manifest := a.manifest(p, planned, snapshots)
 	currentProjection, err := inspection.ProjectManifest(manifest)
 	if err != nil {
 		return PullResult{}, &Error{Kind: ErrorPlan, Code: "MANIFEST_INVALID", Message: err.Error(), Err: err}
 	}
 	var ledgerGeneration *captureledger.Generation
-	if len(planned.ledgerResources) != 0 {
+	if len(captured.LedgerResources) != 0 {
 		completedAt := time.Now().UTC()
 		if a.Now != nil {
 			completedAt = a.Now().UTC()
@@ -200,7 +201,7 @@ func (a *Application) PullWithOptions(ctx context.Context, p config.Project, pro
 			Source:        captureledger.SourceIdentity{AccountID: source.Identity.AccountID, Region: effectiveRegion},
 			CreatedAt:     completedAt,
 			CompletedAt:   completedAt,
-			Resources:     planned.ledgerResources,
+			Resources:     captured.LedgerResources,
 		}
 		generation.ID = ledgerGenerationID(generation)
 		if _, err := generation.CanonicalJSON(); err != nil {
@@ -247,7 +248,7 @@ func (a *Application) PullWithOptions(ctx context.Context, p config.Project, pro
 	if baselineState == BaselinePresent {
 		receipt := inspection.Compare(baselineProjection, currentProjection)
 		if ledgerGeneration != nil {
-			attachLedgerDecisions(&receipt, *ledgerGeneration, planned.ledgerGenerations)
+			attachLedgerDecisions(&receipt, *ledgerGeneration, captured.LedgerGenerations)
 		}
 		result.Receipt = &receipt
 	}
@@ -258,10 +259,10 @@ func attachLedgerDecisions(receipt *inspection.Receipt, generation captureledger
 	changes := make(map[string]*inspection.ResourceChange, len(receipt.Resources))
 	for index := range receipt.Resources {
 		identity := receipt.Resources[index].Resource
-		changes[identity.Service+"\x00"+identity.Type+"\x00"+identity.ID] = &receipt.Resources[index]
+		changes[resourceIdentityKey(identity.Service, identity.Type, identity.ID)] = &receipt.Resources[index]
 	}
 	for _, resource := range generation.Resources {
-		key := resource.Descriptor.Service + "\x00" + resource.Descriptor.Type + "\x00" + resource.Descriptor.ID
+		key := resourceIdentityKey(resource.Descriptor.Service, resource.Descriptor.Type, resource.Descriptor.ID)
 		change := changes[key]
 		if change == nil { // Defensive: ledger resources are selected manifest resources.
 			continue

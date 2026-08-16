@@ -59,12 +59,23 @@ func (a *reusableTestAdapter) CaptureReusable(_ context.Context, scope model.Sou
 	if err != nil {
 		return catalog.ReuseResult{}, err
 	}
-	candidateInvalid := len(request.Candidates) != 0 && len(request.Candidates[0].Units) != 0 && request.Candidates[0].Units[0].Outcome == captureledger.UnitOutcomeInvalidated
-	if len(request.Candidates) != 0 && !candidateInvalid && !a.refresh[ref.ID] {
+	candidateInvalid := request.Candidate != nil && len(request.Candidate.Units) != 0 && request.Candidate.Units[0].Outcome == captureledger.UnitOutcomeInvalidated
+	if request.Candidate != nil && request.Validate != nil {
+		for _, artifact := range request.Candidate.Units[0].Artifacts {
+			if err := request.Validate(artifact); err != nil {
+				candidateInvalid = true
+				if reason, ok := captureledger.InvalidationReason(err); ok {
+					request.InvalidationReason = reason
+				}
+				break
+			}
+		}
+	}
+	if request.Candidate != nil && !candidateInvalid && !a.refresh[ref.ID] {
 		a.mu.Lock()
 		a.candidateCalls++
 		a.mu.Unlock()
-		candidate := request.Candidates[0]
+		candidate := *request.Candidate
 		var refs []model.ArtifactRef
 		for _, artifact := range candidate.Units[0].Artifacts {
 			if err := request.Materialize(artifact); err != nil {
@@ -78,7 +89,7 @@ func (a *reusableTestAdapter) CaptureReusable(_ context.Context, scope model.Sou
 		return catalog.ReuseResult{Snapshot: snapshot, Resource: &candidate}, nil
 	}
 	reason := request.InvalidationReason
-	if len(request.Candidates) != 0 && reason == "" {
+	if request.Candidate != nil && reason == "" {
 		reason = captureledger.ReasonSourceContentChanged
 	}
 	a.mu.Lock()

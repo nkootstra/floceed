@@ -44,7 +44,7 @@ func TestCompletedLedgerCandidateAlwaysRescansWithoutMaterializing(t *testing.T)
 	}
 	materialized := false
 	result, err := New(client).CaptureReusable(context.Background(), scope, ref, opts, catalog.ReuseRequest{
-		Candidates:  []captureledger.Resource{{Descriptor: captureledger.ResourceDescriptor{Service: "dynamodb", Type: "table", ID: "orders"}, CaptureDefinition: definition, Units: []captureledger.Unit{{ID: "chunk-000001", Freshness: captureledger.FreshnessEvidence{Kind: "dynamodb_scan_v1", Digest: strings.Repeat("a", 64)}, Artifacts: []captureledger.Artifact{{Path: "bundle/data/dynamodb/prior.ndjson", SHA256: strings.Repeat("b", 64), Size: 99}}, Outcome: captureledger.UnitOutcomeRefreshed, Reason: captureledger.ReasonNoCandidate, CapturedAt: time.Now().UTC()}}}},
+		Candidate:   &captureledger.Resource{Descriptor: captureledger.ResourceDescriptor{Service: "dynamodb", Type: "table", ID: "orders"}, CaptureDefinition: definition, Units: []captureledger.Unit{{ID: "chunk-000001", Freshness: captureledger.FreshnessEvidence{Kind: "dynamodb_scan_v1", Digest: strings.Repeat("a", 64)}, Artifacts: []captureledger.Artifact{{Path: "bundle/data/dynamodb/prior.ndjson", SHA256: strings.Repeat("b", 64), Size: 99}}, Outcome: captureledger.UnitOutcomeRefreshed, Reason: captureledger.ReasonNoCandidate, CapturedAt: time.Now().UTC()}}},
 		Materialize: func(captureledger.Artifact) error { materialized = true; return nil },
 	})
 	if err != nil {
@@ -86,10 +86,10 @@ func TestCompletedLedgerCandidateClassifiesMismatchBeforeFreshness(t *testing.T)
 		request    catalog.ReuseRequest
 		wantReason captureledger.Reason
 	}{
-		{name: "matching definition", opts: base, request: catalog.ReuseRequest{Candidates: []captureledger.Resource{{CaptureDefinition: definition, Units: []captureledger.Unit{validUnit}}}}, wantReason: captureledger.ReasonFreshnessUnproven},
-		{name: "gzip changes definition", opts: model.CaptureOptions{IncludeData: true, Mode: "full", Gzip: true}, request: catalog.ReuseRequest{Candidates: []captureledger.Resource{{CaptureDefinition: definition, Units: []captureledger.Unit{validUnit}}}}, wantReason: captureledger.ReasonCaptureDefinitionChanged},
-		{name: "format mismatch", opts: base, request: catalog.ReuseRequest{Candidates: []captureledger.Resource{{CaptureDefinition: definition, Units: []captureledger.Unit{validUnit}}}, InvalidationReason: captureledger.ReasonFormatChanged}, wantReason: captureledger.ReasonFormatChanged},
-		{name: "corrupt artifact", opts: base, request: catalog.ReuseRequest{Candidates: []captureledger.Resource{{CaptureDefinition: definition, Units: []captureledger.Unit{{ID: validUnit.ID, Freshness: validUnit.Freshness, Outcome: captureledger.UnitOutcomeInvalidated, Reason: captureledger.ReasonArtifactCorrupt, CapturedAt: validUnit.CapturedAt}}}}}, wantReason: captureledger.ReasonArtifactCorrupt},
+		{name: "matching definition", opts: base, request: catalog.ReuseRequest{Candidate: &captureledger.Resource{CaptureDefinition: definition, Units: []captureledger.Unit{validUnit}}}, wantReason: captureledger.ReasonFreshnessUnproven},
+		{name: "gzip changes definition", opts: model.CaptureOptions{IncludeData: true, Mode: "full", Gzip: true}, request: catalog.ReuseRequest{Candidate: &captureledger.Resource{CaptureDefinition: definition, Units: []captureledger.Unit{validUnit}}}, wantReason: captureledger.ReasonCaptureDefinitionChanged},
+		{name: "format mismatch", opts: base, request: catalog.ReuseRequest{Candidate: &captureledger.Resource{CaptureDefinition: definition, Units: []captureledger.Unit{validUnit}}, InvalidationReason: captureledger.ReasonFormatChanged}, wantReason: captureledger.ReasonFormatChanged},
+		{name: "corrupt artifact", opts: base, request: catalog.ReuseRequest{Candidate: &captureledger.Resource{CaptureDefinition: definition, Units: []captureledger.Unit{{ID: validUnit.ID, Freshness: validUnit.Freshness, Outcome: captureledger.UnitOutcomeInvalidated, Reason: captureledger.ReasonArtifactCorrupt, CapturedAt: validUnit.CapturedAt}}}}, wantReason: captureledger.ReasonArtifactCorrupt},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

@@ -248,15 +248,12 @@ func dynamoRefreshReason(definition string, request catalog.ReuseRequest) captur
 	if request.InvalidationReason == captureledger.ReasonFormatChanged {
 		return captureledger.ReasonFormatChanged
 	}
-	var matching *captureledger.Resource
-	for index := range request.Candidates {
-		if request.Candidates[index].CaptureDefinition == definition {
-			matching = &request.Candidates[index]
-			break
-		}
+	matching := request.Candidate
+	if matching != nil && matching.CaptureDefinition != definition {
+		matching = nil
 	}
 	if matching == nil {
-		if len(request.Candidates) != 0 {
+		if request.Candidate != nil {
 			return captureledger.ReasonCaptureDefinitionChanged
 		}
 		if request.InvalidationReason != "" {
@@ -267,6 +264,16 @@ func dynamoRefreshReason(definition string, request catalog.ReuseRequest) captur
 	for _, unit := range matching.Units {
 		if unit.Outcome == captureledger.UnitOutcomeInvalidated && unit.Reason != "" && unit.Reason != captureledger.ReasonReused {
 			return unit.Reason
+		}
+		if request.Validate != nil {
+			for _, artifact := range unit.Artifacts {
+				if err := request.Validate(artifact); err != nil {
+					if reason, ok := captureledger.InvalidationReason(err); ok {
+						return reason
+					}
+					return captureledger.ReasonArtifactCorrupt
+				}
+			}
 		}
 	}
 	if request.InvalidationReason != "" {

@@ -84,8 +84,8 @@ func TestGenerationValidateRejectsUnsafeOrAmbiguousMetadata(t *testing.T) {
 func TestGenerationCanonicalJSONIsDeterministicAndReceiptSafe(t *testing.T) {
 	a := validGeneration()
 	b := validGeneration()
-	a.Resources[0].Units[0].Freshness.Components = map[string]string{"inventory": strings.Repeat("6", 64), "policy": strings.Repeat("7", 64)}
-	b.Resources[0].Units[0].Freshness.Components = map[string]string{"policy": strings.Repeat("7", 64), "inventory": strings.Repeat("6", 64)}
+	a.Resources[0].Units[0].Freshness.Records, a.Resources[0].Units[0].Freshness.Bytes = 2, 7
+	b.Resources[0].Units[0].Freshness.Records, b.Resources[0].Units[0].Freshness.Bytes = 2, 7
 	b.Resources = append([]Resource{{Descriptor: ResourceDescriptor{Service: "dynamodb", Type: "table", ID: "orders"}, CaptureDefinition: strings.Repeat("5", 64), Units: []Unit{}}}, b.Resources...)
 	a.Resources = append(a.Resources, b.Resources[0])
 	a.Resources[0], a.Resources[1] = a.Resources[1], a.Resources[0]
@@ -101,7 +101,7 @@ func TestGenerationCanonicalJSONIsDeterministicAndReceiptSafe(t *testing.T) {
 	if string(one) != string(two) {
 		t.Fatalf("canonical JSON differs:\n%s\n%s", one, two)
 	}
-	for _, forbidden := range []string{"profile", "project", "payload", "body", "items", "records", "contents"} {
+	for _, forbidden := range []string{"profile", "project", "payload", "body", "items", "contents"} {
 		if strings.Contains(strings.ToLower(string(one)), forbidden) {
 			t.Fatalf("serialized metadata contains payload-bearing field %q: %s", forbidden, one)
 		}

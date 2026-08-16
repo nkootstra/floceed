@@ -52,7 +52,7 @@ func dynamoLedgerResource(ref model.ResourceRef, definition string, dataset mode
 		CaptureDefinition: definition,
 	}
 	for index, chunk := range dataset.Chunks {
-		artifact := captureledger.Artifact{Path: chunk.Data.Path, SHA256: chunk.Data.SHA256, Size: chunk.Data.Size, MediaType: chunk.Data.MediaType}
+		artifact := captureledger.Artifact(chunk.Data)
 		hash := sha256.Sum256([]byte(artifact.Path + "\x00" + artifact.SHA256 + "\x00" + fmt.Sprintf("%d", artifact.Size)))
 		resource.Units = append(resource.Units, captureledger.Unit{
 			ID:        fmt.Sprintf("chunk-%06d", index+1),

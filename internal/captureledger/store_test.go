@@ -67,11 +67,17 @@ func TestStoreRejectsUnusableBlobsWithStableReasons(t *testing.T) {
 			}
 		}, ReasonArtifactMissing},
 		"wrong size": {func(store *Store, artifact Artifact) {
+			if err := os.Chmod(store.blobPath(artifact), 0o600); err != nil {
+				t.Fatal(err)
+			}
 			if err := os.WriteFile(store.blobPath(artifact), []byte("short"), 0o600); err != nil {
 				t.Fatal(err)
 			}
 		}, ReasonArtifactCorrupt},
 		"wrong hash": {func(store *Store, artifact Artifact) {
+			if err := os.Chmod(store.blobPath(artifact), 0o600); err != nil {
+				t.Fatal(err)
+			}
 			if err := os.WriteFile(store.blobPath(artifact), []byte(strings.Repeat("x", int(artifact.Size))), 0o600); err != nil {
 				t.Fatal(err)
 			}
@@ -94,7 +100,7 @@ func TestStoreRejectsUnusableBlobsWithStableReasons(t *testing.T) {
 	}
 }
 
-func TestLoadCandidatesPreservesCorruptUnitForTargetedRefresh(t *testing.T) {
+func TestLoadCandidatesDefersBlobVerificationUntilSelected(t *testing.T) {
 	root, artifacts, generation, _ := storeFixture(t)
 	store, err := OpenStore(root)
 	if err != nil {
@@ -104,6 +110,9 @@ func TestLoadCandidatesPreservesCorruptUnitForTargetedRefresh(t *testing.T) {
 		t.Fatal(err)
 	}
 	artifact := generation.Resources[0].Units[0].Artifacts[0]
+	if err := os.Chmod(store.blobPath(artifact), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(store.blobPath(artifact), []byte("corrupt"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -112,8 +121,11 @@ func TestLoadCandidatesPreservesCorruptUnitForTargetedRefresh(t *testing.T) {
 		t.Fatal(err)
 	}
 	unit := loaded.Resources[0].Units[0]
-	if unit.Outcome != UnitOutcomeInvalidated || unit.Reason != ReasonArtifactCorrupt {
-		t.Fatalf("candidate unit = %#v, want targeted artifact_corrupt invalidation", unit)
+	if unit.Outcome != UnitOutcomeReused || unit.Reason != ReasonReused {
+		t.Fatalf("candidate metadata changed before selection: %#v", unit)
+	}
+	if err := store.ValidateArtifact(unit.Artifacts[0]); err == nil {
+		t.Fatal("selected corrupt artifact passed deferred validation")
 	}
 }
 

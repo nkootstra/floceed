@@ -32,8 +32,13 @@ type Plan struct {
 	EstimatedBytes     int64                  `json:"estimated_bytes"`
 	RequiredIAMActions []string               `json:"required_iam_actions"`
 	Governance         *model.GovernanceAudit `json:"governance,omitempty"`
-	ledgerResources    []captureledger.Resource
-	ledgerGenerations  map[string]string
+}
+
+type captureResult struct {
+	Plan              Plan
+	Snapshots         []model.Snapshot
+	LedgerResources   []captureledger.Resource
+	LedgerGenerations map[string]string
 }
 
 func (a *Application) Plan(ctx context.Context, p config.Project, profile, region string) (Plan, error) {
@@ -52,8 +57,8 @@ func (a *Application) PlanWithOptions(ctx context.Context, p config.Project, opt
 	if err != nil {
 		return Plan{}, err
 	}
-	planned, _, err := a.capture(ctx, captureRequest{Project: p, Profile: options.AWSProfile, Region: options.Region, Governance: policy})
-	return planned, err
+	result, err := a.capture(ctx, captureRequest{Project: p, Profile: options.AWSProfile, Region: options.Region, Governance: policy})
+	return result.Plan, err
 }
 
 func resolveGovernance(project config.Project, fixtureProfile string) (*governance.EffectivePolicy, error) {
@@ -78,7 +83,7 @@ type captureRequest struct {
 	LedgerSource   captureledger.SourceIdentity
 }
 
-func (a *Application) capture(ctx context.Context, req captureRequest) (Plan, []model.Snapshot, error) {
+func (a *Application) capture(ctx context.Context, req captureRequest) (captureResult, error) {
 	p, profile, region := req.Project, req.Profile, req.Region
 	policy := req.Governance
 	if profile == "" {
@@ -94,11 +99,11 @@ func (a *Application) capture(ctx context.Context, req captureRequest) (Plan, []
 		var err error
 		source, err = a.Factory.Open(ctx, SourceRequest{Profile: profile, Region: region, S3Names: s3Names(p), DynamoDBNames: ddbNames(p)})
 		if err != nil {
-			return Plan{}, nil, sourceError(err)
+			return captureResult{}, sourceError(err)
 		}
 	}
 	if p.Source.ExpectedAccountID != "" && p.Source.ExpectedAccountID != source.Identity.AccountID {
-		return Plan{}, nil, &Error{Kind: ErrorSource, Code: "SOURCE_ACCOUNT_MISMATCH", Message: fmt.Sprintf("AWS profile resolved to account %s, expected %s", source.Identity.AccountID, p.Source.ExpectedAccountID)}
+		return captureResult{}, &Error{Kind: ErrorSource, Code: "SOURCE_ACCOUNT_MISMATCH", Message: fmt.Sprintf("AWS profile resolved to account %s, expected %s", source.Identity.AccountID, p.Source.ExpectedAccountID)}
 	}
 	result := Plan{Source: model.SourceMetadata{AccountID: source.Identity.AccountID, Region: region}, RequiredIAMActions: []string{"sts:GetCallerIdentity"}, Governance: governanceAuditForPolicy(policy)}
 	var selections []catalog.Selection
@@ -113,7 +118,7 @@ func (a *Application) capture(ctx context.Context, req captureRequest) (Plan, []
 	type captureJob struct {
 		adapter       catalog.Adapter
 		options       model.CaptureOptions
-		candidate     []captureledger.Resource
+		candidate     *captureledger.Resource
 		invalidReason captureledger.Reason
 		generationID  string
 	}
@@ -121,7 +126,7 @@ func (a *Application) capture(ctx context.Context, req captureRequest) (Plan, []
 	for i, selection := range selections {
 		adapter, ok := source.Registry.Get(selection.Resource.Service)
 		if !ok {
-			return Plan{}, nil, &Error{Kind: ErrorPlan, Code: "ADAPTER_MISSING", Message: "no adapter for " + selection.Resource.Service}
+			return captureResult{}, &Error{Kind: ErrorPlan, Code: "ADAPTER_MISSING", Message: "no adapter for " + selection.Resource.Service}
 		}
 		options := selection.Options
 		options.Governance = policy
@@ -148,7 +153,8 @@ func (a *Application) capture(ctx context.Context, req captureRequest) (Plan, []
 				job.generationID = generation.ID
 				for _, resource := range generation.Resources {
 					if resource.Descriptor == descriptor {
-						job.candidate = append(job.candidate, resource)
+						candidate := resource
+						job.candidate = &candidate
 						for _, unit := range resource.Units {
 							if unit.Outcome == captureledger.UnitOutcomeInvalidated && job.invalidReason == "" {
 								job.invalidReason = unit.Reason
@@ -188,8 +194,9 @@ func (a *Application) capture(ctx context.Context, req captureRequest) (Plan, []
 			}
 			if reusable, ok := job.adapter.(catalog.ReusableAdapter); ok && req.Ledger != nil {
 				result, captureErr := reusable.CaptureReusable(captureCtx, source.Scope, selections[i].Resource, job.options, catalog.ReuseRequest{
-					Candidates:         job.candidate,
+					Candidate:          job.candidate,
 					InvalidationReason: job.invalidReason,
+					Validate:           req.Ledger.ValidateArtifact,
 					Materialize:        func(artifact captureledger.Artifact) error { return req.Ledger.Materialize(artifact, req.ArtifactRoot) },
 				})
 				outcomes[i].snapshot, outcomes[i].resource, outcomes[i].err = result.Snapshot, result.Resource, captureErr
@@ -217,11 +224,12 @@ func (a *Application) capture(ctx context.Context, req captureRequest) (Plan, []
 	if captureErr != nil {
 		var diskErr *storage.InsufficientSpaceError
 		if errors.As(captureErr, &diskErr) {
-			return Plan{}, nil, &Error{Kind: ErrorFilesystem, Code: "DISK_SPACE_INSUFFICIENT", Message: diskErr.Error(), Remediation: "Free disk space, choose a larger --work-dir, or reduce the capture scope.", Err: captureErr}
+			return captureResult{}, &Error{Kind: ErrorFilesystem, Code: "DISK_SPACE_INSUFFICIENT", Message: diskErr.Error(), Remediation: "Free disk space, choose a larger --work-dir, or reduce the capture scope.", Err: captureErr}
 		}
-		return Plan{}, nil, sourceError(captureErr)
+		return captureResult{}, sourceError(captureErr)
 	}
 
+	captured := captureResult{Plan: result}
 	var snapshots []model.Snapshot
 	for i, selection := range selections {
 		adapter := jobs[i].adapter
@@ -232,7 +240,7 @@ func (a *Application) capture(ctx context.Context, req captureRequest) (Plan, []
 		deps := adapter.Dependencies(snapshot)
 		planningFindings, err := adapter.FinalizePlanning(snapshot, deps)
 		if err != nil {
-			return Plan{}, nil, sourceError(err)
+			return captureResult{}, sourceError(err)
 		}
 		result.Findings = append(result.Findings, planningFindings...)
 		result.Dependencies = append(result.Dependencies, deps...)
@@ -250,13 +258,13 @@ func (a *Application) capture(ctx context.Context, req captureRequest) (Plan, []
 		result.Operations = append(result.Operations, operations(snapshot, deps)...)
 		snapshots = append(snapshots, *snapshot)
 		if outcomes[i].resource != nil {
-			result.ledgerResources = append(result.ledgerResources, *outcomes[i].resource)
+			captured.LedgerResources = append(captured.LedgerResources, *outcomes[i].resource)
 			if jobs[i].generationID != "" {
-				if result.ledgerGenerations == nil {
-					result.ledgerGenerations = make(map[string]string)
+				if captured.LedgerGenerations == nil {
+					captured.LedgerGenerations = make(map[string]string)
 				}
 				descriptor := outcomes[i].resource.Descriptor
-				result.ledgerGenerations[descriptor.Service+"\x00"+descriptor.Type+"\x00"+descriptor.ID] = jobs[i].generationID
+				captured.LedgerGenerations[resourceIdentityKey(descriptor.Service, descriptor.Type, descriptor.ID)] = jobs[i].generationID
 			}
 		}
 		if result.Governance != nil {
@@ -270,7 +278,13 @@ func (a *Application) capture(ctx context.Context, req captureRequest) (Plan, []
 		})
 	}
 	sortPlan(&result)
-	return result, snapshots, nil
+	captured.Plan = result
+	captured.Snapshots = snapshots
+	return captured, nil
+}
+
+func resourceIdentityKey(service, resourceType, id string) string {
+	return service + "\x00" + resourceType + "\x00" + id
 }
 
 func governanceAuditForPolicy(policy *governance.EffectivePolicy) *model.GovernanceAudit {

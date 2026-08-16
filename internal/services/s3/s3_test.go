@@ -9,12 +9,14 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
@@ -51,7 +53,7 @@ func TestReusableS3CaptureInventoriesButDoesNotDownloadUnchangedObjects(t *testi
 	secondSnapshot, _ := model.NewSnapshot(ref, "s3", Bucket{Name: ref.ID})
 	secondOptions := firstOptions
 	secondOptions.ArtifactDirectory, secondOptions.CheckpointDirectory = filepath.Join(secondRoot, "artifacts"), filepath.Join(secondRoot, "checkpoint")
-	second, err := adapter.captureObjectsReusable(context.Background(), scope, ref, &Bucket{Name: ref.ID}, secondSnapshot, secondOptions, catalog.ReuseRequest{Candidates: []captureledger.Resource{*first}, Materialize: copyLedgerArtifact(firstOptions.ArtifactDirectory, secondOptions.ArtifactDirectory)})
+	second, err := adapter.captureObjectsReusable(context.Background(), scope, ref, &Bucket{Name: ref.ID}, secondSnapshot, secondOptions, catalog.ReuseRequest{Candidate: first, Materialize: copyLedgerArtifact(firstOptions.ArtifactDirectory, secondOptions.ArtifactDirectory)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,10 +63,9 @@ func TestReusableS3CaptureInventoriesButDoesNotDownloadUnchangedObjects(t *testi
 	if len(second.Units) != 1 || second.Units[0].Outcome != captureledger.UnitOutcomeReused || secondSnapshot.Dataset.Records != 2 || secondSnapshot.Dataset.SourceBytes != 2 {
 		t.Fatalf("reuse result = %#v, dataset = %#v", second, secondSnapshot.Dataset)
 	}
-	for identity := range second.Units[0].Freshness.Components {
-		if strings.Contains(identity, "a.txt") || strings.Contains(identity, "b.txt") {
-			t.Fatalf("raw key leaked in ledger identity %q", identity)
-		}
+	metadata, _ := json.Marshal(second.Units[0].Freshness)
+	if bytes.Contains(metadata, []byte("a.txt")) || bytes.Contains(metadata, []byte("b.txt")) {
+		t.Fatalf("raw key leaked in ledger freshness: %s", metadata)
 	}
 }
 
@@ -98,7 +99,7 @@ func TestReusableS3CaptureReconstructsCheckpointPacksForPublicationAndReuse(t *t
 	reuseOptions := options
 	reuseOptions.ArtifactDirectory, reuseOptions.CheckpointDirectory = filepath.Join(reuseRoot, "artifacts"), filepath.Join(reuseRoot, "checkpoint")
 	reusedSnapshot, _ := model.NewSnapshot(ref, "s3", Bucket{Name: ref.ID})
-	reused, err := adapter.captureObjectsReusable(context.Background(), scope, ref, &Bucket{Name: ref.ID}, reusedSnapshot, reuseOptions, catalog.ReuseRequest{Candidates: []captureledger.Resource{*resumed}, Materialize: copyLedgerArtifact(options.ArtifactDirectory, reuseOptions.ArtifactDirectory)})
+	reused, err := adapter.captureObjectsReusable(context.Background(), scope, ref, &Bucket{Name: ref.ID}, reusedSnapshot, reuseOptions, catalog.ReuseRequest{Candidate: resumed, Materialize: copyLedgerArtifact(options.ArtifactDirectory, reuseOptions.ArtifactDirectory)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,12 +115,32 @@ func TestMissingS3UnitsUsesCompleteInventoryAcrossShiftedPackBoundaries(t *testi
 	candidate := captureledger.Resource{Units: []captureledger.Unit{{ID: "pack-000001", Freshness: first}, {ID: "pack-000002", Freshness: second}}}
 	// Inserting an earlier object can move b or c into another deterministic
 	// pack. Resource-wide membership still proves neither source identity is missing.
-	current := map[string]struct{}{}
-	for identity := range s3PackFreshness(entries).Components {
-		current[identity] = struct{}{}
-	}
-	if missing := missingS3Units(candidate, current); len(missing) != 0 {
+	if missing := missingS3Units(candidate, int64(len(entries))); len(missing) != 0 {
 		t.Fatalf("boundary shift reported moved objects missing: %#v", missing)
+	}
+}
+
+func TestMillionObjectFreshnessMetadataRemainsBounded(t *testing.T) {
+	resource := captureledger.Resource{
+		Descriptor:        captureledger.ResourceDescriptor{Service: "s3", Type: "bucket", ID: "assets"},
+		CaptureDefinition: strings.Repeat("a", 64),
+	}
+	for pack := 1; pack <= 1_000; pack++ {
+		resource.Units = append(resource.Units, captureledger.Unit{
+			ID:         fmt.Sprintf("pack-%06d", pack),
+			Freshness:  captureledger.FreshnessEvidence{Kind: "s3_inventory_v1", Digest: strings.Repeat("b", 64), Records: 1_000, Bytes: 1 << 30},
+			Outcome:    captureledger.UnitOutcomeRefreshed,
+			Reason:     captureledger.ReasonNoCandidate,
+			CapturedAt: time.Unix(1, 0).UTC(),
+		})
+	}
+	generation := captureledger.Generation{SchemaVersion: captureledger.CurrentSchemaVersion, ID: strings.Repeat("c", 64), Source: captureledger.SourceIdentity{AccountID: "123456789012", Region: "eu-west-1"}, CreatedAt: time.Unix(1, 0).UTC(), CompletedAt: time.Unix(2, 0).UTC(), Resources: []captureledger.Resource{resource}}
+	payload, err := generation.CanonicalJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(payload) > 1<<20 {
+		t.Fatalf("one-million-object freshness metadata = %d bytes, want <= 1 MiB", len(payload))
 	}
 }
 
@@ -181,7 +202,7 @@ func TestReusableS3CaptureRefreshReasonsAndMissingObjects(t *testing.T) {
 				materialize = test.materialize(firstOptions.ArtifactDirectory, secondOptions.ArtifactDirectory)
 			}
 			secondSnapshot, _ := model.NewSnapshot(ref, "s3", Bucket{Name: ref.ID})
-			second, err := adapter.captureObjectsReusable(context.Background(), scope, ref, &Bucket{Name: ref.ID}, secondSnapshot, secondOptions, catalog.ReuseRequest{Candidates: []captureledger.Resource{*first}, Materialize: materialize})
+			second, err := adapter.captureObjectsReusable(context.Background(), scope, ref, &Bucket{Name: ref.ID}, secondSnapshot, secondOptions, catalog.ReuseRequest{Candidate: first, Materialize: materialize})
 			if err != nil {
 				t.Fatal(err)
 			}

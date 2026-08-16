@@ -61,10 +61,6 @@ func OpenStore(root string) (*Store, error) {
 // Publish admits every referenced artifact before atomically replacing each
 // resource's current generation index. Existing blobs are never overwritten.
 func (s *Store) Publish(generation Generation, artifactRoot string) error {
-	payload, err := generation.CanonicalJSON()
-	if err != nil {
-		return err
-	}
 	for _, resource := range generation.Resources {
 		for _, unit := range resource.Units {
 			for _, artifact := range unit.Artifacts {
@@ -75,6 +71,12 @@ func (s *Store) Publish(generation Generation, artifactRoot string) error {
 		}
 	}
 	for _, resource := range generation.Resources {
+		resourceGeneration := generation
+		resourceGeneration.Resources = []Resource{resource}
+		payload, err := resourceGeneration.CanonicalJSON()
+		if err != nil {
+			return err
+		}
 		index := s.indexPath(generation.Source, resource.Descriptor)
 		if err := os.MkdirAll(filepath.Dir(index), 0o700); err != nil {
 			return err
@@ -105,34 +107,10 @@ func (s *Store) Load(source SourceIdentity, resource ResourceDescriptor) (Genera
 	return generation, nil
 }
 
-// LoadCandidates preserves valid units when another unit's immutable blob is
-// unusable. The damaged unit remains visible with a stable invalidation reason
-// so a reuse-aware adapter can refresh only that unit. Materialize verifies all
-// selected bytes again before use.
+// LoadCandidates validates bounded ledger metadata. Adapters defer potentially
+// large blob verification until source freshness proves a candidate useful.
 func (s *Store) LoadCandidates(source SourceIdentity, resource ResourceDescriptor) (Generation, error) {
-	generation, err := s.loadGeneration(source, resource)
-	if err != nil {
-		return Generation{}, err
-	}
-	for resourceIndex := range generation.Resources {
-		for unitIndex := range generation.Resources[resourceIndex].Units {
-			unit := &generation.Resources[resourceIndex].Units[unitIndex]
-			for _, artifact := range unit.Artifacts {
-				f, openErr := s.OpenArtifact(artifact)
-				if openErr == nil {
-					_ = f.Close()
-					continue
-				}
-				reason, classified := InvalidationReason(openErr)
-				if !classified {
-					return Generation{}, openErr
-				}
-				unit.Outcome, unit.Reason = UnitOutcomeInvalidated, reason
-				break
-			}
-		}
-	}
-	return generation, nil
+	return s.loadGeneration(source, resource)
 }
 
 func (s *Store) loadGeneration(source SourceIdentity, resource ResourceDescriptor) (Generation, error) {
@@ -209,11 +187,6 @@ func (s *Store) Materialize(artifact Artifact, artifactRoot string) error {
 	if err := bundle.ValidateRelativePath(artifact.Path); err != nil {
 		return &InvalidationError{Reason: ReasonArtifactCorrupt, Err: err}
 	}
-	f, err := s.OpenArtifact(artifact)
-	if err != nil {
-		return err
-	}
-	_ = f.Close()
 	destination := filepath.Join(artifactRoot, filepath.FromSlash(artifact.Path))
 	if err := os.MkdirAll(filepath.Dir(destination), 0o700); err != nil {
 		return err
@@ -221,7 +194,7 @@ func (s *Store) Materialize(artifact Artifact, artifactRoot string) error {
 	if err := os.Link(s.blobPath(artifact), destination); err != nil {
 		if !errors.Is(err, os.ErrExist) {
 			if err := copyExclusive(destination, s.blobPath(artifact)); err != nil {
-				return err
+				return &InvalidationError{Reason: ReasonArtifactMissing, Err: err}
 			}
 		}
 	}
@@ -234,6 +207,14 @@ func (s *Store) Materialize(artifact Artifact, artifactRoot string) error {
 		return &InvalidationError{Reason: ReasonArtifactCorrupt, Err: fmt.Errorf("materialized blob size or checksum mismatch")}
 	}
 	return nil
+}
+
+func (s *Store) ValidateArtifact(artifact Artifact) error {
+	f, err := s.OpenArtifact(artifact)
+	if err != nil {
+		return err
+	}
+	return f.Close()
 }
 
 func (s *Store) admit(root string, artifact Artifact) error {
@@ -256,33 +237,19 @@ func (s *Store) admit(root string, artifact Artifact) error {
 		}
 		return &InvalidationError{Reason: ReasonArtifactMissing, Err: statErr}
 	}
-	got, sumErr := sumOpenFile(f)
-	_ = f.Close()
-	if sumErr != nil || got.SHA256 != artifact.SHA256 || got.Size != artifact.Size {
-		if sumErr == nil {
-			sumErr = fmt.Errorf("source size or checksum mismatch")
-		}
-		return &InvalidationError{Reason: ReasonArtifactCorrupt, Err: sumErr}
-	}
 	destination := s.blobPath(artifact)
 	if err := os.MkdirAll(filepath.Dir(destination), 0o700); err != nil {
+		_ = f.Close()
 		return err
 	}
-	if err := os.Link(source, destination); err != nil {
+	if err := copyOpenVerified(destination, f, artifact); err != nil {
+		_ = f.Close()
 		if errors.Is(err, os.ErrExist) {
 			return s.verifyExisting(artifact)
 		}
-		if err := copyExclusive(destination, source); err != nil {
-			if errors.Is(err, os.ErrExist) {
-				return s.verifyExisting(artifact)
-			}
-			return err
-		}
-	}
-	if err := s.verifyExisting(artifact); err != nil {
-		_ = os.Remove(destination)
 		return err
 	}
+	_ = f.Close()
 	return storage.SyncDir(filepath.Dir(destination))
 }
 
@@ -385,6 +352,25 @@ func copyExclusive(dst, src string) error {
 	_, copyErr := io.Copy(out, in)
 	syncErr := out.Sync()
 	closeErr := out.Close()
+	if copyErr != nil || syncErr != nil || closeErr != nil {
+		_ = os.Remove(dst)
+		return errors.Join(copyErr, syncErr, closeErr)
+	}
+	return nil
+}
+
+func copyOpenVerified(dst string, in *os.File, expected Artifact) error {
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o400)
+	if err != nil {
+		return err
+	}
+	h := sha256.New()
+	n, copyErr := io.Copy(io.MultiWriter(out, h), in)
+	syncErr := out.Sync()
+	closeErr := out.Close()
+	if copyErr == nil && (n != expected.Size || hex.EncodeToString(h.Sum(nil)) != expected.SHA256) {
+		copyErr = &InvalidationError{Reason: ReasonArtifactCorrupt, Err: fmt.Errorf("source size or checksum mismatch")}
+	}
 	if copyErr != nil || syncErr != nil || closeErr != nil {
 		_ = os.Remove(dst)
 		return errors.Join(copyErr, syncErr, closeErr)

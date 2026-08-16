@@ -3,10 +3,11 @@ package captureledger
 import (
 	"encoding/json"
 	"fmt"
-	"path"
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/nkootstra/floceed/internal/bundle"
 )
 
 const CurrentSchemaVersion = 1
@@ -70,9 +71,10 @@ type Unit struct {
 // digest. Raw object keys, ETags, records, and payload values do not belong in
 // ledger metadata.
 type FreshnessEvidence struct {
-	Kind       string            `json:"kind"`
-	Digest     string            `json:"digest"`
-	Components map[string]string `json:"components,omitempty"`
+	Kind    string `json:"kind"`
+	Digest  string `json:"digest"`
+	Records int64  `json:"records,omitempty"`
+	Bytes   int64  `json:"bytes,omitempty"`
 }
 
 type Artifact struct {
@@ -136,10 +138,8 @@ func (unit Unit) validate() error {
 	if strings.TrimSpace(unit.Freshness.Kind) == "" || !validSHA256(unit.Freshness.Digest) {
 		return fmt.Errorf("freshness kind and SHA-256 digest are required")
 	}
-	for name, digest := range unit.Freshness.Components {
-		if strings.TrimSpace(name) == "" || strings.ContainsAny(name, "\r\n\t") || !validSHA256(digest) {
-			return fmt.Errorf("freshness components must have safe names and SHA-256 digests")
-		}
+	if unit.Freshness.Records < 0 || unit.Freshness.Bytes < 0 {
+		return fmt.Errorf("freshness counts must not be negative")
 	}
 	if unit.Outcome != UnitOutcomeReused && unit.Outcome != UnitOutcomeRefreshed && unit.Outcome != UnitOutcomeInvalidated {
 		return fmt.Errorf("unsupported outcome %q", unit.Outcome)
@@ -154,7 +154,7 @@ func (unit Unit) validate() error {
 		return fmt.Errorf("captured timestamp is required")
 	}
 	for index, artifact := range unit.Artifacts {
-		if !safeRelativePath(artifact.Path) {
+		if bundle.ValidateRelativePath(artifact.Path) != nil {
 			return fmt.Errorf("artifact %d has unsafe path %q", index, artifact.Path)
 		}
 		if artifact.Size < 0 || !validSHA256(artifact.SHA256) {
@@ -162,10 +162,6 @@ func (unit Unit) validate() error {
 		}
 	}
 	return nil
-}
-
-func safeRelativePath(value string) bool {
-	return value != "" && !strings.Contains(value, `\`) && !strings.HasPrefix(value, "/") && path.Clean(value) == value && value != "." && value != ".." && !strings.HasPrefix(value, "../")
 }
 
 func descriptorKey(descriptor ResourceDescriptor) string {
