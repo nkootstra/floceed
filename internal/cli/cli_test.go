@@ -13,6 +13,7 @@ import (
 
 	"github.com/nkootstra/floceed/internal/app"
 	"github.com/nkootstra/floceed/internal/config"
+	inspection "github.com/nkootstra/floceed/internal/inspect"
 	"github.com/nkootstra/floceed/internal/model"
 )
 
@@ -52,6 +53,204 @@ type fakeService struct {
 	doctor         app.DoctorResult
 	doctorErr      error
 	fixtureProfile string
+	inspectResult  inspection.Inspection
+	inspectErr     error
+	inspectOptions app.InspectOptions
+	inspected      bool
+}
+
+func (f *fakeService) InspectWithOptions(_ context.Context, _ config.Project, _ string, options app.InspectOptions) (inspection.Inspection, error) {
+	f.inspected = true
+	f.inspectOptions = options
+	return f.inspectResult, f.inspectErr
+}
+
+func TestInspectJSONUsesOneStableEnvelopeAndForwardsOptions(t *testing.T) {
+	fake := &fakeService{inspectResult: inspection.Inspection{SchemaVersion: 1, Valid: true, ManifestSchema: 3, BundleIdentity: "sha256:current", Runtime: inspection.Runtime{State: inspection.RuntimeUnavailable, Diagnostic: "connection refused"}}}
+	var out bytes.Buffer
+	cmd := New(Options{Stdout: &out, Stderr: &bytes.Buffer{}, App: fake})
+	cmd.SetArgs([]string{"inspect", "--project", writeProject(t), "--output", "json", "--compare", "baseline", "--runtime"})
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	decoder := json.NewDecoder(&out)
+	var envelope Envelope
+	if err := decoder.Decode(&envelope); err != nil {
+		t.Fatal(err)
+	}
+	if decoder.Decode(&struct{}{}) == nil {
+		t.Fatal("inspect emitted more than one JSON value")
+	}
+	if envelope.SchemaVersion != 1 || envelope.Command != "inspect" || envelope.Status != StatusSuccess {
+		t.Fatalf("envelope = %#v", envelope)
+	}
+	if !fake.inspected || fake.inspectOptions.ComparePath != "baseline" || !fake.inspectOptions.Runtime {
+		t.Fatalf("inspect options = %#v", fake.inspectOptions)
+	}
+}
+
+func TestInspectTextIsConciseDeterministicAndHasNoANSI(t *testing.T) {
+	fake := &fakeService{inspectResult: inspection.Inspection{
+		SchemaVersion: 1, Valid: true, ManifestSchema: 3, BundleIdentity: "sha256:current", SelectedResources: 1,
+		Source: inspection.SourceProjection{AccountID: "123456789012", Region: "eu-west-1"},
+		Target: inspection.TargetProjection{FlociVersion: "1.6.0"}, Artifacts: inspection.ArtifactSummary{Files: 2, Bytes: 42},
+		Services:  []inspection.ServiceSummary{{Service: "s3", Resources: 1, Selected: 1, Records: 2, SourceBytes: 21}},
+		Findings:  []inspection.Finding{{Code: "BUNDLE_WARNING", Severity: "warning", Support: "bundle support", Resource: "assets", Property: "versioning"}},
+		Resources: []inspection.Resource{{Identity: inspection.ResourceIdentity{Service: "s3", Type: "bucket", ID: "assets"}, Selected: true, Findings: []inspection.Finding{{Code: "RESOURCE_WARNING", Severity: "warning", Support: "resource support", Resource: "assets", Property: "policy"}}}},
+		Runtime:   inspection.Runtime{State: inspection.RuntimeNotRequested},
+		Receipt:   &inspection.Receipt{SchemaVersion: 1, Baseline: "sha256:baseline", Current: "sha256:current", Categories: []inspection.ChangeCategory{inspection.CategoryDataset, inspection.CategoryFindings}, Counts: inspection.ReceiptCounts{Changed: 1}, Resources: []inspection.ResourceChange{{Resource: inspection.ResourceIdentity{Service: "s3", Type: "bucket", ID: "assets"}, Outcome: inspection.OutcomeChanged, Categories: []inspection.ChangeCategory{inspection.CategoryDataset}}}},
+	}}
+	var out bytes.Buffer
+	cmd := New(Options{Stdout: &out, Stderr: &bytes.Buffer{}, App: fake})
+	cmd.SetArgs([]string{"inspect", "--project", writeProject(t), "--no-color"})
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	want := "Bundle: valid\nIdentity: sha256:current\nManifest schema: 3\nSource: 123456789012 / eu-west-1\nTarget: Floci 1.6.0\nResources: 1 selected\nArtifacts: 2 files, 42 bytes\nRuntime: not requested\n\nFindings\nWARNING BUNDLE_WARNING: bundle support [resource=assets, property=versioning]\n\nServices\ns3: 1 resources, 1 selected, 2 records, 21 bytes\n\nResources\ns3/bucket/assets: selected\n  Findings\n  WARNING RESOURCE_WARNING: resource support [resource=assets, property=policy]\n\nComparison\nBaseline: sha256:baseline\nCurrent: sha256:current\nCategories: dataset, findings\nChanges: 0 added, 0 removed, 1 changed, 0 unchanged\ns3/bucket/assets: changed (dataset)\n"
+	if out.String() != want {
+		t.Fatalf("text output:\n%s\nwant:\n%s", out.String(), want)
+	}
+	if strings.Contains(out.String(), "\x1b[") {
+		t.Fatalf("text contains ANSI: %q", out.String())
+	}
+}
+
+func TestInspectTextEscapesManifestAndRuntimeControlsWhileJSONRemainsExact(t *testing.T) {
+	canary := "safe\nFORGED\x1b[31m\t\u0085end"
+	result := inspection.Inspection{
+		SchemaVersion: 1, Valid: true, BundleIdentity: canary,
+		Source:   inspection.SourceProjection{AccountID: canary, Region: canary},
+		Target:   inspection.TargetProjection{FlociVersion: canary},
+		Services: []inspection.ServiceSummary{{Service: canary}},
+		Resources: []inspection.Resource{{
+			Identity: inspection.ResourceIdentity{Service: canary, Type: canary, ID: canary},
+			Findings: []inspection.Finding{{Code: canary, Severity: canary, Support: canary, Resource: canary, Property: canary}},
+		}},
+		Findings: []inspection.Finding{{Code: canary, Severity: canary, Support: canary, Resource: canary, Property: canary}},
+		Runtime:  inspection.Runtime{State: inspection.RuntimeUnavailable, FailedScripts: []string{canary}, Diagnostic: canary},
+		Receipt: &inspection.Receipt{
+			Baseline: canary, Current: canary, Categories: []inspection.ChangeCategory{inspection.ChangeCategory(canary)},
+			Resources: []inspection.ResourceChange{{Resource: inspection.ResourceIdentity{Service: canary, Type: canary, ID: canary}, Outcome: inspection.Outcome(canary), Categories: []inspection.ChangeCategory{inspection.ChangeCategory(canary)}}},
+		},
+	}
+
+	var textOut bytes.Buffer
+	textCommand := New(Options{Stdout: &textOut, Stderr: &bytes.Buffer{}, App: &fakeService{inspectResult: result}})
+	textCommand.SetArgs([]string{"inspect", "--project", writeProject(t)})
+	if err := textCommand.ExecuteContext(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	text := textOut.String()
+	if strings.Contains(text, "\nFORGED") || strings.Contains(text, "\x1b") || strings.Contains(text, "\t") || strings.ContainsRune(text, '\u0085') {
+		t.Fatalf("text contains unescaped control data: %q", text)
+	}
+	for _, escaped := range []string{`safe\x0AFORGED\x1B[31m\x09\x85end`, "Categories: safe"} {
+		if !strings.Contains(text, escaped) {
+			t.Fatalf("text does not contain %q: %q", escaped, text)
+		}
+	}
+
+	var jsonOut bytes.Buffer
+	jsonCommand := New(Options{Stdout: &jsonOut, Stderr: &bytes.Buffer{}, App: &fakeService{inspectResult: result}})
+	jsonCommand.SetArgs([]string{"inspect", "--project", writeProject(t), "--output", "json"})
+	if err := jsonCommand.ExecuteContext(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var envelope struct {
+		Data inspection.Inspection `json:"data"`
+	}
+	if err := json.Unmarshal(jsonOut.Bytes(), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if envelope.Data.BundleIdentity != canary || envelope.Data.Runtime.Diagnostic != canary || envelope.Data.Findings[0].Support != canary {
+		t.Fatalf("JSON inspection was sanitized: %#v", envelope.Data)
+	}
+}
+
+func TestTerminalSafeEscapesUnicodeFormattingAndPreservesReadableUnicode(t *testing.T) {
+	input := "café 日本語 🙂 \u202Ereversed\u2066isolated\u2069"
+	want := `café 日本語 🙂 \u202Ereversed\u2066isolated\u2069`
+
+	if got := terminalSafe(input); got != want {
+		t.Fatalf("terminalSafe() = %q, want %q", got, want)
+	}
+}
+
+func TestInspectJSONInvalidBundleUsesStableErrorEnvelopeAndExitCode(t *testing.T) {
+	fake := &fakeService{inspectErr: &app.Error{Kind: app.ErrorFilesystem, Code: "BUNDLE_INTEGRITY_INVALID", Message: "bundle inspection failed", Remediation: "Regenerate the bundle."}}
+	var out bytes.Buffer
+	cmd := New(Options{Stdout: &out, Stderr: &bytes.Buffer{}, App: fake})
+	cmd.SetArgs([]string{"inspect", "--project", writeProject(t), "--output", "json"})
+	err := cmd.ExecuteContext(context.Background())
+	if err == nil || ExitCode(err) != 6 || out.Len() != 0 {
+		t.Fatalf("Execute() = %v, output %q", err, out.String())
+	}
+	written, writeErr := WriteInvocationError(cmd, err)
+	if !written || writeErr != nil {
+		t.Fatalf("WriteInvocationError() = %t, %v", written, writeErr)
+	}
+	var envelope Envelope
+	if err := json.Unmarshal(out.Bytes(), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if envelope.Command != "inspect" || envelope.Status != StatusError || envelope.Error == nil || envelope.Error.Code != "BUNDLE_INTEGRITY_INVALID" {
+		t.Fatalf("envelope = %#v", envelope)
+	}
+}
+
+func TestInspectCommittedFixturesOffline(t *testing.T) {
+	current := filepath.Join("testdata", "inspect", "current", "floceed.yaml")
+	baseline := filepath.Join("testdata", "inspect", "baseline", "floceed.yaml")
+	governanceCurrent := filepath.Join("testdata", "inspect", "governance-current", "floceed.yaml")
+	for _, args := range [][]string{
+		{"inspect", "--project", current},
+		{"inspect", "--project", current, "--output", "json"},
+		{"inspect", "--project", current, "--compare", baseline, "--output", "json"},
+		{"inspect", "--project", governanceCurrent, "--compare", current, "--output", "json"},
+	} {
+		var out bytes.Buffer
+		cmd := New(Options{Stdout: &out, Stderr: &bytes.Buffer{}, App: app.New("test")})
+		cmd.SetArgs(args)
+		if err := cmd.ExecuteContext(context.Background()); err != nil {
+			t.Fatalf("floceed %v: %v", args, err)
+		}
+		for _, canary := range []string{"FIXTURE_RECORD_SECRET_CANARY", "GOVERNANCE_REPLACEMENT_SECRET_CANARY"} {
+			if strings.Contains(out.String(), canary) {
+				t.Fatalf("floceed %v disclosed %q", args, canary)
+			}
+		}
+	}
+
+	result := inspectFixtureJSON(t, current, baseline)
+	if result.Receipt == nil || result.Receipt.Counts != (inspection.ReceiptCounts{Added: 1, Removed: 1, Changed: 1, Unchanged: 1}) {
+		t.Fatalf("baseline receipt = %#v", result.Receipt)
+	}
+	governance := inspectFixtureJSON(t, governanceCurrent, current)
+	if governance.Receipt == nil || governance.Receipt.Counts.Changed == 0 {
+		t.Fatalf("governance receipt = %#v", governance.Receipt)
+	}
+	for _, change := range governance.Receipt.Resources {
+		if change.Outcome == inspection.OutcomeChanged && !reflect.DeepEqual(change.Categories, []inspection.ChangeCategory{inspection.CategoryGovernance}) {
+			t.Fatalf("governance categories = %v", change.Categories)
+		}
+	}
+}
+
+func inspectFixtureJSON(t *testing.T, project, compare string) inspection.Inspection {
+	t.Helper()
+	var out bytes.Buffer
+	cmd := New(Options{Stdout: &out, Stderr: &bytes.Buffer{}, App: app.New("test")})
+	cmd.SetArgs([]string{"inspect", "--project", project, "--compare", compare, "--output", "json"})
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var envelope struct {
+		Data inspection.Inspection `json:"data"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	return envelope.Data
 }
 
 func (f *fakeService) PlanWithOptions(_ context.Context, _ config.Project, options app.PlanOptions) (app.Plan, error) {
@@ -60,17 +259,37 @@ func (f *fakeService) PlanWithOptions(_ context.Context, _ config.Project, optio
 	return app.Plan{}, nil
 }
 
-func (f *fakeService) PullWithOptions(_ context.Context, _ config.Project, _ string, _ string, _ string, options app.PullOptions) (model.Manifest, error) {
+func (f *fakeService) PullWithOptions(_ context.Context, _ config.Project, _ string, _ string, _ string, options app.PullOptions) (app.PullResult, error) {
 	f.pulled = true
 	f.fixtureProfile = options.FixtureProfile
-	return model.Manifest{SchemaVersion: model.CurrentManifestSchemaVersion}, nil
+	return app.PullResult{Manifest: model.Manifest{SchemaVersion: model.CurrentManifestSchemaVersion}, Baseline: app.BaselineAbsent}, nil
 }
 
 type progressService struct{ fakeService }
 
-func (f *progressService) PullWithOptions(_ context.Context, _ config.Project, _ string, _ string, _ string, options app.PullOptions) (model.Manifest, error) {
-	options.Progress(model.ProgressEvent{Operation: "pull", Phase: "capture", Service: "dynamodb", Resource: "orders", CompletedRecords: 5, TotalRecords: 10, TotalPrecision: "estimated"})
-	return model.Manifest{SchemaVersion: model.CurrentManifestSchemaVersion}, nil
+func (f *progressService) PullWithOptions(_ context.Context, _ config.Project, _ string, _ string, _ string, options app.PullOptions) (app.PullResult, error) {
+	if options.Progress != nil {
+		options.Progress(model.ProgressEvent{Operation: "pull", Phase: "capture", Service: "dynamodb", Resource: "orders", CompletedRecords: 5, TotalRecords: 10, TotalPrecision: "estimated"})
+	}
+	return pullReceiptResult(), nil
+}
+
+func pullReceiptResult() app.PullResult {
+	return app.PullResult{
+		Manifest: model.Manifest{SchemaVersion: model.CurrentManifestSchemaVersion, Source: model.SourceMetadata{AccountID: "123456789012", Region: "eu-west-1"}, Findings: []model.Finding{{Code: "DATA_CAPTURE_PARTIAL", Severity: "warning"}}},
+		Baseline: app.BaselinePresent,
+		Receipt: &inspection.Receipt{
+			SchemaVersion: 1,
+			Baseline:      "sha256:baseline",
+			Current:       "sha256:current",
+			Counts:        inspection.ReceiptCounts{Added: 1, Removed: 2, Changed: 3, Unchanged: 4},
+			Resources: []inspection.ResourceChange{{
+				Resource:   inspection.ResourceIdentity{Service: "dynamodb", Type: "table", ID: "orders"},
+				Outcome:    inspection.OutcomeChanged,
+				Categories: []inspection.ChangeCategory{inspection.CategoryDataset, inspection.CategoryGovernance},
+			}},
+		},
+	}
 }
 
 func TestPullJSONProgressUsesStderrWithoutCorruptingFinalEnvelope(t *testing.T) {
@@ -85,12 +304,53 @@ func TestPullJSONProgressUsesStderrWithoutCorruptingFinalEnvelope(t *testing.T) 
 	if err := json.Unmarshal(stdout.Bytes(), &envelope); err != nil {
 		t.Fatalf("stdout is not one JSON envelope: %q: %v", stdout.String(), err)
 	}
+	if envelope.Command != "pull" || envelope.Status != StatusSuccessWithFindings {
+		t.Fatalf("pull envelope = %#v", envelope)
+	}
+	payload, ok := envelope.Data.(map[string]any)
+	if !ok || payload["baseline"] != string(app.BaselinePresent) || payload["schema_version"] != float64(model.CurrentManifestSchemaVersion) || payload["source"] == nil || payload["findings"] == nil || payload["manifest"] != nil {
+		t.Fatalf("pull payload = %#v", envelope.Data)
+	}
+	receipt, ok := payload["receipt"].(map[string]any)
+	if !ok || receipt["baseline"] != "sha256:baseline" || receipt["current"] != "sha256:current" {
+		t.Fatalf("pull receipt = %#v", payload["receipt"])
+	}
+	counts := receipt["counts"].(map[string]any)
+	if counts["added"] != float64(1) || counts["removed"] != float64(2) || counts["changed"] != float64(3) || counts["unchanged"] != float64(4) {
+		t.Fatalf("pull receipt counts = %#v", counts)
+	}
+	resources := receipt["resources"].([]any)
+	change := resources[0].(map[string]any)
+	if !reflect.DeepEqual(change["categories"], []any{"dataset", "governance"}) {
+		t.Fatalf("pull receipt categories = %#v", change["categories"])
+	}
+	if strings.Contains(stdout.String(), "secret-canary") {
+		t.Fatalf("pull output disclosed privacy canary: %s", stdout.String())
+	}
 	var event model.ProgressEvent
 	if err := json.Unmarshal(stderr.Bytes(), &event); err != nil {
 		t.Fatalf("stderr progress is not JSON: %q: %v", stderr.String(), err)
 	}
 	if event.Resource != "orders" || event.TotalPrecision != "estimated" {
 		t.Fatalf("event = %#v", event)
+	}
+}
+
+func TestPullTextIncludesExactReceiptWithoutPrivacyCanary(t *testing.T) {
+	service := &progressService{}
+	var stdout, stderr bytes.Buffer
+	cmd := New(Options{Stdin: strings.NewReader(""), Stdout: &stdout, Stderr: &stderr, App: service})
+	cmd.SetArgs([]string{"pull", "--project", writeProject(t), "--yes", "--progress", "off", "--work-dir", t.TempDir()})
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{`"baseline": "present"`, `"baseline": "sha256:baseline"`, `"current": "sha256:current"`, `"added": 1`, `"removed": 2`, `"changed": 3`, `"unchanged": 4`, `"service": "dynamodb"`, `"id": "orders"`, `"dataset"`, `"governance"`} {
+		if !strings.Contains(stdout.String(), expected) {
+			t.Fatalf("text output missing %s:\n%s", expected, stdout.String())
+		}
+	}
+	if strings.Contains(stdout.String(), "secret-canary") || stderr.Len() != 0 {
+		t.Fatalf("text output disclosed canary or emitted progress: stdout=%q stderr=%q", stdout.String(), stderr.String())
 	}
 }
 
@@ -275,6 +535,7 @@ func TestProjectCommandsExposeOnlyTheirOwnFlags(t *testing.T) {
 		{name: "render", present: []string{"project", "output"}, absent: []string{"profile", "region", "yes", "wait"}},
 		{name: "doctor", present: []string{"project", "output", "profile", "region"}, absent: []string{"yes", "wait"}},
 		{name: "up", present: []string{"project", "output", "wait"}, absent: []string{"profile", "region", "yes"}},
+		{name: "inspect", present: []string{"project", "output", "compare", "runtime"}, absent: []string{"profile", "region", "yes", "wait", "fixture-profile"}},
 	}
 
 	root := New(Options{App: &fakeService{}})

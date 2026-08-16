@@ -16,6 +16,7 @@ import (
 	"github.com/nkootstra/floceed/internal/compose"
 	"github.com/nkootstra/floceed/internal/config"
 	"github.com/nkootstra/floceed/internal/governance"
+	inspection "github.com/nkootstra/floceed/internal/inspect"
 	"github.com/nkootstra/floceed/internal/model"
 	"golang.org/x/sys/unix"
 )
@@ -25,6 +26,21 @@ type PullOptions struct {
 	Restart        bool
 	Progress       func(model.ProgressEvent)
 	FixtureProfile string
+}
+
+type BaselineState string
+
+const (
+	BaselineAbsent  BaselineState = "absent"
+	BaselinePresent BaselineState = "present"
+)
+
+// PullResult describes the bundle that was installed and, when replacing an
+// existing bundle, its disclosure-safe semantic effect.
+type PullResult struct {
+	model.Manifest
+	Baseline BaselineState       `json:"baseline"`
+	Receipt  *inspection.Receipt `json:"receipt,omitempty"`
 }
 
 var errCaptureLocked = errors.New("capture checkpoint is locked by another process")
@@ -54,29 +70,48 @@ func acquireCaptureLock(lockPath string) (release func(), err error) {
 	}, nil
 }
 
-func (a *Application) Pull(ctx context.Context, p config.Project, projectDir, profile, region string) (model.Manifest, error) {
+func (a *Application) Pull(ctx context.Context, p config.Project, projectDir, profile, region string) (PullResult, error) {
 	return a.PullWithOptions(ctx, p, projectDir, profile, region, PullOptions{})
 }
 
-func (a *Application) PullWithOptions(ctx context.Context, p config.Project, projectDir, profile, region string, options PullOptions) (model.Manifest, error) {
+func (a *Application) PullWithOptions(ctx context.Context, p config.Project, projectDir, profile, region string, options PullOptions) (PullResult, error) {
+	if err := ctx.Err(); err != nil {
+		return PullResult{}, inspectError(err)
+	}
 	if err := p.Validate(); err != nil {
-		return model.Manifest{}, &Error{Kind: ErrorPlan, Code: "PROJECT_INVALID", Message: err.Error(), Err: err}
+		return PullResult{}, &Error{Kind: ErrorPlan, Code: "PROJECT_INVALID", Message: err.Error(), Err: err}
 	}
 	policy, err := resolveGovernance(p, options.FixtureProfile)
 	if err != nil {
-		return model.Manifest{}, err
+		return PullResult{}, err
+	}
+	target := filepath.Join(projectDir, filepath.FromSlash(p.Output.Directory))
+	baselineState := BaselineAbsent
+	var baselineProjection inspection.Projection
+	if _, statErr := os.Stat(target); statErr == nil {
+		generated, loadErr := bundle.LoadGenerated(ctx, target)
+		if loadErr != nil {
+			return PullResult{}, invalidBaselineError(loadErr)
+		}
+		baselineProjection, loadErr = inspection.ProjectManifest(generated.Manifest)
+		if loadErr != nil {
+			return PullResult{}, inspectError(loadErr)
+		}
+		baselineState = BaselinePresent
+	} else if !errors.Is(statErr, os.ErrNotExist) {
+		return PullResult{}, inspectError(statErr)
 	}
 	workBase := options.WorkDir
 	if workBase == "" {
 		cache, err := os.UserCacheDir()
 		if err != nil {
-			return model.Manifest{}, filesystemError(err)
+			return PullResult{}, filesystemError(err)
 		}
 		workBase = filepath.Join(cache, "floceed", "captures")
 	}
 	abs, err := filepath.Abs(projectDir)
 	if err != nil {
-		return model.Manifest{}, filesystemError(err)
+		return PullResult{}, filesystemError(err)
 	}
 	effectiveProfile, effectiveRegion := profile, region
 	if effectiveProfile == "" {
@@ -87,29 +122,29 @@ func (a *Application) PullWithOptions(ctx context.Context, p config.Project, pro
 	}
 	source, err := a.Factory.Open(ctx, SourceRequest{Profile: effectiveProfile, Region: effectiveRegion, S3Names: s3Names(p), DynamoDBNames: ddbNames(p)})
 	if err != nil {
-		return model.Manifest{}, sourceError(err)
+		return PullResult{}, sourceError(err)
 	}
 	fingerprint := captureFingerprint(p, abs, effectiveProfile, effectiveRegion, source.Identity.AccountID, policy)
 	tmp := filepath.Join(workBase, hex.EncodeToString(fingerprint[:16]))
 	if err := os.MkdirAll(workBase, 0o700); err != nil {
-		return model.Manifest{}, filesystemError(err)
+		return PullResult{}, filesystemError(err)
 	}
 	lockPath := tmp + ".lock"
 	release, err := acquireCaptureLock(lockPath)
 	if err != nil {
 		if errors.Is(err, errCaptureLocked) {
-			return model.Manifest{}, &Error{Kind: ErrorFilesystem, Code: "CAPTURE_IN_PROGRESS", Message: "another capture is using this checkpoint", Remediation: "Wait for the other floceed pull to finish or stop it before retrying.", Err: err}
+			return PullResult{}, &Error{Kind: ErrorFilesystem, Code: "CAPTURE_IN_PROGRESS", Message: "another capture is using this checkpoint", Remediation: "Wait for the other floceed pull to finish or stop it before retrying.", Err: err}
 		}
-		return model.Manifest{}, filesystemError(err)
+		return PullResult{}, filesystemError(err)
 	}
 	defer release()
 	if options.Restart {
 		if err := os.RemoveAll(tmp); err != nil {
-			return model.Manifest{}, filesystemError(err)
+			return PullResult{}, filesystemError(err)
 		}
 	}
 	if err := os.MkdirAll(filepath.Join(tmp, "artifacts"), 0o700); err != nil {
-		return model.Manifest{}, filesystemError(err)
+		return PullResult{}, filesystemError(err)
 	}
 	var progressMu sync.Mutex
 	var sequence int64
@@ -138,19 +173,56 @@ func (a *Application) PullWithOptions(ctx context.Context, p config.Project, pro
 		Source:         &source,
 	})
 	if err != nil {
-		return model.Manifest{}, err
+		return PullResult{}, err
 	}
 	manifest := a.manifest(p, planned, snapshots)
-	target := filepath.Join(projectDir, filepath.FromSlash(p.Output.Directory))
+	currentProjection, err := inspection.ProjectManifest(manifest)
+	if err != nil {
+		return PullResult{}, &Error{Kind: ErrorPlan, Code: "MANIFEST_INVALID", Message: err.Error(), Err: err}
+	}
 	report(model.ProgressEvent{Operation: "pull", Phase: "install", Message: "validating and installing bundle"})
-	if err := bundle.Render(ctx, target, p, manifest, bundle.RenderOptions{ArtifactRoot: filepath.Join(tmp, "artifacts"), ValidateCompose: a.ComposeValidator}); err != nil {
-		return model.Manifest{}, filesystemError(err)
+	beforeInstall := func() error {
+		generated, loadErr := bundle.LoadGenerated(ctx, target)
+		if loadErr != nil {
+			if errors.Is(loadErr, bundle.ErrGeneratedRootMissing) {
+				baselineState = BaselineAbsent
+				baselineProjection = inspection.Projection{}
+				return nil
+			}
+			return invalidBaselineError(loadErr)
+		}
+		projection, projectErr := inspection.ProjectManifest(generated.Manifest)
+		if projectErr != nil {
+			return inspectError(projectErr)
+		}
+		baselineState = BaselinePresent
+		baselineProjection = projection
+		return nil
+	}
+	if err := bundle.Render(ctx, target, p, manifest, bundle.RenderOptions{ArtifactRoot: filepath.Join(tmp, "artifacts"), ValidateCompose: a.ComposeValidator, BeforeInstall: beforeInstall}); err != nil {
+		var appErr *Error
+		if errors.As(err, &appErr) {
+			return PullResult{}, appErr
+		}
+		return PullResult{}, filesystemError(err)
 	}
 	if err := os.RemoveAll(tmp); err != nil {
-		return model.Manifest{}, filesystemError(err)
+		return PullResult{}, filesystemError(err)
 	}
 	report(model.ProgressEvent{Operation: "pull", Phase: "complete", Message: "bundle installed"})
-	return manifest, nil
+	result := PullResult{Manifest: manifest, Baseline: baselineState}
+	if baselineState == BaselinePresent {
+		receipt := inspection.Compare(baselineProjection, currentProjection)
+		result.Receipt = &receipt
+	}
+	return result, nil
+}
+
+func invalidBaselineError(err error) error {
+	if errors.Is(err, bundle.ErrGeneratedRootMissing) {
+		return inspectError(err)
+	}
+	return &Error{Kind: ErrorFilesystem, Code: "BUNDLE_INTEGRITY_INVALID", Message: fmt.Sprintf("installed baseline is invalid: %v", err), Remediation: "Repair or remove the invalid generated bundle before pulling again.", Err: err}
 }
 
 func captureFingerprint(p config.Project, directory, profile, region, accountID string, policy *governance.EffectivePolicy) [32]byte {

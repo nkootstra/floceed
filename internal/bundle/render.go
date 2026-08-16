@@ -26,13 +26,14 @@ type ComposeValidator func(context.Context, string) error
 type RenderOptions struct {
 	ArtifactRoot    string
 	ValidateCompose ComposeValidator
+	BeforeInstall   func() error
 }
 
 func Render(ctx context.Context, target string, project config.Project, manifest model.Manifest, opts RenderOptions) error {
 	if err := manifest.Validate(); err != nil {
 		return err
 	}
-	return WriteAtomic(target, func(stage string) error {
+	return WriteAtomicGuarded(target, func(stage string) error {
 		if err := renderStage(stage, project, manifest, opts.ArtifactRoot); err != nil {
 			return err
 		}
@@ -44,7 +45,7 @@ func Render(ctx context.Context, target string, project config.Project, manifest
 			validate = ValidateCompose
 		}
 		return validate(ctx, filepath.Join(stage, ComposeFile))
-	})
+	}, opts.BeforeInstall)
 }
 
 func renderStage(stage string, project config.Project, manifest model.Manifest, artifactRoot string) error {

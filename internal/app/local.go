@@ -6,16 +6,19 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/nkootstra/floceed/internal/bundle"
 	"github.com/nkootstra/floceed/internal/compose"
 	"github.com/nkootstra/floceed/internal/config"
+	inspection "github.com/nkootstra/floceed/internal/inspect"
 	"github.com/nkootstra/floceed/internal/model"
 )
 
@@ -30,6 +33,7 @@ type localRuntime interface {
 	DoctorChecks(context.Context) []Check
 	Start(context.Context, string, string) ([]byte, error)
 	WaitReady(context.Context, string, time.Duration) error
+	InspectStatus(context.Context, string, time.Duration) (inspection.Runtime, error)
 }
 type progressRuntime interface {
 	WatchProgress(context.Context, string, string, time.Time, func(model.ProgressEvent)) func()
@@ -315,4 +319,60 @@ func (r *dockerLocalRuntime) WaitReady(ctx context.Context, url string, wait tim
 			}
 		}
 	}
+}
+
+// InspectStatus performs one bounded, read-only readiness query. Runtime
+// failures are data, not artifact failures, so callers can retain a valid
+// offline inspection result.
+func (r *dockerLocalRuntime) InspectStatus(ctx context.Context, url string, wait time.Duration) (inspection.Runtime, error) {
+	if err := ctx.Err(); err != nil {
+		return inspection.Runtime{}, err
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, wait)
+	defer cancel()
+	req, err := http.NewRequestWithContext(probeCtx, http.MethodGet, url, nil)
+	if err != nil {
+		return unavailableRuntime(err), nil
+	}
+	response, err := r.httpClient.Do(req)
+	if err != nil {
+		if parentErr := ctx.Err(); parentErr != nil {
+			return inspection.Runtime{}, parentErr
+		}
+		return unavailableRuntime(err), nil
+	}
+	defer response.Body.Close()
+	if response.StatusCode/100 != 2 {
+		return unavailableRuntime(fmt.Errorf("runtime returned HTTP %d", response.StatusCode)), nil
+	}
+	var status initStatus
+	if err := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&status); err != nil {
+		if parentErr := ctx.Err(); parentErr != nil {
+			return inspection.Runtime{}, parentErr
+		}
+		return unavailableRuntime(fmt.Errorf("invalid runtime response")), nil
+	}
+	failed := make([]string, 0)
+	for _, script := range status.Scripts.Ready {
+		if strings.EqualFold(script.State, "ERROR") || strings.EqualFold(script.State, "FAILED") || script.ReturnCode != 0 {
+			failed = append(failed, boundedMessage(script.Script, 80))
+		}
+	}
+	sort.Strings(failed)
+	if status.Completed.Ready && len(failed) == 0 {
+		return inspection.Runtime{State: inspection.RuntimeReady}, nil
+	}
+	return inspection.Runtime{State: inspection.RuntimeNotReady, FailedScripts: failed}, nil
+}
+
+func unavailableRuntime(err error) inspection.Runtime {
+	return inspection.Runtime{State: inspection.RuntimeUnavailable, Diagnostic: boundedMessage(err.Error(), 160)}
+}
+
+func boundedMessage(value string, limit int) string {
+	message := strings.Join(strings.Fields(value), " ")
+	if len(message) > limit {
+		message = message[:limit]
+	}
+	return message
 }

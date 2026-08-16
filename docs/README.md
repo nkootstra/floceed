@@ -51,6 +51,7 @@ Headless workflows use the same application services:
 floceed scan --profile development --region eu-west-1
 floceed plan --project floceed.yaml
 floceed pull --project floceed.yaml --yes
+floceed inspect --project floceed.yaml
 floceed render --project floceed.yaml
 floceed doctor --project floceed.yaml
 floceed up --project floceed.yaml
@@ -79,6 +80,53 @@ starts containers. `pull` captures and atomically installs a new bundle.
 `render` reads only the existing local manifest and artifacts. `up` is a thin
 wrapper around the generated Compose project and waits for Floci's
 `/_floci/init` ready state.
+
+### Inspect and compare bundles
+
+`inspect` is offline by default. It validates the manifest schema, safe paths,
+and every indexed checksum before describing the installed bundle. It does not
+load AWS credentials, run Docker, contact Floci, or mutate the bundle.
+
+```bash
+floceed inspect --project floceed.yaml
+floceed inspect --project floceed.yaml --output json
+floceed inspect --project floceed.yaml --compare ../previous/floceed.yaml
+```
+
+`--compare` also accepts a generated bundle directory. The receipt compares
+canonical manifest semantics, not raw files or fixture values. Each resource is
+`added`, `removed`, `changed`, or `unchanged`. Changed resources name one or
+more stable categories: `structure`, `dataset`, `governance`, `operations`,
+`findings`, `selection`, `source`, or `target`. Capture time and producing tool
+version do not create semantic changes. Dataset hashes, counts, formats, and
+chunk identities can create a semantic change, but a semantic identity never
+replaces checksum validation: checksums prove byte integrity; the receipt
+explains replay-relevant meaning.
+
+A successful first `pull` reports `baseline: absent`. Later successful pulls
+include a receipt comparing the prior valid bundle with the installed bundle.
+A failed replacement emits no success receipt and leaves the prior bundle in
+place. Floceed does not reconcile, delete, or otherwise correct differences.
+The possible receipt outcomes remain the four listed above; `reused` and
+`invalidated` are deferred until a future v0.4 capture-reuse ledger and are not
+inferred from equality in v0.3.
+
+Governed schema-3 bundles expose only the audit fields already safe for the
+manifest: opaque policy, cohort, rule, and resource identities; non-secret key
+IDs; algorithm versions; actions; truncation state; and fixed count buckets.
+Inspection and receipts never expose source values, structures, replacement
+values, salts, rank digests, audit samples, or fixture records.
+
+Runtime readiness is optional enrichment:
+
+```bash
+floceed inspect --project floceed.yaml --runtime
+```
+
+When requested, Floceed makes one bounded request to the configured local Floci
+endpoint. An unreachable endpoint is reported as `unavailable` while the valid
+artifact summary remains available. This is initialization readiness, not a
+runtime drift engine, log viewer, or reconciliation mechanism.
 
 ### JSON output envelope
 
@@ -270,6 +318,14 @@ go test -tags=integration ./internal/integration -count=1
 It starts the exact digest-pinned Floci compat image, mounts the generated
 runtime and hooks read-only, verifies an S3 object and DynamoDB item, then
 recreates Floci with persistent state and replays the same bundle.
+
+Deterministic metadata-only inspect fixtures can be checked without AWS or
+Docker:
+
+```bash
+go test ./internal/testfixture -run TestCommittedInspectFixturesMatchGenerator -count=1
+go test ./internal/cli -run TestInspectCommittedFixturesOffline -count=1
+```
 
 ## Non-goals
 
