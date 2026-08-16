@@ -14,6 +14,7 @@ import (
 
 type fakeBackend struct {
 	scanRequests chan<- app.ScanRequest
+	planRequests chan<- ProjectRequest
 }
 
 func (fakeBackend) Profiles(context.Context) ([]Profile, error) {
@@ -28,7 +29,12 @@ func (b fakeBackend) Scan(_ context.Context, req app.ScanRequest) (app.ScanResul
 	}
 	return app.ScanResult{}, nil
 }
-func (fakeBackend) Plan(context.Context, ProjectRequest) (app.Plan, error) { return app.Plan{}, nil }
+func (b fakeBackend) Plan(_ context.Context, req ProjectRequest) (app.Plan, error) {
+	if b.planRequests != nil {
+		b.planRequests <- req
+	}
+	return app.Plan{}, nil
+}
 func (fakeBackend) SaveAndPull(context.Context, ProjectRequest) (model.Manifest, error) {
 	return model.Manifest{SchemaVersion: 1}, nil
 }
@@ -192,6 +198,26 @@ func TestSafeDataDefaultsAndFinalConfirmation(t *testing.T) {
 	m = press(t, m, "y")
 	if m.Screen() != ScreenProgress {
 		t.Fatalf("confirmation did not start generation: screen=%s", m.Screen())
+	}
+}
+
+func TestFixtureProfileOptionReachesPlanFromInteractiveFlow(t *testing.T) {
+	requests := make(chan ProjectRequest, 1)
+	m := NewModel(fakeBackend{planRequests: requests}, Options{FixtureProfile: "share-safe"})
+	m.screen = ScreenOptions
+
+	updated, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m = updated.(Model)
+	if cmd == nil {
+		t.Fatal("entering the review flow did not start planning")
+	}
+	msg := cmd()
+	if result := msg.(planFinishedMsg); result.err != nil {
+		t.Fatal(result.err)
+	}
+	req := <-requests
+	if req.FixtureProfile != "share-safe" {
+		t.Fatalf("fixture profile = %q, want share-safe", req.FixtureProfile)
 	}
 }
 

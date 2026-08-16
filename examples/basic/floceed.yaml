@@ -8,7 +8,7 @@ source:
 target:
   floci_version: 1.6.0
   port: 4566
-  hook_timeout_seconds: 300
+  hook_timeout_seconds: 3600
   replay_workers: 4
   persistence:
     enabled: true
@@ -31,14 +31,59 @@ resources:
       preserve_provisioned: false
       data:
         enabled: true
-        mode: bounded
-        max_items: 1000
-        max_pages: 100
+        mode: full
         gzip: true
 
 capture:
   allow_partial_data: false
   resource_workers: 2
+
+# Fictional example only. Review all covered and uncovered data before sharing.
+# FLOCEED_GOVERNANCE_SECRET supplies at least 32 random bytes as base64 at runtime.
+fixture_profiles:
+  share-safe:
+    rules:
+      - id: customer-email
+        service: dynamodb
+        resource: floceed-example-items
+        target:
+          kind: dynamodb_attribute
+          path: customer.email
+        action: pseudonymize
+        key_id: fixtures-2026-08
+        scope: basic-project
+      - id: internal-note
+        service: dynamodb
+        resource: floceed-example-items
+        target:
+          kind: dynamodb_attribute
+          path: internal_note
+        action: omit
+      - id: fixture-owner
+        service: s3
+        resource: floceed-example-assets
+        target:
+          kind: s3_metadata
+          path: owner
+        action: replace
+        replacement: example-team
+      - id: text-body
+        service: s3
+        resource: floceed-example-assets
+        target:
+          kind: s3_text_body
+        action: replace
+        replacement: fictional fixture content
+        content_types:
+          - text/plain
+    cohorts:
+      - resource: floceed-example-items
+        key_id: fixtures-2026-08
+        scope: basic-project
+        key_paths:
+          - id
+        limit: 100
+        max_retained_bytes: 1048576
 
 output:
   directory: .floceed

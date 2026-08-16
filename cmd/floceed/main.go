@@ -45,8 +45,8 @@ func main() {
 	backend := tui.ApplicationBackend{App: application}
 	cmd := cli.New(cli.Options{
 		Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr, Version: releaseVersion, App: application,
-		TUI: func(ctx context.Context, in io.Reader, out io.Writer, noColor bool) error {
-			return tui.Run(ctx, in, out, backend, tui.Options{NoColor: noColor})
+		TUI: func(ctx context.Context, in io.Reader, out io.Writer, noColor bool, fixtureProfile string) error {
+			return tui.Run(ctx, in, out, backend, tui.Options{NoColor: noColor, FixtureProfile: fixtureProfile})
 		},
 	})
 	// os.Exit does not run deferred functions, so deregister the signal

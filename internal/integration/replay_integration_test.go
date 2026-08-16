@@ -44,13 +44,17 @@ func TestGeneratedBundleReplaysIdempotentlyWithPersistentState(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
 	defer cancel()
 
-	bundleRoot := renderSyntheticBundle(t, ctx)
+	bundleRoot := renderSyntheticBundle(t, ctx, replayFixture{
+		SchemaVersion: 2,
+		ObjectBody:    "hello from floceed\n",
+		ItemID:        "fixture-1",
+	})
 	persistence := t.TempDir()
 
 	first := startFloci(t, ctx, bundleRoot, persistence)
 	endpoint := endpointFor(t, ctx, first)
 	waitForReady(t, ctx, first, endpoint)
-	verifySnapshot(t, ctx, endpoint)
+	verifySnapshot(t, ctx, endpoint, "hello from floceed\n", "fixture-1")
 	firstVersions := objectVersions(t, ctx, endpoint)
 	if firstVersions != 1 {
 		t.Fatalf("first replay created %d object versions, want 1", firstVersions)
@@ -63,19 +67,57 @@ func TestGeneratedBundleReplaysIdempotentlyWithPersistentState(t *testing.T) {
 	defer testcontainers.CleanupContainer(t, second)
 	endpoint = endpointFor(t, ctx, second)
 	waitForReady(t, ctx, second, endpoint)
-	verifySnapshot(t, ctx, endpoint)
+	verifySnapshot(t, ctx, endpoint, "hello from floceed\n", "fixture-1")
 	if got := objectVersions(t, ctx, endpoint); got != firstVersions {
 		t.Fatalf("second replay changed S3 version count from %d to %d", firstVersions, got)
 	}
 }
 
-func renderSyntheticBundle(t *testing.T, ctx context.Context) string {
+func TestGovernedSchema3BundleReplaysPreparedTransformedArtifacts(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
+	defer cancel()
+
+	const transformedObject = "fictional fixture content\n"
+	const transformedItemID = "pseudonym/v1:09f0a1b2c3d4"
+	bundleRoot := renderSyntheticBundle(t, ctx, replayFixture{
+		SchemaVersion: 3,
+		ObjectBody:    transformedObject,
+		ItemID:        transformedItemID,
+		Governance: &model.GovernanceAudit{
+			Profile:        "share-safe",
+			PolicyIdentity: "policy-opaque-001",
+			CohortIdentity: "cohort-opaque-001",
+			KeyIDs:         []string{"fixtures-2026-08"},
+			Algorithms:     []string{"cohort-rank/v1", "pseudonym/v1"},
+			Rules: []model.GovernanceRuleAudit{
+				{RuleID: "customer-email", Action: "pseudonymize", Count: model.CountBucket1To9},
+				{RuleID: "text-body", Action: "replace", Count: model.CountBucket1To9},
+			},
+			Cohorts: []model.GovernanceCohortAudit{{ResourceIdentity: "resource-opaque-001", Eligible: model.CountBucket1To9, Retained: model.CountBucket1To9}},
+		},
+	})
+
+	container := startFloci(t, ctx, bundleRoot, t.TempDir())
+	defer testcontainers.CleanupContainer(t, container)
+	endpoint := endpointFor(t, ctx, container)
+	waitForReady(t, ctx, container, endpoint)
+	verifySnapshot(t, ctx, endpoint, transformedObject, transformedItemID)
+}
+
+type replayFixture struct {
+	SchemaVersion int
+	ObjectBody    string
+	ItemID        string
+	Governance    *model.GovernanceAudit
+}
+
+func renderSyntheticBundle(t *testing.T, ctx context.Context, fixture replayFixture) string {
 	t.Helper()
 	root := t.TempDir()
 	artifacts := filepath.Join(root, "artifacts")
 	itemPath := "bundle/data/dynamodb/items.ndjson"
-	object := []byte("hello from floceed\n")
-	item := []byte(`{"id":{"S":"fixture-1"},"payload":{"M":{"active":{"BOOL":true},"count":{"N":"42"}}}}` + "\n")
+	object := []byte(fixture.ObjectBody)
+	item := []byte(fmt.Sprintf(`{"id":{"S":%q},"payload":{"M":{"active":{"BOOL":true},"count":{"N":"42"}}}}`, fixture.ItemID) + "\n")
 	packPath := "bundle/data/s3/pack-000001.tar.gz"
 	indexPath := "bundle/data/s3/pack-000001.index.ndjson.gz"
 	entryName := "object.bin"
@@ -115,7 +157,7 @@ func renderSyntheticBundle(t *testing.T, ctx context.Context) string {
 	s3Snapshot.Dataset = &model.Dataset{Format: "s3-tar-gzip-v1", Records: 1, SourceBytes: int64(len(object)), Consistency: "best_effort", Chunks: []model.DataChunk{{Data: packRef, Index: &indexRef, Records: 1, SourceBytes: int64(len(object))}}}
 
 	manifest := model.Manifest{
-		SchemaVersion: model.CurrentManifestSchemaVersion,
+		SchemaVersion: fixture.SchemaVersion,
 		Tool:          model.ToolMetadata{Version: "integration-test"},
 		Target:        model.TargetMetadata{FlociVersion: config.DefaultFlociVersion, Image: compose.Image},
 		Source:        model.SourceMetadata{AccountID: accountID, Region: region},
@@ -131,6 +173,7 @@ func renderSyntheticBundle(t *testing.T, ctx context.Context) string {
 			{ID: "data:dynamodb:" + table, Stage: model.StageData, Service: "dynamodb", ResourceID: table, Action: "upsert"},
 			{ID: "data:s3:" + bucket, Stage: model.StageData, Service: "s3", ResourceID: bucket, Action: "upsert"},
 		},
+		Governance: fixture.Governance,
 	}
 	project := config.Project{
 		SchemaVersion: 1,
@@ -272,7 +315,7 @@ func clients(endpoint string) (*s3.Client, *dynamodb.Client) {
 	return s3Client, ddbClient
 }
 
-func verifySnapshot(t *testing.T, ctx context.Context, endpoint string) {
+func verifySnapshot(t *testing.T, ctx context.Context, endpoint, expectedObject, expectedItemID string) {
 	t.Helper()
 	s3Client, ddbClient := clients(endpoint)
 	location, err := s3Client.GetBucketLocation(ctx, &s3.GetBucketLocationInput{Bucket: aws.String(bucket)})
@@ -292,7 +335,7 @@ func verifySnapshot(t *testing.T, ctx context.Context, endpoint string) {
 	}
 	body, err := io.ReadAll(object.Body)
 	object.Body.Close()
-	if err != nil || string(body) != "hello from floceed\n" {
+	if err != nil || string(body) != expectedObject {
 		t.Fatalf("object body = %q, err %v", body, err)
 	}
 	bucketTags, err := s3Client.GetBucketTagging(ctx, &s3.GetBucketTaggingInput{Bucket: aws.String(bucket)})
@@ -313,7 +356,7 @@ func verifySnapshot(t *testing.T, ctx context.Context, endpoint string) {
 		t.Fatalf("table tags do not contain floceed=integration: %#v, err %v", tableTags.Tags, err)
 	}
 	item, err := ddbClient.GetItem(ctx, &dynamodb.GetItemInput{
-		TableName: aws.String(table), Key: map[string]ddbtypes.AttributeValue{"id": &ddbtypes.AttributeValueMemberS{Value: "fixture-1"}},
+		TableName: aws.String(table), Key: map[string]ddbtypes.AttributeValue{"id": &ddbtypes.AttributeValueMemberS{Value: expectedItemID}},
 	})
 	if err != nil {
 		t.Fatalf("get DynamoDB item: %v", err)

@@ -73,3 +73,10 @@ Structure-only projects can omit `s3:GetObject`, `s3:GetObjectTagging`, and
 `dynamodb:Scan`. An optional configuration permission denied for one resource
 is reported as a finding instead of hiding that resource.
 
+Fixture profiles do not add AWS permissions. DynamoDB attribute transformation
+and cohort selection operate on items already returned by `dynamodb:Scan`; S3
+metadata and allowlisted textual-body transformation operate on objects already
+returned by `s3:GetObject`. Keep the same least-privilege resource restrictions
+and omit data-read actions when fixture data is disabled. The runtime governance
+secret is local input and must never be placed in an IAM policy, AWS tag,
+project file, or generated bundle.

@@ -11,12 +11,72 @@ import (
 	"github.com/nkootstra/floceed/internal/app"
 	"github.com/nkootstra/floceed/internal/awsconfig"
 	"github.com/nkootstra/floceed/internal/config"
+	"github.com/nkootstra/floceed/internal/governance"
 	"github.com/nkootstra/floceed/internal/model"
 	"go.yaml.in/yaml/v3"
 )
 
 type fakePuller struct {
-	called bool
+	called         bool
+	planCalled     bool
+	fixtureProfile string
+}
+
+func (f *fakePuller) PlanWithOptions(_ context.Context, _ config.Project, options app.PlanOptions) (app.Plan, error) {
+	f.planCalled = true
+	f.fixtureProfile = options.FixtureProfile
+	return app.Plan{}, nil
+}
+
+func TestApplicationBackendPlanRejectsInvalidCohortBeforePlanning(t *testing.T) {
+	project := config.NewProject()
+	project.Source.Region = "eu-west-1"
+	project.Resources.DynamoDB = []config.DynamoDBResource{{
+		Name: "orders",
+		Data: &config.DynamoDBDataPolicy{Enabled: true, Mode: config.DataModeBounded, MaxItems: 10, MaxPages: 1},
+	}}
+	project.FixtureProfiles = map[string]config.FixtureProfile{
+		"share-safe": {Cohorts: []config.CohortPolicy{{
+			Resource: "orders", KeyID: "key-1", KeyPaths: []string{"id"}, Limit: 5,
+			Algorithm: governance.CohortRankAlgorithm,
+		}}},
+	}
+	puller := &fakePuller{}
+	backend := ApplicationBackend{App: puller}
+
+	_, err := backend.Plan(context.Background(), ProjectRequest{Project: project, FixtureProfile: "share-safe"})
+	if err == nil {
+		t.Fatal("expected bounded cohort project to be rejected")
+	}
+	if puller.planCalled {
+		t.Fatal("PlanWithOptions was called for an invalid project")
+	}
+}
+
+func (f *fakePuller) PullWithOptions(_ context.Context, _ config.Project, _ string, _ string, _ string, options app.PullOptions) (model.Manifest, error) {
+	f.called = true
+	f.fixtureProfile = options.FixtureProfile
+	return model.Manifest{SchemaVersion: model.CurrentManifestSchemaVersion}, nil
+}
+
+func TestApplicationBackendForwardsFixtureProfileToPlanAndPull(t *testing.T) {
+	project := config.NewProject()
+	project.Source.Region = "eu-west-1"
+	puller := &fakePuller{}
+	backend := ApplicationBackend{App: puller}
+	req := ProjectRequest{Project: project, ProjectFile: filepath.Join(t.TempDir(), "floceed.yaml"), FixtureProfile: "share-safe"}
+	if _, err := backend.Plan(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+	if puller.fixtureProfile != "share-safe" {
+		t.Fatalf("plan fixture profile = %q", puller.fixtureProfile)
+	}
+	if _, err := backend.SaveAndPull(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+	if puller.fixtureProfile != "share-safe" {
+		t.Fatalf("pull fixture profile = %q", puller.fixtureProfile)
+	}
 }
 
 func (*fakePuller) Identity(context.Context, string, string) (awsconfig.Identity, error) {

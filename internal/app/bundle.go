@@ -15,14 +15,16 @@ import (
 	"github.com/nkootstra/floceed/internal/bundle"
 	"github.com/nkootstra/floceed/internal/compose"
 	"github.com/nkootstra/floceed/internal/config"
+	"github.com/nkootstra/floceed/internal/governance"
 	"github.com/nkootstra/floceed/internal/model"
 	"golang.org/x/sys/unix"
 )
 
 type PullOptions struct {
-	WorkDir  string
-	Restart  bool
-	Progress func(model.ProgressEvent)
+	WorkDir        string
+	Restart        bool
+	Progress       func(model.ProgressEvent)
+	FixtureProfile string
 }
 
 var errCaptureLocked = errors.New("capture checkpoint is locked by another process")
@@ -60,6 +62,10 @@ func (a *Application) PullWithOptions(ctx context.Context, p config.Project, pro
 	if err := p.Validate(); err != nil {
 		return model.Manifest{}, &Error{Kind: ErrorPlan, Code: "PROJECT_INVALID", Message: err.Error(), Err: err}
 	}
+	policy, err := resolveGovernance(p, options.FixtureProfile)
+	if err != nil {
+		return model.Manifest{}, err
+	}
 	workBase := options.WorkDir
 	if workBase == "" {
 		cache, err := os.UserCacheDir()
@@ -83,11 +89,7 @@ func (a *Application) PullWithOptions(ctx context.Context, p config.Project, pro
 	if err != nil {
 		return model.Manifest{}, sourceError(err)
 	}
-	fingerprintPayload, _ := json.Marshal(struct {
-		Project                               config.Project
-		Directory, Profile, Region, AccountID string
-	}{p, abs, effectiveProfile, effectiveRegion, source.Identity.AccountID})
-	fingerprint := sha256.Sum256(fingerprintPayload)
+	fingerprint := captureFingerprint(p, abs, effectiveProfile, effectiveRegion, source.Identity.AccountID, policy)
 	tmp := filepath.Join(workBase, hex.EncodeToString(fingerprint[:16]))
 	if err := os.MkdirAll(workBase, 0o700); err != nil {
 		return model.Manifest{}, filesystemError(err)
@@ -127,6 +129,7 @@ func (a *Application) PullWithOptions(ctx context.Context, p config.Project, pro
 	planned, snapshots, err := a.capture(ctx, captureRequest{
 		Project:        p,
 		Profile:        profile,
+		Governance:     policy,
 		Region:         region,
 		ArtifactRoot:   filepath.Join(tmp, "artifacts"),
 		IncludeData:    true,
@@ -148,6 +151,14 @@ func (a *Application) PullWithOptions(ctx context.Context, p config.Project, pro
 	}
 	report(model.ProgressEvent{Operation: "pull", Phase: "complete", Message: "bundle installed"})
 	return manifest, nil
+}
+
+func captureFingerprint(p config.Project, directory, profile, region, accountID string, policy *governance.EffectivePolicy) [32]byte {
+	payload, _ := json.Marshal(struct {
+		Project                                           config.Project
+		Directory, Profile, Region, AccountID, Governance string
+	}{p, directory, profile, region, accountID, governance.IdentityOf(policy)})
+	return sha256.Sum256(payload)
 }
 
 func (a *Application) Render(ctx context.Context, p config.Project, projectDir string) (model.Manifest, error) {
@@ -185,5 +196,5 @@ func (a *Application) manifest(p config.Project, planned Plan, snapshots []model
 	for _, finding := range planned.Findings {
 		partial = partial || finding.Code == "DATA_CAPTURE_PARTIAL"
 	}
-	return model.Manifest{SchemaVersion: model.CurrentManifestSchemaVersion, Tool: model.ToolMetadata{Version: version}, Target: model.TargetMetadata{FlociVersion: p.Target.FlociVersion, Image: compose.Image}, Source: planned.Source, Capture: model.CaptureMetadata{CapturedAt: now().UTC(), Partial: partial}, Selected: planned.Selected, Snapshots: snapshots, Operations: planned.Operations, Findings: planned.Findings}
+	return model.Manifest{SchemaVersion: model.CurrentManifestSchemaVersion, Tool: model.ToolMetadata{Version: version}, Target: model.TargetMetadata{FlociVersion: p.Target.FlociVersion, Image: compose.Image}, Source: planned.Source, Capture: model.CaptureMetadata{CapturedAt: now().UTC(), Partial: partial}, Selected: planned.Selected, Snapshots: snapshots, Operations: planned.Operations, Findings: planned.Findings, Governance: planned.Governance}
 }

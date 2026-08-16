@@ -19,9 +19,10 @@ type Profile struct {
 }
 
 type ProjectRequest struct {
-	Project     config.Project
-	ProjectFile string
-	Progress    func(model.ProgressEvent)
+	Project        config.Project
+	ProjectFile    string
+	FixtureProfile string
+	Progress       func(model.ProgressEvent)
 }
 
 type Backend interface {
@@ -37,8 +38,8 @@ type Backend interface {
 type application interface {
 	Identity(context.Context, string, string) (awsconfig.Identity, error)
 	Scan(context.Context, app.ScanRequest) (app.ScanResult, error)
-	Plan(context.Context, config.Project, string, string) (app.Plan, error)
-	Pull(context.Context, config.Project, string, string, string) (model.Manifest, error)
+	PlanWithOptions(context.Context, config.Project, app.PlanOptions) (app.Plan, error)
+	PullWithOptions(context.Context, config.Project, string, string, string, app.PullOptions) (model.Manifest, error)
 }
 
 // ApplicationBackend adapts *app.Application to the TUI Backend interface.
@@ -65,7 +66,10 @@ func (b ApplicationBackend) Scan(ctx context.Context, req app.ScanRequest) (app.
 }
 
 func (b ApplicationBackend) Plan(ctx context.Context, req ProjectRequest) (app.Plan, error) {
-	return b.App.Plan(ctx, req.Project, req.Project.Source.Profile, req.Project.Source.Region)
+	if err := req.Project.Validate(); err != nil {
+		return app.Plan{}, err
+	}
+	return b.App.PlanWithOptions(ctx, req.Project, app.PlanOptions{AWSProfile: req.Project.Source.Profile, Region: req.Project.Source.Region, FixtureProfile: req.FixtureProfile})
 }
 
 func (b ApplicationBackend) SaveAndPull(ctx context.Context, req ProjectRequest) (model.Manifest, error) {
@@ -101,12 +105,7 @@ func (b ApplicationBackend) SaveAndPull(ctx context.Context, req ProjectRequest)
 	if err := os.Rename(tmpName, abs); err != nil {
 		return model.Manifest{}, err
 	}
-	if advanced, ok := b.App.(interface {
-		PullWithOptions(context.Context, config.Project, string, string, string, app.PullOptions) (model.Manifest, error)
-	}); ok {
-		return advanced.PullWithOptions(ctx, req.Project, dir, req.Project.Source.Profile, req.Project.Source.Region, app.PullOptions{Progress: req.Progress})
-	}
-	return b.App.Pull(ctx, req.Project, dir, req.Project.Source.Profile, req.Project.Source.Region)
+	return b.App.PullWithOptions(ctx, req.Project, dir, req.Project.Source.Profile, req.Project.Source.Region, app.PullOptions{Progress: req.Progress, FixtureProfile: req.FixtureProfile})
 }
 
 // writeAndSync applies restrictive permissions, writes the payload, and

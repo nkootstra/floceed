@@ -6,10 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strings"
 	"time"
+
+	"github.com/nkootstra/floceed/internal/governance"
 )
 
-const CurrentManifestSchemaVersion = 2
+const CurrentManifestSchemaVersion = 3
 const MinimumManifestSchemaVersion = 1
 const CurrentSnapshotStructureVersion = 1
 
@@ -69,19 +72,21 @@ type DiscoveryResult struct {
 	Findings  []Finding         `json:"findings,omitempty"`
 }
 type CaptureOptions struct {
-	IncludeData         bool                `json:"include_data"`
-	AllowPartialData    bool                `json:"allow_partial_data,omitempty"`
-	PreserveProvisioned bool                `json:"preserve_provisioned,omitempty"`
-	Gzip                bool                `json:"gzip,omitempty"`
-	Limits              DataLimits          `json:"limits,omitempty"`
-	Prefixes            []string            `json:"prefixes,omitempty"`
-	Overwrite           string              `json:"overwrite,omitempty"`
-	Mode                string              `json:"mode,omitempty"`
-	EstimatedRecords    int64               `json:"estimated_records,omitempty"`
-	EstimatedBytes      int64               `json:"estimated_bytes,omitempty"`
-	ArtifactDirectory   string              `json:"-"`
-	CheckpointDirectory string              `json:"-"`
-	Progress            func(ProgressEvent) `json:"-"`
+	IncludeData         bool                        `json:"include_data"`
+	AllowPartialData    bool                        `json:"allow_partial_data,omitempty"`
+	PreserveProvisioned bool                        `json:"preserve_provisioned,omitempty"`
+	Gzip                bool                        `json:"gzip,omitempty"`
+	Limits              DataLimits                  `json:"limits,omitempty"`
+	Prefixes            []string                    `json:"prefixes,omitempty"`
+	Overwrite           string                      `json:"overwrite,omitempty"`
+	Mode                string                      `json:"mode,omitempty"`
+	EstimatedRecords    int64                       `json:"estimated_records,omitempty"`
+	EstimatedBytes      int64                       `json:"estimated_bytes,omitempty"`
+	ArtifactDirectory   string                      `json:"-"`
+	CheckpointDirectory string                      `json:"-"`
+	Progress            func(ProgressEvent)         `json:"-"`
+	Governance          *governance.EffectivePolicy `json:"-"`
+	GovernanceAudit     *governance.Audit           `json:"-"`
 }
 type DataLimits struct {
 	MaxObjects     int   `json:"max_objects,omitempty"`
@@ -213,16 +218,51 @@ type SourceMetadata struct {
 	AccountID string `json:"account_id"`
 	Region    string `json:"region"`
 }
+
+type CountBucket = governance.CountBucket
+
+const (
+	CountBucketZero       = governance.BucketZero
+	CountBucket1To9       = governance.BucketOneToNine
+	CountBucket10To99     = governance.BucketTenToNinetyNine
+	CountBucket100To999   = governance.BucketHundredToNineHundredNinetyNine
+	CountBucket1000OrMore = governance.BucketThousandPlus
+)
+
+type GovernanceRuleAudit struct {
+	RuleID string      `json:"rule_id"`
+	Action string      `json:"action"`
+	Count  CountBucket `json:"count"`
+}
+
+type GovernanceCohortAudit struct {
+	ResourceIdentity string      `json:"resource_identity"`
+	Eligible         CountBucket `json:"eligible"`
+	Retained         CountBucket `json:"retained"`
+	Truncated        bool        `json:"truncated,omitempty"`
+}
+
+type GovernanceAudit struct {
+	Profile        string                  `json:"profile"`
+	PolicyIdentity string                  `json:"policy_identity"`
+	CohortIdentity string                  `json:"cohort_identity,omitempty"`
+	KeyIDs         []string                `json:"key_ids,omitempty"`
+	Algorithms     []string                `json:"algorithms,omitempty"`
+	Rules          []GovernanceRuleAudit   `json:"rules,omitempty"`
+	Cohorts        []GovernanceCohortAudit `json:"cohorts,omitempty"`
+}
+
 type Manifest struct {
-	SchemaVersion int             `json:"schema_version"`
-	Tool          ToolMetadata    `json:"tool"`
-	Target        TargetMetadata  `json:"target"`
-	Source        SourceMetadata  `json:"source"`
-	Capture       CaptureMetadata `json:"capture"`
-	Selected      []ResourceRef   `json:"selected"`
-	Snapshots     []Snapshot      `json:"snapshots"`
-	Operations    []Operation     `json:"operations"`
-	Findings      []Finding       `json:"findings,omitempty"`
+	SchemaVersion int              `json:"schema_version"`
+	Tool          ToolMetadata     `json:"tool"`
+	Target        TargetMetadata   `json:"target"`
+	Source        SourceMetadata   `json:"source"`
+	Capture       CaptureMetadata  `json:"capture"`
+	Selected      []ResourceRef    `json:"selected"`
+	Snapshots     []Snapshot       `json:"snapshots"`
+	Operations    []Operation      `json:"operations"`
+	Findings      []Finding        `json:"findings,omitempty"`
+	Governance    *GovernanceAudit `json:"governance,omitempty"`
 }
 
 var accountPattern = regexp.MustCompile(`^[0-9]{12}$`)
@@ -239,7 +279,7 @@ func (m Manifest) Validate() error {
 			return fmt.Errorf("snapshot %d: %w", index, err)
 		}
 	}
-	if m.SchemaVersion == 2 {
+	if m.SchemaVersion >= 2 {
 		for index := range m.Snapshots {
 			s := &m.Snapshots[index]
 			if len(s.Data) != 0 {
@@ -270,7 +310,48 @@ func (m Manifest) Validate() error {
 			}
 		}
 	}
+	if m.Governance != nil {
+		if m.SchemaVersion < 3 {
+			return fmt.Errorf("governance requires manifest schema 3: %w", ErrValidation)
+		}
+		if strings.TrimSpace(m.Governance.Profile) == "" || strings.TrimSpace(m.Governance.PolicyIdentity) == "" {
+			return fmt.Errorf("governance profile and policy identity are required: %w", ErrValidation)
+		}
+		if !uniqueNonEmpty(m.Governance.KeyIDs) || !uniqueNonEmpty(m.Governance.Algorithms) {
+			return fmt.Errorf("governance identities must be non-empty and unique: %w", ErrValidation)
+		}
+		ruleIDs := make(map[string]bool, len(m.Governance.Rules))
+		for _, rule := range m.Governance.Rules {
+			validAction := rule.Action == string(governance.ActionOmit) || rule.Action == string(governance.ActionReplace) || rule.Action == string(governance.ActionHash) || rule.Action == string(governance.ActionPseudonymize)
+			if strings.TrimSpace(rule.RuleID) == "" || ruleIDs[rule.RuleID] || !validAction || !validCountBucket(rule.Count) {
+				return fmt.Errorf("governance rule audit is invalid: %w", ErrValidation)
+			}
+			ruleIDs[rule.RuleID] = true
+		}
+		cohortIDs := make(map[string]bool, len(m.Governance.Cohorts))
+		for _, cohort := range m.Governance.Cohorts {
+			if strings.TrimSpace(cohort.ResourceIdentity) == "" || cohortIDs[cohort.ResourceIdentity] || !validCountBucket(cohort.Eligible) || !validCountBucket(cohort.Retained) {
+				return fmt.Errorf("governance cohort audit is invalid: %w", ErrValidation)
+			}
+			cohortIDs[cohort.ResourceIdentity] = true
+		}
+	}
 	return nil
+}
+
+func uniqueNonEmpty(values []string) bool {
+	seen := make(map[string]bool, len(values))
+	for _, value := range values {
+		if strings.TrimSpace(value) == "" || seen[value] {
+			return false
+		}
+		seen[value] = true
+	}
+	return true
+}
+
+func validCountBucket(bucket CountBucket) bool {
+	return bucket == CountBucketZero || bucket == CountBucket1To9 || bucket == CountBucket10To99 || bucket == CountBucket100To999 || bucket == CountBucket1000OrMore
 }
 
 func validateSnapshot(snapshot Snapshot) error {

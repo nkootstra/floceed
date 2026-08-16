@@ -58,3 +58,65 @@ func TestFindingJSONUsesStableFields(t *testing.T) {
 		t.Fatalf("got %s, want %s", b, want)
 	}
 }
+
+func TestManifestSchemaV3GovernanceAuditUsesDisclosureBuckets(t *testing.T) {
+	manifest := Manifest{
+		SchemaVersion: 3,
+		Governance: &GovernanceAudit{
+			Profile: "safe", PolicyIdentity: "policy-identity",
+			KeyIDs: []string{"fixtures-2026-08"}, Algorithms: []string{"pseudonym/v1"},
+			Rules: []GovernanceRuleAudit{{RuleID: "rule-001", Action: "pseudonymize", Count: CountBucket1To9}},
+		},
+	}
+	if err := manifest.Validate(); err != nil {
+		t.Fatalf("schema-3 manifest should validate: %v", err)
+	}
+	payload, err := json.Marshal(manifest.Governance)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(payload), `{"profile":"safe","policy_identity":"policy-identity","key_ids":["fixtures-2026-08"],"algorithms":["pseudonym/v1"],"rules":[{"rule_id":"rule-001","action":"pseudonymize","count":"1-9"}]}`; got != want {
+		t.Fatalf("governance JSON = %s, want %s", got, want)
+	}
+
+	manifest.Governance.Rules[0].Count = "7"
+	if err := manifest.Validate(); err == nil {
+		t.Fatal("expected exact governance count to be rejected")
+	}
+}
+
+func TestManifestOlderSchemasRemainValidWithoutGovernance(t *testing.T) {
+	for _, version := range []int{1, 2} {
+		manifest := Manifest{SchemaVersion: version}
+		if err := manifest.Validate(); err != nil {
+			t.Fatalf("schema %d should remain valid: %v", version, err)
+		}
+	}
+}
+
+func TestManifestSchemaV3RejectsInvalidGovernanceAuditShape(t *testing.T) {
+	valid := func() *GovernanceAudit {
+		return &GovernanceAudit{
+			Profile: "safe", PolicyIdentity: "policy-identity",
+			KeyIDs: []string{"key-1"}, Algorithms: []string{"pseudonym/v1"},
+			Rules:   []GovernanceRuleAudit{{RuleID: "rule-1", Action: "pseudonymize", Count: CountBucket1To9}},
+			Cohorts: []GovernanceCohortAudit{{ResourceIdentity: "resource-1", Eligible: CountBucket1To9, Retained: CountBucket1To9}},
+		}
+	}
+	tests := map[string]func(*GovernanceAudit){
+		"duplicate key ID":          func(a *GovernanceAudit) { a.KeyIDs = []string{"key-1", "key-1"} },
+		"empty algorithm":           func(a *GovernanceAudit) { a.Algorithms = []string{""} },
+		"unsupported action":        func(a *GovernanceAudit) { a.Rules[0].Action = "custom" },
+		"duplicate rule ID":         func(a *GovernanceAudit) { a.Rules = append(a.Rules, a.Rules[0]) },
+		"duplicate cohort identity": func(a *GovernanceAudit) { a.Cohorts = append(a.Cohorts, a.Cohorts[0]) },
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			audit := valid()
+			mutate(audit)
+			if err := (Manifest{SchemaVersion: 3, Governance: audit}).Validate(); err == nil {
+				t.Fatal("expected invalid governance audit to be rejected")
+			}
+		})
+	}
+}

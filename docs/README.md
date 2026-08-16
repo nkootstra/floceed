@@ -56,6 +56,20 @@ floceed doctor --project floceed.yaml
 floceed up --project floceed.yaml
 ```
 
+To capture shareable fixtures, define a named `fixture_profiles` entry and
+select it explicitly for both planning and capture:
+
+```bash
+export FLOCEED_GOVERNANCE_SECRET="$(openssl rand -base64 32)"
+floceed plan --project floceed.yaml --fixture-profile share-safe
+floceed pull --project floceed.yaml --fixture-profile share-safe --yes
+```
+
+The secret is read from the environment, must decode to at least 32 random
+bytes, and is never stored in the project or bundle. Distribute it through the
+same secret manager used by your team, not through Git or shell history. See
+[Governed fixture profiles](#governed-fixture-profiles) before sharing output.
+
 Use `--output json` for a stable command envelope and `--no-color` (or
 `NO_COLOR=1`) for plain text. Non-terminal stdout never receives TUI control
 sequences. Start from [the complete example project](../examples/basic/floceed.yaml).
@@ -124,6 +138,51 @@ events to stderr while `--output json` keeps exactly one final envelope on
 stdout. S3 remaining counts become exact after inventory; DynamoDB totals are
 clearly marked as estimates until its eventually consistent scan completes.
 
+## Governed fixture profiles
+
+A fixture profile is an explicit, reviewable policy for transforming selected
+data before floceed writes a checkpoint, temporary file, or bundle artifact.
+The supported actions are `omit`, `replace`, `hash`, and `pseudonymize`.
+Supported targets are DynamoDB attribute paths, individual S3 user-metadata
+keys, and the whole body of an S3 object whose source content type is on the
+rule's allowlist. S3 keys are not rewritten. Structured JSON/CSV fields and
+binary object bodies are not transformed in v0.2.0.
+
+`pseudonymize` uses keyed `pseudonym/v1` tokens. The `key_id` is a public,
+non-secret rotation label; changing either it or the runtime secret deliberately
+breaks linkability and invalidates matching checkpoints. A scope controls where
+equality remains linkable, so use the narrowest useful scope. Deterministic
+pseudonyms preserve equality and can expose frequency—they are not anonymization.
+
+`hash` uses public, unkeyed `hash/v1`. Do not use it for email addresses,
+customer identifiers, phone numbers, status values, or other low-entropy or
+enumerable protected data: an attacker can guess inputs and compare hashes. Use
+keyed pseudonymization or omission instead.
+
+DynamoDB cohorts select the lowest deterministic `cohort-rank/v1` values from
+the configured canonical key attributes. Membership is independent of scan page
+and arrival order for an unchanged table, configuration, and secret. The scan is
+still eventually consistent, not a point-in-time snapshot. Cohorts require the
+resource's data mode to be `full`, because selecting the stable lowest-ranked
+set must inspect the complete table. `max_retained_bytes` bounds protected
+retained checkpoint state and defaults to 64 MiB. Rank digests are
+sensitive because they preserve linkability and remain protected checkpoint
+state; they are never emitted in the manifest or command output. Rotation or a
+change to policy, cohort keys, predicates, algorithms, or content-type allowlists
+invalidates the old checkpoint rather than mixing policies.
+
+Governance audit output is intentionally coarse. It contains opaque rule and
+resource identities, non-secret key IDs, algorithm versions, and only these
+count buckets: `0`, `1-9`, `10-99`, `100-999`, and `1000+`. It excludes source
+values, exact rare counts, target paths, secrets and secret verifiers, rank
+digests, and inferred data classifications. Manifest schema 3 carries this
+audit metadata; replay continues to accept schema 1 and 2 bundles without it.
+
+Profiles reduce accidental disclosure but cannot determine whether a policy is
+safe for your data. The policy author must review uncovered attributes,
+metadata, object types, equality/frequency leakage, and the resulting bundle
+before it is distributed.
+
 ## Safety defaults
 
 - Imports are structure-only unless fixture data is explicitly enabled.
@@ -144,6 +203,9 @@ clearly marked as estimates until its eventually consistent scan completes.
   review storage and sharing separately.
 - Replay merges tags and upserts data. It does not delete unexpected local
   resources or mutate AWS.
+- Governance does not infer PII, generate synthetic data, rewrite S3 keys or
+  binary bodies, transform fields inside JSON/CSV, or discover relationship
+  closure. Rules apply only to their exact supported targets.
 
 ## Generated environment
 

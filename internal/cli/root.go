@@ -20,8 +20,8 @@ import (
 
 type Service interface {
 	Scan(context.Context, app.ScanRequest) (app.ScanResult, error)
-	Plan(context.Context, config.Project, string, string) (app.Plan, error)
-	Pull(context.Context, config.Project, string, string, string) (model.Manifest, error)
+	PlanWithOptions(context.Context, config.Project, app.PlanOptions) (app.Plan, error)
+	PullWithOptions(context.Context, config.Project, string, string, string, app.PullOptions) (model.Manifest, error)
 	Render(context.Context, config.Project, string) (model.Manifest, error)
 	Doctor(context.Context, config.Project, string, string, string) (app.DoctorResult, error)
 	Up(context.Context, config.Project, string, time.Duration) error
@@ -33,7 +33,7 @@ type Options struct {
 	Stderr  io.Writer
 	Version string
 	App     Service
-	TUI     func(context.Context, io.Reader, io.Writer, bool) error
+	TUI     func(context.Context, io.Reader, io.Writer, bool, string) error
 }
 
 func New(options Options) *cobra.Command {
@@ -50,11 +50,13 @@ func New(options Options) *cobra.Command {
 		options.App = app.New(options.Version)
 	}
 	var noColor bool
+	var fixtureProfile string
 	root := &cobra.Command{Use: "floceed", Short: "Compile AWS resource snapshots into portable Floci bundles", SilenceErrors: true, SilenceUsage: true}
 	root.SetIn(options.Stdin)
 	root.SetOut(options.Stdout)
 	root.SetErr(options.Stderr)
 	root.PersistentFlags().BoolVar(&noColor, "no-color", false, "disable colored output")
+	root.Flags().StringVar(&fixtureProfile, "fixture-profile", "", "select fixture governance profile in interactive mode")
 	root.AddCommand(scanCommand(options.App), planCommand(options.App), pullCommand(options.App), renderCommand(options.App), doctorCommand(options.App), upCommand(options.App))
 	root.AddCommand(&cobra.Command{Use: "version", Short: "Print version information", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, args []string) error {
 		version := options.Version
@@ -66,7 +68,7 @@ func New(options Options) *cobra.Command {
 	}})
 	root.RunE = func(cmd *cobra.Command, args []string) error {
 		if isTerminal(options.Stdin) && isTerminal(options.Stdout) && options.TUI != nil {
-			return options.TUI(cmd.Context(), options.Stdin, options.Stdout, noColor || os.Getenv("NO_COLOR") != "")
+			return options.TUI(cmd.Context(), options.Stdin, options.Stdout, noColor || os.Getenv("NO_COLOR") != "", fixtureProfile)
 		}
 		return cmd.Help()
 	}
@@ -118,13 +120,18 @@ func (options projectOptions) load() (config.Project, string, string, error) {
 }
 
 type sourceOverrides struct {
-	profile string
-	region  string
+	profile        string
+	region         string
+	fixtureProfile string
 }
 
 func (overrides *sourceOverrides) bind(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&overrides.profile, "profile", "", "override AWS profile")
 	cmd.Flags().StringVar(&overrides.region, "region", "", "override AWS region")
+}
+
+func (overrides *sourceOverrides) bindFixtureProfile(cmd *cobra.Command) {
+	cmd.Flags().StringVar(&overrides.fixtureProfile, "fixture-profile", "", "select fixture governance profile")
 }
 
 func planCommand(service Service) *cobra.Command {
@@ -135,7 +142,7 @@ func planCommand(service Service) *cobra.Command {
 		if err != nil {
 			return err
 		}
-		result, err := service.Plan(cmd.Context(), definition, source.profile, source.region)
+		result, err := service.PlanWithOptions(cmd.Context(), definition, app.PlanOptions{AWSProfile: source.profile, Region: source.region, FixtureProfile: source.fixtureProfile})
 		if err != nil {
 			return convert(err)
 		}
@@ -143,6 +150,7 @@ func planCommand(service Service) *cobra.Command {
 	}}
 	project.bind(cmd)
 	source.bind(cmd)
+	source.bindFixtureProfile(cmd)
 	return cmd
 }
 
@@ -172,14 +180,7 @@ func pullCommand(service Service) *cobra.Command {
 			}
 		}
 		report := progressReporter(cmd.ErrOrStderr(), progressMode)
-		var result model.Manifest
-		if advanced, ok := service.(interface {
-			PullWithOptions(context.Context, config.Project, string, string, string, app.PullOptions) (model.Manifest, error)
-		}); ok {
-			result, err = advanced.PullWithOptions(cmd.Context(), definition, dir, source.profile, source.region, app.PullOptions{WorkDir: workDir, Restart: restart, Progress: report})
-		} else {
-			result, err = service.Pull(cmd.Context(), definition, dir, source.profile, source.region)
-		}
+		result, err := service.PullWithOptions(cmd.Context(), definition, dir, source.profile, source.region, app.PullOptions{WorkDir: workDir, Restart: restart, Progress: report, FixtureProfile: source.fixtureProfile})
 		if err != nil {
 			return convert(err)
 		}
@@ -187,6 +188,7 @@ func pullCommand(service Service) *cobra.Command {
 	}}
 	project.bind(cmd)
 	source.bind(cmd)
+	source.bindFixtureProfile(cmd)
 	cmd.Flags().BoolVar(&yes, "yes", false, "confirm capture and bundle replacement")
 	cmd.Flags().StringVar(&progress, "progress", "auto", "progress output: auto, plain, json, or off")
 	cmd.Flags().StringVar(&workDir, "work-dir", "", "capture checkpoint directory (defaults to the user cache)")

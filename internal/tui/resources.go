@@ -113,5 +113,5 @@ func (m Model) Project() config.Project {
 }
 
 func (m Model) request() ProjectRequest {
-	return ProjectRequest{Project: m.Project(), ProjectFile: m.opts.ProjectFile}
+	return ProjectRequest{Project: m.Project(), ProjectFile: m.opts.ProjectFile, FixtureProfile: m.opts.FixtureProfile}
 }
