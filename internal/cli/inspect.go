@@ -162,12 +162,13 @@ func joinSafe(values []string) string {
 	return strings.Join(safe, ", ")
 }
 
-// terminalSafe preserves readable text while making every control character
-// visible, preventing bundle or runtime data from forging terminal output.
+// terminalSafe preserves readable text while making control and Unicode format
+// characters visible, preventing bundle or runtime data from forging or
+// visually reordering terminal output.
 func terminalSafe(value string) string {
 	var result strings.Builder
 	for _, char := range value {
-		if unicode.IsControl(char) {
+		if unicode.IsControl(char) || unicode.Is(unicode.Cf, char) {
 			if char <= 0xff {
 				fmt.Fprintf(&result, `\x%02X`, char)
 			} else {

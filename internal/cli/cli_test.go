@@ -167,6 +167,15 @@ func TestInspectTextEscapesManifestAndRuntimeControlsWhileJSONRemainsExact(t *te
 	}
 }
 
+func TestTerminalSafeEscapesUnicodeFormattingAndPreservesReadableUnicode(t *testing.T) {
+	input := "café 日本語 🙂 \u202Ereversed\u2066isolated\u2069"
+	want := `café 日本語 🙂 \u202Ereversed\u2066isolated\u2069`
+
+	if got := terminalSafe(input); got != want {
+		t.Fatalf("terminalSafe() = %q, want %q", got, want)
+	}
+}
+
 func TestInspectJSONInvalidBundleUsesStableErrorEnvelopeAndExitCode(t *testing.T) {
 	fake := &fakeService{inspectErr: &app.Error{Kind: app.ErrorFilesystem, Code: "BUNDLE_INTEGRITY_INVALID", Message: "bundle inspection failed", Remediation: "Regenerate the bundle."}}
 	var out bytes.Buffer
