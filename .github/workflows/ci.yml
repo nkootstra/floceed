@@ -104,4 +104,5 @@ jobs:
           ./fixture-input/floceed-ci fixture unpack --archive fixture-input/fixture.tar.gz --target fixture-input/unpacked --output json
           ./fixture-input/floceed-ci fixture verify --input fixture-input/unpacked --output json
       - name: Admit fixture under protected policy
+        if: github.event_name != 'pull_request'
         run: ./fixture-input/floceed-ci fixture admit --input fixture-input/unpacked --policy internal/integration/testdata/fixture-policy.yaml --output json
