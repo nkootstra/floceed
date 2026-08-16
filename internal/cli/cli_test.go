@@ -13,6 +13,7 @@ import (
 
 	"github.com/nkootstra/floceed/internal/app"
 	"github.com/nkootstra/floceed/internal/config"
+	inspection "github.com/nkootstra/floceed/internal/inspect"
 	"github.com/nkootstra/floceed/internal/model"
 )
 
@@ -52,6 +53,87 @@ type fakeService struct {
 	doctor         app.DoctorResult
 	doctorErr      error
 	fixtureProfile string
+	inspectResult  inspection.Inspection
+	inspectErr     error
+	inspectOptions app.InspectOptions
+	inspected      bool
+}
+
+func (f *fakeService) InspectWithOptions(_ context.Context, _ config.Project, _ string, options app.InspectOptions) (inspection.Inspection, error) {
+	f.inspected = true
+	f.inspectOptions = options
+	return f.inspectResult, f.inspectErr
+}
+
+func TestInspectJSONUsesOneStableEnvelopeAndForwardsOptions(t *testing.T) {
+	fake := &fakeService{inspectResult: inspection.Inspection{SchemaVersion: 1, Valid: true, ManifestSchema: 3, BundleIdentity: "sha256:current", Runtime: inspection.Runtime{State: inspection.RuntimeUnavailable, Diagnostic: "connection refused"}}}
+	var out bytes.Buffer
+	cmd := New(Options{Stdout: &out, Stderr: &bytes.Buffer{}, App: fake})
+	cmd.SetArgs([]string{"inspect", "--project", writeProject(t), "--output", "json", "--compare", "baseline", "--runtime"})
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	decoder := json.NewDecoder(&out)
+	var envelope Envelope
+	if err := decoder.Decode(&envelope); err != nil {
+		t.Fatal(err)
+	}
+	if decoder.Decode(&struct{}{}) == nil {
+		t.Fatal("inspect emitted more than one JSON value")
+	}
+	if envelope.SchemaVersion != 1 || envelope.Command != "inspect" || envelope.Status != StatusSuccess {
+		t.Fatalf("envelope = %#v", envelope)
+	}
+	if !fake.inspected || fake.inspectOptions.ComparePath != "baseline" || !fake.inspectOptions.Runtime {
+		t.Fatalf("inspect options = %#v", fake.inspectOptions)
+	}
+}
+
+func TestInspectTextIsConciseDeterministicAndHasNoANSI(t *testing.T) {
+	fake := &fakeService{inspectResult: inspection.Inspection{
+		SchemaVersion: 1, Valid: true, ManifestSchema: 3, BundleIdentity: "sha256:current", SelectedResources: 1,
+		Source: inspection.SourceProjection{AccountID: "123456789012", Region: "eu-west-1"},
+		Target: inspection.TargetProjection{FlociVersion: "1.6.0"}, Artifacts: inspection.ArtifactSummary{Files: 2, Bytes: 42},
+		Services:  []inspection.ServiceSummary{{Service: "s3", Resources: 1, Selected: 1, Records: 2, SourceBytes: 21}},
+		Resources: []inspection.Resource{{Identity: inspection.ResourceIdentity{Service: "s3", Type: "bucket", ID: "assets"}, Selected: true}},
+		Runtime:   inspection.Runtime{State: inspection.RuntimeNotRequested},
+		Receipt:   &inspection.Receipt{SchemaVersion: 1, Baseline: "sha256:baseline", Current: "sha256:current", Counts: inspection.ReceiptCounts{Changed: 1}, Resources: []inspection.ResourceChange{{Resource: inspection.ResourceIdentity{Service: "s3", Type: "bucket", ID: "assets"}, Outcome: inspection.OutcomeChanged, Categories: []inspection.ChangeCategory{inspection.CategoryDataset}}}},
+	}}
+	var out bytes.Buffer
+	cmd := New(Options{Stdout: &out, Stderr: &bytes.Buffer{}, App: fake})
+	cmd.SetArgs([]string{"inspect", "--project", writeProject(t), "--no-color"})
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	want := "Bundle: valid\nIdentity: sha256:current\nManifest schema: 3\nSource: 123456789012 / eu-west-1\nTarget: Floci 1.6.0\nResources: 1 selected\nArtifacts: 2 files, 42 bytes\nRuntime: not requested\n\nServices\ns3: 1 resources, 1 selected, 2 records, 21 bytes\n\nResources\ns3/bucket/assets: selected\n\nComparison\nBaseline: sha256:baseline\nCurrent: sha256:current\nChanges: 0 added, 0 removed, 1 changed, 0 unchanged\ns3/bucket/assets: changed (dataset)\n"
+	if out.String() != want {
+		t.Fatalf("text output:\n%s\nwant:\n%s", out.String(), want)
+	}
+	if strings.Contains(out.String(), "\x1b[") {
+		t.Fatalf("text contains ANSI: %q", out.String())
+	}
+}
+
+func TestInspectJSONInvalidBundleUsesStableErrorEnvelopeAndExitCode(t *testing.T) {
+	fake := &fakeService{inspectErr: &app.Error{Kind: app.ErrorFilesystem, Code: "BUNDLE_INTEGRITY_INVALID", Message: "bundle inspection failed", Remediation: "Regenerate the bundle."}}
+	var out bytes.Buffer
+	cmd := New(Options{Stdout: &out, Stderr: &bytes.Buffer{}, App: fake})
+	cmd.SetArgs([]string{"inspect", "--project", writeProject(t), "--output", "json"})
+	err := cmd.ExecuteContext(context.Background())
+	if err == nil || ExitCode(err) != 6 || out.Len() != 0 {
+		t.Fatalf("Execute() = %v, output %q", err, out.String())
+	}
+	written, writeErr := WriteInvocationError(cmd, err)
+	if !written || writeErr != nil {
+		t.Fatalf("WriteInvocationError() = %t, %v", written, writeErr)
+	}
+	var envelope Envelope
+	if err := json.Unmarshal(out.Bytes(), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if envelope.Command != "inspect" || envelope.Status != StatusError || envelope.Error == nil || envelope.Error.Code != "BUNDLE_INTEGRITY_INVALID" {
+		t.Fatalf("envelope = %#v", envelope)
+	}
 }
 
 func (f *fakeService) PlanWithOptions(_ context.Context, _ config.Project, options app.PlanOptions) (app.Plan, error) {
@@ -285,6 +367,7 @@ func TestProjectCommandsExposeOnlyTheirOwnFlags(t *testing.T) {
 		{name: "render", present: []string{"project", "output"}, absent: []string{"profile", "region", "yes", "wait"}},
 		{name: "doctor", present: []string{"project", "output", "profile", "region"}, absent: []string{"yes", "wait"}},
 		{name: "up", present: []string{"project", "output", "wait"}, absent: []string{"profile", "region", "yes"}},
+		{name: "inspect", present: []string{"project", "output", "compare", "runtime"}, absent: []string{"profile", "region", "yes", "wait", "fixture-profile"}},
 	}
 
 	root := New(Options{App: &fakeService{}})

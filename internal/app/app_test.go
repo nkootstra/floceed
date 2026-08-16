@@ -19,6 +19,7 @@ import (
 	"github.com/nkootstra/floceed/internal/catalog"
 	"github.com/nkootstra/floceed/internal/compose"
 	"github.com/nkootstra/floceed/internal/config"
+	inspection "github.com/nkootstra/floceed/internal/inspect"
 	"github.com/nkootstra/floceed/internal/model"
 )
 
@@ -706,6 +707,10 @@ func (f *fakeLocalRuntime) Start(ctx context.Context, target, composeFile string
 
 func (f *fakeLocalRuntime) WaitReady(ctx context.Context, url string, wait time.Duration) error {
 	return f.waitReady(ctx, url, wait)
+}
+
+func (f *fakeLocalRuntime) InspectStatus(context.Context, string, time.Duration) inspection.Runtime {
+	return inspection.Runtime{State: inspection.RuntimeNotRequested}
 }
 
 func TestDoctorOrchestratesAllChecksWithoutExternalCommands(t *testing.T) {

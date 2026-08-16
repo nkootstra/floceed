@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/nkootstra/floceed/internal/bundle"
 	"github.com/nkootstra/floceed/internal/config"
@@ -24,6 +25,7 @@ func (a *Application) Inspect(ctx context.Context, project config.Project, proje
 // InspectOptions controls optional, offline inspection enrichments.
 type InspectOptions struct {
 	ComparePath string
+	Runtime     bool
 }
 
 // InspectWithOptions validates both comparison sides independently and only
@@ -47,6 +49,10 @@ func (a *Application) InspectWithOptions(ctx context.Context, project config.Pro
 		}
 		receipt := inspection.Compare(baseline, projection)
 		result.Receipt = &receipt
+	}
+	if options.Runtime {
+		url := fmt.Sprintf("http://127.0.0.1:%d/_floci/init", project.Target.Port)
+		result.Runtime = a.localRuntime.InspectStatus(ctx, url, 2*time.Second)
 	}
 	return result, nil
 }

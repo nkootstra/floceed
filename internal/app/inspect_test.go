@@ -4,14 +4,18 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/nkootstra/floceed/internal/bundle"
 	"github.com/nkootstra/floceed/internal/config"
+	inspection "github.com/nkootstra/floceed/internal/inspect"
 	"github.com/nkootstra/floceed/internal/model"
 )
 
@@ -31,6 +35,24 @@ func (panicInspectRuntime) Start(context.Context, string, string) ([]byte, error
 }
 func (panicInspectRuntime) WaitReady(context.Context, string, time.Duration) error {
 	panic("inspect must not call runtime readiness")
+}
+func (panicInspectRuntime) InspectStatus(context.Context, string, time.Duration) inspection.Runtime {
+	panic("inspect must not call runtime status")
+}
+
+type inspectRuntimeStub struct {
+	result inspection.Runtime
+	calls  int
+	url    string
+}
+
+func (r *inspectRuntimeStub) DoctorChecks(context.Context) []Check                   { return nil }
+func (r *inspectRuntimeStub) Start(context.Context, string, string) ([]byte, error)  { return nil, nil }
+func (r *inspectRuntimeStub) WaitReady(context.Context, string, time.Duration) error { return nil }
+func (r *inspectRuntimeStub) InspectStatus(_ context.Context, url string, _ time.Duration) inspection.Runtime {
+	r.calls++
+	r.url = url
+	return r.result
 }
 
 func TestInspectReadsCustomOutputWithoutOpeningSource(t *testing.T) {
@@ -67,6 +89,68 @@ func TestInspectReadsCustomOutputWithoutOpeningSource(t *testing.T) {
 	}
 	if got.Artifacts.Files != 1 || got.Artifacts.Bytes == 0 || len(got.Services) != 1 || got.Services[0].Selected != 1 || len(got.Operations) != 1 {
 		t.Fatalf("inspection summaries = artifacts %#v, services %#v, operations %#v", got.Artifacts, got.Services, got.Operations)
+	}
+}
+
+func TestInspectRuntimeIsOptionalAndAdditive(t *testing.T) {
+	projectDir := t.TempDir()
+	project := config.NewProject()
+	project.Source.Region = "eu-west-1"
+	project.Target.Port = 4567
+	writeInspectableBundle(t, filepath.Join(projectDir, project.Output.Directory), comparableManifest(t, "current"))
+	runtime := &inspectRuntimeStub{result: inspection.Runtime{State: inspection.RuntimeUnavailable, Diagnostic: "connection refused"}}
+	service := New("test")
+	service.localRuntime = runtime
+
+	without, err := service.Inspect(context.Background(), project, projectDir)
+	if err != nil || runtime.calls != 0 || without.Runtime.State != inspection.RuntimeNotRequested {
+		t.Fatalf("default inspect = %#v, %v; calls=%d", without, err, runtime.calls)
+	}
+	with, err := service.InspectWithOptions(context.Background(), project, projectDir, InspectOptions{Runtime: true})
+	if err != nil || !with.Valid || with.Runtime.State != inspection.RuntimeUnavailable || runtime.calls != 1 {
+		t.Fatalf("runtime inspect = %#v, %v; calls=%d", with, err, runtime.calls)
+	}
+	if runtime.url != "http://127.0.0.1:4567/_floci/init" {
+		t.Fatalf("runtime url = %q", runtime.url)
+	}
+}
+
+func TestRuntimeStatusClassifiesReadinessAndBoundsDiagnostics(t *testing.T) {
+	tests := []struct {
+		name   string
+		do     httpDoerFunc
+		want   inspection.RuntimeState
+		failed []string
+	}{
+		{name: "ready", do: runtimeResponse(200, `{"completed":{"ready":true},"scripts":{"ready":[]}}`), want: inspection.RuntimeReady},
+		{name: "not ready", do: runtimeResponse(200, `{"completed":{"ready":false},"scripts":{"ready":[]}}`), want: inspection.RuntimeNotReady},
+		{name: "failed scripts", do: runtimeResponse(200, `{"completed":{"ready":false},"scripts":{"ready":[{"script":"zeta","state":"FAILED"},{"script":"alpha","return_code":1}]}}`), want: inspection.RuntimeNotReady, failed: []string{"alpha", "zeta"}},
+		{name: "connection refused", do: func(*http.Request) (*http.Response, error) {
+			return nil, errors.New("dial tcp: connection refused\nsecret trailing line")
+		}, want: inspection.RuntimeUnavailable},
+		{name: "timeout", do: func(req *http.Request) (*http.Response, error) {
+			<-req.Context().Done()
+			return nil, req.Context().Err()
+		}, want: inspection.RuntimeUnavailable},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			runtime := newDockerLocalRuntime()
+			runtime.httpClient = test.do
+			got := runtime.InspectStatus(context.Background(), "http://127.0.0.1/_floci/init", time.Millisecond)
+			if got.State != test.want || (test.failed != nil && !reflect.DeepEqual(got.FailedScripts, test.failed)) || (test.failed == nil && len(got.FailedScripts) != 0) {
+				t.Fatalf("status = %#v, want %s / %v", got, test.want, test.failed)
+			}
+			if len(got.Diagnostic) > 160 || strings.ContainsAny(got.Diagnostic, "\r\n\t") {
+				t.Fatalf("diagnostic is not bounded/sanitized: %q", got.Diagnostic)
+			}
+		})
+	}
+}
+
+func runtimeResponse(status int, body string) httpDoerFunc {
+	return func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(body))}, nil
 	}
 }
 

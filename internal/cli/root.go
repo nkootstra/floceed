@@ -13,6 +13,7 @@ import (
 
 	"github.com/nkootstra/floceed/internal/app"
 	"github.com/nkootstra/floceed/internal/config"
+	inspection "github.com/nkootstra/floceed/internal/inspect"
 	"github.com/nkootstra/floceed/internal/model"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -25,6 +26,7 @@ type Service interface {
 	Render(context.Context, config.Project, string) (model.Manifest, error)
 	Doctor(context.Context, config.Project, string, string, string) (app.DoctorResult, error)
 	Up(context.Context, config.Project, string, time.Duration) error
+	InspectWithOptions(context.Context, config.Project, string, app.InspectOptions) (inspection.Inspection, error)
 }
 
 type Options struct {
@@ -57,7 +59,7 @@ func New(options Options) *cobra.Command {
 	root.SetErr(options.Stderr)
 	root.PersistentFlags().BoolVar(&noColor, "no-color", false, "disable colored output")
 	root.Flags().StringVar(&fixtureProfile, "fixture-profile", "", "select fixture governance profile in interactive mode")
-	root.AddCommand(scanCommand(options.App), planCommand(options.App), pullCommand(options.App), renderCommand(options.App), doctorCommand(options.App), upCommand(options.App))
+	root.AddCommand(scanCommand(options.App), planCommand(options.App), pullCommand(options.App), renderCommand(options.App), inspectCommand(options.App), doctorCommand(options.App), upCommand(options.App))
 	root.AddCommand(&cobra.Command{Use: "version", Short: "Print version information", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, args []string) error {
 		version := options.Version
 		if version == "" {
@@ -360,6 +362,8 @@ func emit(cmd *cobra.Command, name, format string, data any, findings any) error
 func countFindings(v any) int {
 	switch x := v.(type) {
 	case []model.Finding:
+		return len(x)
+	case []inspection.Finding:
 		return len(x)
 	default:
 		return 0
