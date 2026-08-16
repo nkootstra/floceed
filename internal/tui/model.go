@@ -7,6 +7,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/nkootstra/floceed/internal/app"
 	"github.com/nkootstra/floceed/internal/awsconfig"
+	"github.com/nkootstra/floceed/internal/config"
 	"github.com/nkootstra/floceed/internal/model"
 )
 
@@ -36,6 +37,7 @@ type Options struct {
 
 type Model struct {
 	ctx             context.Context
+	cancel          context.CancelFunc
 	backend         Backend
 	opts            Options
 	screen          Screen
@@ -47,6 +49,7 @@ type Model struct {
 	resources       []model.ResourceSummary
 	selected        map[string]bool
 	dataEnabled     map[string]bool
+	dataMode        map[string]config.DataMode
 	findings        []model.Finding
 	plan            app.Plan
 	manifest        model.Manifest
@@ -56,6 +59,8 @@ type Model struct {
 	filter          textinput.Model
 	regionInput     textinput.Model
 	err             error
+	progress        model.ProgressEvent
+	pullUpdates     chan tea.Msg
 }
 
 type profilesLoadedMsg struct {
@@ -78,6 +83,7 @@ type pullFinishedMsg struct {
 	manifest model.Manifest
 	err      error
 }
+type pullProgressMsg struct{ event model.ProgressEvent }
 
 func NewModel(backend Backend, opts Options) Model {
 	if opts.ProjectFile == "" {
@@ -96,14 +102,15 @@ func NewModel(backend Backend, opts Options) Model {
 		filter.SetVirtualCursor(false)
 		region.SetVirtualCursor(false)
 	}
+	ctx, cancel := context.WithCancel(context.Background())
 	return Model{
-		ctx: context.Background(), backend: backend, opts: opts, screen: ScreenLoading,
+		ctx: ctx, cancel: cancel, backend: backend, opts: opts, screen: ScreenLoading,
 		profile: opts.Profile, region: opts.Region, services: []model.ServiceDescriptor{
 			{Name: "s3", DisplayName: "Amazon S3", Support: model.SupportPartial},
 			{Name: "dynamodb", DisplayName: "Amazon DynamoDB", Support: model.SupportPartial},
 		},
 		serviceSelected: map[string]bool{"s3": true, "dynamodb": true}, selected: map[string]bool{},
-		dataEnabled: map[string]bool{}, filter: filter, regionInput: region,
+		dataEnabled: map[string]bool{}, dataMode: map[string]config.DataMode{}, filter: filter, regionInput: region,
 	}
 }
 
@@ -135,7 +142,24 @@ func (m Model) makePlan() tea.Cmd {
 	req := m.request()
 	return func() tea.Msg { p, err := m.backend.Plan(m.ctx, req); return planFinishedMsg{p, err} }
 }
-func (m Model) pull() tea.Cmd {
+func (m *Model) pull() tea.Cmd {
+	m.pullUpdates = make(chan tea.Msg, 16)
 	req := m.request()
-	return func() tea.Msg { result, err := m.backend.SaveAndPull(m.ctx, req); return pullFinishedMsg{result, err} }
+	req.Progress = func(event model.ProgressEvent) {
+		select {
+		case m.pullUpdates <- pullProgressMsg{event}:
+		case <-m.ctx.Done():
+		}
+	}
+	updates := m.pullUpdates
+	go func() {
+		result, err := m.backend.SaveAndPull(m.ctx, req)
+		select {
+		case updates <- pullFinishedMsg{result, err}:
+		case <-m.ctx.Done():
+		}
+		close(updates)
+	}()
+	return waitPullUpdate(updates)
 }
+func waitPullUpdate(updates <-chan tea.Msg) tea.Cmd { return func() tea.Msg { return <-updates } }

@@ -56,7 +56,9 @@ func (m Model) View() tea.View {
 		for i, r := range m.selectedResources() {
 			label := r.Name + "  structure only"
 			if m.dataEnabled[resourceKey(r.Ref)] {
-				if r.Ref.Service == "s3" {
+				if m.dataMode[resourceKey(r.Ref)] == config.DataModeFull {
+					label = r.Name + "  full data (resumable; 1h replay timeout)"
+				} else if r.Ref.Service == "s3" {
 					label += fmt.Sprintf(" + data (%d objects, %s/object, %s total)", config.DefaultS3MaxObjects, bytesLabel(config.DefaultS3MaxObjectBytes), bytesLabel(config.DefaultS3MaxTotalBytes))
 				} else {
 					label += fmt.Sprintf(" + data (%d items, %d pages, gzip)", config.DefaultDynamoDBMaxItems, config.DefaultDynamoDBMaxPages)
@@ -74,7 +76,26 @@ func (m Model) View() tea.View {
 	case ScreenConfirm:
 		b.WriteString("Write floceed.yaml and generate the bundle? [y/N]")
 	case ScreenProgress:
-		b.WriteString("Saving project and generating bundle...")
+		if m.progress.Phase == "" {
+			b.WriteString("Saving project and generating bundle...")
+		} else {
+			approx := ""
+			if m.progress.TotalPrecision != "" && m.progress.TotalPrecision != "exact" {
+				approx = "~"
+			}
+			fmt.Fprintf(&b, "%s %s %s", strings.Title(m.progress.Phase), m.progress.Service, m.progress.Resource)
+			if m.progress.TotalRecords > 0 {
+				fmt.Fprintf(&b, "\n%d / %s%d records (%d remaining)", m.progress.CompletedRecords, approx, m.progress.TotalRecords, max(0, m.progress.TotalRecords-m.progress.CompletedRecords))
+			} else if m.progress.CompletedRecords > 0 {
+				fmt.Fprintf(&b, "\n%d records processed; total not known yet", m.progress.CompletedRecords)
+			}
+			if m.progress.TotalBytes > 0 {
+				fmt.Fprintf(&b, "\n%s / %s%s (%s remaining)", bytesLabel(m.progress.CompletedBytes), approx, bytesLabel(m.progress.TotalBytes), bytesLabel(max(0, m.progress.TotalBytes-m.progress.CompletedBytes)))
+			}
+			if m.progress.Resumed {
+				b.WriteString("\nResumed from a verified checkpoint.")
+			}
+		}
 	case ScreenResult:
 		if m.err != nil {
 			b.WriteString("Generation failed. The previous valid bundle was preserved.")

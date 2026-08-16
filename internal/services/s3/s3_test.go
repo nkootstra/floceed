@@ -1,7 +1,9 @@
 package s3
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"io"
 	"os"
@@ -16,6 +18,90 @@ import (
 	"github.com/nkootstra/floceed/internal/config"
 	"github.com/nkootstra/floceed/internal/model"
 )
+
+type packedDataClient struct {
+	Client
+	gets int
+}
+
+func (packedDataClient) ListObjectsV2(context.Context, *awss3.ListObjectsV2Input, ...func(*awss3.Options)) (*awss3.ListObjectsV2Output, error) {
+	return &awss3.ListObjectsV2Output{Contents: []types.Object{{Key: aws.String("a.txt"), ETag: aws.String("a"), Size: aws.Int64(1)}, {Key: aws.String("b.txt"), ETag: aws.String("b"), Size: aws.Int64(1)}}}, nil
+}
+func (c *packedDataClient) GetObject(_ context.Context, in *awss3.GetObjectInput, _ ...func(*awss3.Options)) (*awss3.GetObjectOutput, error) {
+	c.gets++
+	return &awss3.GetObjectOutput{Body: io.NopCloser(strings.NewReader(aws.ToString(in.Key)[:1]))}, nil
+}
+func (packedDataClient) GetObjectTagging(context.Context, *awss3.GetObjectTaggingInput, ...func(*awss3.Options)) (*awss3.GetObjectTaggingOutput, error) {
+	return &awss3.GetObjectTaggingOutput{}, nil
+}
+
+func TestFullS3CaptureUsesPackedDatasetInsteadOfOneFilePerObject(t *testing.T) {
+	root := t.TempDir()
+	snapshot, _ := model.NewSnapshot(model.ResourceRef{Service: "s3", ID: "assets"}, "s3", Bucket{Name: "assets", Region: "eu-west-1"})
+	bucket := Bucket{Name: "assets", Region: "eu-west-1"}
+	opts := model.CaptureOptions{Mode: "full", ArtifactDirectory: filepath.Join(root, "artifacts"), CheckpointDirectory: filepath.Join(root, "checkpoint"), Overwrite: "if-different"}
+	client := &packedDataClient{}
+	if err := New(client).captureObjects(context.Background(), "assets", &bucket, snapshot, opts); err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Dataset == nil || snapshot.Dataset.Records != 2 || len(snapshot.Dataset.Chunks) != 1 || snapshot.Dataset.Chunks[0].Index == nil {
+		t.Fatalf("dataset = %#v", snapshot.Dataset)
+	}
+	if len(bucket.Objects) != 0 {
+		t.Fatalf("objects leaked into manifest structure: %#v", bucket.Objects)
+	}
+	packPath := filepath.Join(root, "artifacts", filepath.FromSlash(snapshot.Dataset.Chunks[0].Data.Path))
+	f, err := os.Open(packPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	gz, err := gzip.NewReader(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := tar.NewReader(gz)
+	count := 0
+	for {
+		_, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		count++
+	}
+	if count != 2 {
+		t.Fatalf("tar entries = %d", count)
+	}
+	resumed, _ := model.NewSnapshot(model.ResourceRef{Service: "s3", ID: "assets"}, "s3", Bucket{Name: "assets", Region: "eu-west-1"})
+	if err := New(client).captureObjects(context.Background(), "assets", &bucket, resumed, opts); err != nil {
+		t.Fatal(err)
+	}
+	if client.gets != 2 || resumed.Dataset == nil || !resumed.Dataset.Resumed {
+		t.Fatalf("resume redownloaded objects or omitted state: gets=%d dataset=%#v", client.gets, resumed.Dataset)
+	}
+}
+
+func TestFullS3CaptureRejectsChangedCaptureOptions(t *testing.T) {
+	root := t.TempDir()
+	newSnapshot := func() *model.Snapshot {
+		s, _ := model.NewSnapshot(model.ResourceRef{Service: "s3", ID: "assets"}, "s3", Bucket{Name: "assets", Region: "eu-west-1"})
+		return s
+	}
+	bucket := Bucket{Name: "assets", Region: "eu-west-1"}
+	fullOpts := model.CaptureOptions{Mode: "full", ArtifactDirectory: filepath.Join(root, "artifacts"), CheckpointDirectory: filepath.Join(root, "checkpoint"), Overwrite: "if-different"}
+	client := &packedDataClient{}
+	if err := New(client).captureObjects(context.Background(), "assets", &bucket, newSnapshot(), fullOpts); err != nil {
+		t.Fatal(err)
+	}
+	boundedOpts := model.CaptureOptions{Mode: "bounded", Limits: model.DataLimits{MaxObjects: 1, MaxObjectBytes: 1, MaxTotalBytes: 1}, ArtifactDirectory: fullOpts.ArtifactDirectory, CheckpointDirectory: fullOpts.CheckpointDirectory, Overwrite: "if-different"}
+	err := New(client).captureObjects(context.Background(), "assets", &bucket, newSnapshot(), boundedOpts)
+	if err == nil || !strings.Contains(err.Error(), "incompatible S3 capture checkpoint") {
+		t.Fatalf("changed-options error = %v", err)
+	}
+}
 
 func TestPlanOwnsS3SelectionOptionsAndIAM(t *testing.T) {
 	project := config.Project{Resources: config.Resources{S3: []config.S3Resource{{Name: "assets", Data: &config.S3DataPolicy{Enabled: true, Prefixes: []string{"images/"}, MaxObjects: 4, MaxObjectBytes: 5, MaxTotalBytes: 6, Overwrite: config.OverwriteAlways}}}}}

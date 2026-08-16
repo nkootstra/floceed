@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/nkootstra/floceed/internal/config"
 )
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -36,6 +37,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case pullFinishedMsg:
 		m.busy, m.err, m.manifest, m.screen = false, msg.err, msg.manifest, ScreenResult
 		return m, nil
+	case pullProgressMsg:
+		m.progress = msg.event
+		return m, waitPullUpdate(m.pullUpdates)
 	case tea.WindowSizeMsg:
 		return m, nil
 	case tea.KeyPressMsg:
@@ -47,6 +51,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m Model) updateKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	k := key.String()
 	if k == "ctrl+c" {
+		if m.cancel != nil {
+			m.cancel()
+		}
 		return m, tea.Quit
 	}
 	if m.filtering {
@@ -154,6 +161,9 @@ func (m *Model) advance() (tea.Model, tea.Cmd) {
 	case ScreenSummary:
 		m.screen = ScreenConfirm
 	case ScreenResult:
+		if m.cancel != nil {
+			m.cancel()
+		}
 		return *m, tea.Quit
 	}
 	return *m, nil
@@ -198,6 +208,7 @@ func (m *Model) toggle() {
 			if m.selected[k] {
 				delete(m.selected, k)
 				delete(m.dataEnabled, k)
+				delete(m.dataMode, k)
 			} else {
 				m.selected[k] = true
 			}
@@ -206,7 +217,16 @@ func (m *Model) toggle() {
 		items := m.selectedResources()
 		if m.cursor >= 0 && m.cursor < len(items) {
 			k := resourceKey(items[m.cursor].Ref)
-			m.dataEnabled[k] = !m.dataEnabled[k]
+			switch m.dataMode[k] {
+			case "":
+				m.dataEnabled[k] = true
+				m.dataMode[k] = config.DataModeBounded
+			case config.DataModeBounded:
+				m.dataMode[k] = config.DataModeFull
+			default:
+				m.dataEnabled[k] = false
+				delete(m.dataMode, k)
+			}
 		}
 	}
 }

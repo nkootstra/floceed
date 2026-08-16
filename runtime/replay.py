@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import gzip
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import base64
 import hashlib
 import json
 import os
 import random
 import sys
+import tarfile
 import time
 from pathlib import Path
 from urllib.parse import urlparse
@@ -17,14 +19,23 @@ import boto3
 from botocore.config import Config
 from botocore.exceptions import ClientError
 
-SUPPORTED_SCHEMA = 1
+SUPPORTED_SCHEMAS = {1, 2}
 SUPPORTED_STRUCTURE_VERSION = 1
 ROOT = Path(os.environ.get("FLOCEED_ROOT", "/floceed"))
 ENDPOINT = os.environ.get("FLOCEED_ENDPOINT", "http://127.0.0.1:4566")
+REPLAY_WORKERS = max(1, min(32, int(os.environ.get("FLOCEED_REPLAY_WORKERS", "4"))))
 
 
 def fail(message: str):
     raise RuntimeError(f"floceed replay: {message}")
+
+
+def progress(phase: str, service: str = "", resource: str = "", completed_records: int = 0, total_records: int = 0, completed_bytes: int = 0, total_bytes: int = 0, precision: str = "") -> None:
+    event = {"schema_version": 1, "event": "progress", "operation": "replay", "phase": phase}
+    for key, value in (("service", service), ("resource", resource), ("completed_records", completed_records), ("total_records", total_records), ("completed_bytes", completed_bytes), ("total_bytes", total_bytes), ("total_precision", precision)):
+        if value:
+            event[key] = value
+    print("FLOCEED_PROGRESS " + json.dumps(event, separators=(",", ":")), flush=True)
 
 
 def load_json(path: Path):
@@ -43,12 +54,12 @@ def safe_path(relative: str) -> Path:
 def validate_bundle() -> dict:
     manifest = load_json(ROOT / "bundle" / "manifest.json")
     version = manifest.get("schema_version")
-    if version != SUPPORTED_SCHEMA:
-        fail(f"manifest schema {version!r} is unsupported (runtime supports {SUPPORTED_SCHEMA})")
+    if version not in SUPPORTED_SCHEMAS:
+        fail(f"manifest schema {version!r} is unsupported (runtime supports {sorted(SUPPORTED_SCHEMAS)})")
     account = manifest.get("source", {}).get("account_id", "")
     if len(account) != 12 or not account.isdigit():
         fail("source account ID must be exactly 12 digits")
-    validate_snapshots(manifest.get("snapshots", []))
+    validate_snapshots(manifest.get("snapshots", []), version)
     parsed = urlparse(ENDPOINT)
     if parsed.scheme != "http" or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}:
         fail("endpoint must be an HTTP loopback address")
@@ -67,7 +78,7 @@ def validate_bundle() -> dict:
     return manifest
 
 
-def validate_snapshots(snapshots: list) -> None:
+def validate_snapshots(snapshots: list, manifest_version: int = 1) -> None:
     if not isinstance(snapshots, list):
         fail("manifest snapshots must be an array")
     for index, snapshot in enumerate(snapshots):
@@ -101,14 +112,33 @@ def validate_snapshots(snapshots: list) -> None:
                 fail(f"snapshot {index} DynamoDB structure requires billing_mode")
         else:
             fail(f"snapshot {index} service {service!r} is unsupported")
+        if manifest_version == 2:
+            if snapshot.get("data"):
+                fail(f"snapshot {index} uses legacy data in manifest schema 2")
+            dataset = snapshot.get("dataset")
+            if dataset:
+                formats = {"s3": {"s3-tar-gzip-v1"}, "dynamodb": {"dynamodb-ndjson-v1", "dynamodb-ndjson-gzip-v1"}}
+                if dataset.get("format") not in formats[service] or not isinstance(dataset.get("chunks"), list):
+                    fail(f"snapshot {index} has an unsupported dataset")
+                records = 0
+                source_bytes = 0
+                for chunk in dataset["chunks"]:
+                    if not isinstance(chunk, dict) or not isinstance(chunk.get("data"), dict) or not chunk["data"].get("path"):
+                        fail(f"snapshot {index} has an invalid dataset chunk")
+                    if service == "s3" and not isinstance(chunk.get("index"), dict):
+                        fail(f"snapshot {index} S3 dataset chunk requires an index")
+                    records += chunk.get("records", 0)
+                    source_bytes += chunk.get("source_bytes", 0)
+                if records != dataset.get("records", 0) or source_bytes != dataset.get("source_bytes", 0):
+                    fail(f"snapshot {index} dataset totals do not match chunks")
 
 
 def local_client(manifest: dict, service: str):
     source = manifest["source"]
     os.environ["AWS_EC2_METADATA_DISABLED"] = "true"
-    options = {"retries": {"mode": "standard", "max_attempts": 3}}
+    options = {"retries": {"mode": "standard", "max_attempts": 3}, "request_checksum_calculation": "when_required", "response_checksum_validation": "when_required"}
     if service == "s3":
-        options["s3"] = {"addressing_style": "path"}
+        options["s3"] = {"addressing_style": "path", "payload_signing_enabled": False}
     config = Config(**options)
     return boto3.client(
         service,
@@ -260,6 +290,63 @@ def seed_bucket(s3, bucket: dict) -> None:
             request["Body"].close()
 
 
+def put_object_from_pack(s3, bucket: str, value: dict, body) -> None:
+    policy = value.get("overwrite", "if-different")
+    if policy == "never":
+        try:
+            s3.head_object(Bucket=bucket, Key=value["key"])
+        except ClientError as error:
+            if not missing(error, "404", "NoSuchKey", "NotFound"):
+                raise
+        else:
+            return
+    elif policy == "if-different" and object_matches(s3, bucket, value):
+        return
+    elif policy not in {"always", "if-different"}:
+        fail(f"unsupported S3 overwrite policy {policy!r}")
+    request = {"Bucket": bucket, "Key": value["key"], "Body": body, "ContentLength": value["size"]}
+    for source, target in (("content_type", "ContentType"), ("content_encoding", "ContentEncoding"), ("cache_control", "CacheControl")):
+        if value.get(source):
+            request[target] = value[source]
+    if value.get("metadata"):
+        request["Metadata"] = value["metadata"]
+    if value.get("tags"):
+        from urllib.parse import urlencode
+        request["Tagging"] = urlencode([(item["key"], item["value"]) for item in value["tags"]])
+    s3.put_object(**request)
+
+
+def seed_bucket_chunk(s3, bucket: dict, chunk: dict) -> int:
+    index_ref = chunk.get("index")
+    if not index_ref:
+        fail("S3 dataset chunk requires an index")
+    completed = 0
+    with gzip.open(safe_path(index_ref["path"]), "rt", encoding="utf-8") as index, tarfile.open(safe_path(chunk["data"]["path"]), "r|gz") as archive:
+        for line in index:
+            if not line.strip():
+                continue
+            value = json.loads(line)
+            member = archive.next()
+            if member is None or member.name != value["path"] or not member.isfile():
+                fail(f"S3 pack/index mismatch for {value['key']!r}")
+            body = archive.extractfile(member)
+            if body is None:
+                fail(f"S3 pack entry missing for {value['key']!r}")
+            put_object_from_pack(s3, bucket["name"], value, body)
+            completed += 1
+    return completed
+
+
+def seed_bucket_dataset(s3, bucket: dict, snapshot: dict) -> None:
+    dataset = snapshot["dataset"]
+    completed = 0
+    with ThreadPoolExecutor(max_workers=REPLAY_WORKERS) as executor:
+        futures = [executor.submit(seed_bucket_chunk, s3, bucket, chunk) for chunk in dataset.get("chunks", [])]
+        for future in as_completed(futures):
+            completed += future.result()
+            progress("data", "s3", bucket["name"], completed, dataset.get("records", 0), precision="exact")
+
+
 def keys(values: list[dict]) -> list[dict]:
     return [{"AttributeName": value["name"], "KeyType": value["type"]} for value in values]
 
@@ -367,9 +454,8 @@ def batch_write(ddb, table: str, items: list[dict]) -> None:
     fail(f"DynamoDB table {table!r} still has {len(pending)} unprocessed items after bounded retries")
 
 
-def seed(ddb, snapshot: dict) -> None:
-    table = snapshot["structure"]["name"]
-    for artifact in snapshot.get("data", []):
+def seed_table_artifact(ddb, table: str, artifact: dict) -> int:
+        completed = 0
         path = safe_path(artifact["path"])
         opener = gzip.open if path.suffix == ".gz" else open
         batch = []
@@ -379,32 +465,55 @@ def seed(ddb, snapshot: dict) -> None:
                     batch.append(json.loads(line))
                 if len(batch) == 25:
                     batch_write(ddb, table, batch)
+                    completed += len(batch)
                     batch = []
         if batch:
             batch_write(ddb, table, batch)
+            completed += len(batch)
+        return completed
+
+
+def seed(ddb, snapshot: dict) -> None:
+    table = snapshot["structure"]["name"]
+    dataset = snapshot.get("dataset")
+    artifacts = snapshot.get("data", []) if not dataset else [chunk["data"] for chunk in dataset.get("chunks", [])]
+    completed = 0
+    total = dataset.get("records", 0) if dataset else 0
+    with ThreadPoolExecutor(max_workers=REPLAY_WORKERS) as executor:
+        futures = [executor.submit(seed_table_artifact, ddb, table, artifact) for artifact in artifacts]
+        for future in as_completed(futures):
+            completed += future.result()
+            progress("data", "dynamodb", table, completed, total, precision="exact" if dataset else "unknown")
 
 
 def main() -> None:
-    if len(sys.argv) != 2 or sys.argv[1] not in {"base", "links", "data"}:
-        fail("usage: replay.py {base|links|data}")
+    if len(sys.argv) != 2 or sys.argv[1] not in {"all", "base", "links", "data"}:
+        fail("usage: replay.py {all|base|links|data}")
     manifest = validate_bundle()
     ddb = local_client(manifest, "dynamodb")
     s3 = local_client(manifest, "s3")
-    if sys.argv[1] == "base":
+    stages = {"base", "links", "data"} if sys.argv[1] == "all" else {sys.argv[1]}
+    if "base" in stages:
+        progress("base")
         for table, _ in tables(manifest):
             ensure_table(ddb, table)
             apply_mutable(ddb, table)
         for bucket, _ in buckets(manifest):
             ensure_bucket(s3, bucket)
             apply_bucket_mutable(s3, bucket)
-    elif sys.argv[1] == "links":
+    if "links" in stages:
+        progress("links")
         for bucket, _ in buckets(manifest):
             apply_bucket_links(s3, bucket)
-    elif sys.argv[1] == "data":
+    if "data" in stages:
+        progress("data")
         for _, snapshot in tables(manifest):
             seed(ddb, snapshot)
-        for bucket, _ in buckets(manifest):
-            seed_bucket(s3, bucket)
+        for bucket, snapshot in buckets(manifest):
+            if snapshot.get("dataset"):
+                seed_bucket_dataset(s3, bucket, snapshot)
+            else:
+                seed_bucket(s3, bucket)
 
 
 if __name__ == "__main__":

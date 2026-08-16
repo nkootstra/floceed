@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -15,6 +16,7 @@ import (
 	"github.com/nkootstra/floceed/internal/bundle"
 	"github.com/nkootstra/floceed/internal/compose"
 	"github.com/nkootstra/floceed/internal/config"
+	"github.com/nkootstra/floceed/internal/model"
 )
 
 const defaultDockerProbeTimeout = 10 * time.Second
@@ -28,6 +30,13 @@ type localRuntime interface {
 	DoctorChecks(context.Context) []Check
 	Start(context.Context, string, string) ([]byte, error)
 	WaitReady(context.Context, string, time.Duration) error
+}
+type progressRuntime interface {
+	WatchProgress(context.Context, string, string, time.Time, func(model.ProgressEvent)) func()
+}
+type UpOptions struct {
+	Wait     time.Duration
+	Progress func(model.ProgressEvent)
 }
 
 type dockerLocalRuntime struct {
@@ -151,6 +160,11 @@ type initStatus struct {
 }
 
 func (a *Application) Up(ctx context.Context, p config.Project, projectDir string, wait time.Duration) error {
+	return a.UpWithOptions(ctx, p, projectDir, UpOptions{Wait: wait})
+}
+
+func (a *Application) UpWithOptions(ctx context.Context, p config.Project, projectDir string, options UpOptions) error {
+	wait := options.Wait
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -188,6 +202,10 @@ func (a *Application) Up(ctx context.Context, p config.Project, projectDir strin
 	upCtx, cancel := context.WithTimeout(ctx, wait)
 	defer cancel()
 
+	startedAt := time.Now()
+	if options.Progress != nil {
+		options.Progress(model.ProgressEvent{SchemaVersion: 1, Event: "progress", Operation: "replay", Phase: "start", Message: "starting Floci"})
+	}
 	if output, err := a.localRuntime.Start(upCtx, target, composeFile); err != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -197,6 +215,11 @@ func (a *Application) Up(ctx context.Context, p config.Project, projectDir strin
 		}
 		return &Error{Kind: ErrorLocal, Code: "COMPOSE_UP_FAILED", Message: fmt.Sprintf("docker compose up failed: %s", output), Err: err}
 	}
+	stopProgress := func() {}
+	if runtime, ok := a.localRuntime.(progressRuntime); ok && options.Progress != nil {
+		stopProgress = runtime.WatchProgress(upCtx, target, composeFile, startedAt, options.Progress)
+	}
+	defer stopProgress()
 	remaining := wait
 	if deadline, ok := upCtx.Deadline(); ok {
 		remaining = time.Until(deadline)
@@ -212,7 +235,47 @@ func (a *Application) Up(ctx context.Context, p config.Project, projectDir strin
 	if upCtx.Err() == context.DeadlineExceeded {
 		return flociReadyTimeoutError()
 	}
+	if err == nil && options.Progress != nil {
+		options.Progress(model.ProgressEvent{SchemaVersion: 1, Event: "progress", Operation: "replay", Phase: "complete", Message: "Floci replay completed"})
+	}
 	return err
+}
+
+func (r *dockerLocalRuntime) WatchProgress(ctx context.Context, target, composeFile string, since time.Time, report func(model.ProgressEvent)) func() {
+	watchCtx, cancel := context.WithCancel(ctx)
+	cmd := exec.CommandContext(watchCtx, "docker", "compose", "-f", composeFile, "logs", "--follow", "--no-color", "--no-log-prefix", "--since", since.UTC().Format(time.RFC3339Nano), "floci")
+	cmd.Dir = target
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return cancel
+	}
+	if err = cmd.Start(); err != nil {
+		return cancel
+	}
+	go func() {
+		scanner := bufio.NewScanner(stdout)
+		for scanner.Scan() {
+			line := scanner.Text()
+			if event, ok := decodeProgressLine(line); ok {
+				report(event)
+			}
+		}
+		_ = cmd.Wait()
+	}()
+	return cancel
+}
+
+func decodeProgressLine(line string) (model.ProgressEvent, bool) {
+	const prefix = "FLOCEED_PROGRESS "
+	index := strings.Index(line, prefix)
+	if index < 0 {
+		return model.ProgressEvent{}, false
+	}
+	var event model.ProgressEvent
+	if json.Unmarshal([]byte(line[index+len(prefix):]), &event) != nil || event.Event != "progress" {
+		return model.ProgressEvent{}, false
+	}
+	return event, true
 }
 
 func flociReadyTimeoutError() error {

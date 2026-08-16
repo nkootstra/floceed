@@ -82,11 +82,53 @@ filesystem 6, local 7, unexpected 1, cancellation 130. Failures still deliver
 the successful part of the command's payload in `data`; `doctor` attaches its
 check results so consumers can see exactly which prerequisite failed.
 
+### Large datasets and progress
+
+Data capture remains bounded by default. Set `data.mode: full` on an individual
+S3 bucket or DynamoDB table to opt into a resumable full export. Full mode
+requires an explicit `target.hook_timeout_seconds` greater than 300 because
+replaying a large bundle can take hours. S3 prefixes and overwrite policies
+still apply; bounded count and byte limits must be omitted in full mode.
+
+```yaml
+target:
+  hook_timeout_seconds: 21600
+  replay_workers: 4
+resources:
+  s3:
+    - name: staging-assets
+      data:
+        enabled: true
+        mode: full
+        prefixes: [fixtures/]
+        overwrite: if-different
+  dynamodb:
+    - name: staging-records
+      data:
+        enabled: true
+        mode: full
+        gzip: true
+capture:
+  resource_workers: 2
+```
+
+`pull` checkpoints verified work in the OS user cache and resumes it
+automatically. Use `--work-dir` to place working data on another volume or
+`--restart` to discard the matching checkpoint. Full capture checks available
+disk before bulk transfer and never replaces the previous valid bundle after a
+failure or cancellation.
+
+TTY progress shows the current inventory, capture, finalization, installation,
+and replay phase. For automation, `--progress json` writes NDJSON progress
+events to stderr while `--output json` keeps exactly one final envelope on
+stdout. S3 remaining counts become exact after inventory; DynamoDB totals are
+clearly marked as estimates until its eventually consistent scan completes.
+
 ## Safety defaults
 
 - Imports are structure-only unless fixture data is explicitly enabled.
-- S3 fixtures require maximum object count, per-object bytes, and total bytes.
-- DynamoDB fixtures require maximum item and page counts and use eventually
+- Bounded S3 fixtures require maximum object count, per-object bytes, and total bytes.
+- Bounded DynamoDB fixtures require maximum item and page counts and use eventually
   consistent scans; they are a bounded sample, not a transactionally coherent
   database backup.
 - Current S3 object versions only are captured. Content is streamed to hashed
@@ -107,8 +149,7 @@ check results so consumers can see exactly which prerequisite failed.
 
 Floceed writes a separate `.floceed/compose.generated.yaml`; it does not
 overwrite a user-maintained Compose file. The bundle includes a JSON manifest,
-checksums, embedded Python/boto3 runtime, and the hooks
-`10-base-resources.py`, `30-resource-links.py`, and `60-seed-data.py`.
+checksums, an embedded Python/boto3 runtime, and the `10-replay.py` ready hook.
 See the [bundle contract](bundle-format.md).
 
 Generated environments pin

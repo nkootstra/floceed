@@ -135,3 +135,20 @@ func TestCapturePolicyDefaultsValidate(t *testing.T) {
 		t.Fatalf("default capture policies do not validate: %v", err)
 	}
 }
+
+func TestFullDataModeRequiresExplicitReplayTimeoutAndNoBoundedLimits(t *testing.T) {
+	project := NewProject()
+	project.Source.Region = "eu-west-1"
+	project.Resources.DynamoDB = []DynamoDBResource{{Name: "orders", Data: &DynamoDBDataPolicy{Enabled: true, Mode: DataModeFull}}}
+	if err := project.Validate(); err == nil || !strings.Contains(err.Error(), "hook_timeout_seconds") {
+		t.Fatalf("validation error = %v", err)
+	}
+	project.Target.HookTimeoutSeconds = 3600
+	if err := project.Validate(); err != nil {
+		t.Fatalf("full project should validate: %v", err)
+	}
+	project.Resources.DynamoDB[0].Data.MaxItems = 1
+	if err := project.Validate(); err == nil || !strings.Contains(err.Error(), "cannot set bounded limits") {
+		t.Fatalf("limit error = %v", err)
+	}
+}

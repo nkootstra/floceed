@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/nkootstra/floceed/internal/app"
@@ -149,6 +150,8 @@ func pullCommand(service Service) *cobra.Command {
 	var project projectOptions
 	var source sourceOverrides
 	var yes bool
+	var progress, workDir string
+	var restart bool
 	cmd := &cobra.Command{Use: "pull", Short: "Capture selected AWS resources and generate a bundle", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, args []string) error {
 		definition, dir, format, err := project.load()
 		if err != nil {
@@ -157,7 +160,26 @@ func pullCommand(service Service) *cobra.Command {
 		if !yes && !isTerminal(cmd.InOrStdin()) {
 			return usage("CONFIRMATION_REQUIRED", "pull in a non-interactive terminal requires --yes")
 		}
-		result, err := service.Pull(cmd.Context(), definition, dir, source.profile, source.region)
+		progressMode, err := validateProgress(progress)
+		if err != nil {
+			return err
+		}
+		if progressMode == "auto" {
+			if isTerminal(cmd.ErrOrStderr()) {
+				progressMode = "plain"
+			} else {
+				progressMode = "off"
+			}
+		}
+		report := progressReporter(cmd.ErrOrStderr(), progressMode)
+		var result model.Manifest
+		if advanced, ok := service.(interface {
+			PullWithOptions(context.Context, config.Project, string, string, string, app.PullOptions) (model.Manifest, error)
+		}); ok {
+			result, err = advanced.PullWithOptions(cmd.Context(), definition, dir, source.profile, source.region, app.PullOptions{WorkDir: workDir, Restart: restart, Progress: report})
+		} else {
+			result, err = service.Pull(cmd.Context(), definition, dir, source.profile, source.region)
+		}
 		if err != nil {
 			return convert(err)
 		}
@@ -166,7 +188,50 @@ func pullCommand(service Service) *cobra.Command {
 	project.bind(cmd)
 	source.bind(cmd)
 	cmd.Flags().BoolVar(&yes, "yes", false, "confirm capture and bundle replacement")
+	cmd.Flags().StringVar(&progress, "progress", "auto", "progress output: auto, plain, json, or off")
+	cmd.Flags().StringVar(&workDir, "work-dir", "", "capture checkpoint directory (defaults to the user cache)")
+	cmd.Flags().BoolVar(&restart, "restart", false, "discard the matching capture checkpoint and start again")
 	return cmd
+}
+
+func validateProgress(value string) (string, error) {
+	switch value {
+	case "auto", "plain", "json", "off":
+		return value, nil
+	default:
+		return "", usage("PROGRESS_INVALID", "--progress must be auto, plain, json, or off")
+	}
+}
+func progressReporter(w io.Writer, mode string) func(model.ProgressEvent) {
+	if mode == "off" {
+		return nil
+	}
+	return func(event model.ProgressEvent) {
+		if mode == "json" {
+			_ = json.NewEncoder(w).Encode(event)
+			return
+		}
+		parts := make([]string, 0, 4)
+		if event.Phase != "" {
+			parts = append(parts, event.Phase)
+		}
+		if event.Service != "" {
+			parts = append(parts, event.Service)
+		}
+		if event.Resource != "" {
+			parts = append(parts, event.Resource)
+		}
+		if event.TotalRecords > 0 {
+			marker := "~"
+			if event.TotalPrecision == "exact" {
+				marker = ""
+			}
+			parts = append(parts, fmt.Sprintf("%d/%s%d", event.CompletedRecords, marker, event.TotalRecords))
+		}
+		if len(parts) > 0 {
+			_, _ = fmt.Fprintf(w, "%s\n", strings.Join(parts, " "))
+		}
+	}
 }
 
 func renderCommand(service Service) *cobra.Command {
@@ -220,18 +285,39 @@ func doctorCommand(service Service) *cobra.Command {
 func upCommand(service Service) *cobra.Command {
 	var project projectOptions
 	var wait time.Duration
+	var progress string
 	cmd := &cobra.Command{Use: "up", Short: "Start the generated Floci Compose project", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, args []string) error {
 		definition, dir, format, err := project.load()
 		if err != nil {
 			return err
 		}
-		if err := service.Up(cmd.Context(), definition, dir, wait); err != nil {
+		progressMode, err := validateProgress(progress)
+		if err != nil {
+			return err
+		}
+		if progressMode == "auto" {
+			if isTerminal(cmd.ErrOrStderr()) {
+				progressMode = "plain"
+			} else {
+				progressMode = "off"
+			}
+		}
+		report := progressReporter(cmd.ErrOrStderr(), progressMode)
+		if advanced, ok := service.(interface {
+			UpWithOptions(context.Context, config.Project, string, app.UpOptions) error
+		}); ok {
+			err = advanced.UpWithOptions(cmd.Context(), definition, dir, app.UpOptions{Wait: wait, Progress: report})
+		} else {
+			err = service.Up(cmd.Context(), definition, dir, wait)
+		}
+		if err != nil {
 			return convert(err)
 		}
 		return emit(cmd, "up", format, map[string]any{"ready": true, "port": definition.Target.Port}, nil)
 	}}
 	project.bind(cmd)
 	cmd.Flags().DurationVar(&wait, "wait", 0, "readiness timeout")
+	cmd.Flags().StringVar(&progress, "progress", "auto", "progress output: auto, plain, json, or off")
 	return cmd
 }
 

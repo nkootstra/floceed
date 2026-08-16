@@ -41,6 +41,10 @@ func (*Adapter) Plan(project config.Project, includeData bool) catalog.PlanContr
 		options := model.CaptureOptions{PreserveProvisioned: resource.PreserveProvisioned}
 		if resource.Data != nil {
 			options.IncludeData = resource.Data.Enabled
+			options.Mode = string(resource.Data.Mode)
+			if options.Mode == "" {
+				options.Mode = string(config.DataModeBounded)
+			}
 			options.Limits = model.DataLimits{MaxItems: resource.Data.MaxItems, MaxPages: resource.Data.MaxPages}
 			options.Gzip = resource.Data.Gzip == nil || *resource.Data.Gzip
 			if includeData && resource.Data.Enabled {
@@ -191,14 +195,16 @@ func (a *Adapter) Capture(ctx context.Context, scope model.SourceScope, ref mode
 	}
 	snapshot.Findings = findings
 	if opts.IncludeData {
-		result, captureErr := a.CaptureData(ctx, ref.ID, opts.Limits, opts.Gzip, directoryWriter{root: opts.ArtifactDirectory})
+		opts.EstimatedRecords = aws.ToInt64(d.Table.ItemCount)
+		opts.EstimatedBytes = aws.ToInt64(d.Table.TableSizeBytes)
+		result, captureErr := a.captureData(ctx, ref.ID, opts, directoryWriter{root: opts.ArtifactDirectory})
 		if captureErr != nil {
 			if !opts.AllowPartialData || errors.Is(captureErr, context.Canceled) || errors.Is(captureErr, context.DeadlineExceeded) {
 				return nil, captureErr
 			}
 			snapshot.Findings = append(snapshot.Findings, model.Finding{Code: "DATA_CAPTURE_PARTIAL", Severity: model.SeverityWarning, Support: model.SupportPartial, Resource: ref.ID, Property: "data", Message: "Fixture capture was incomplete: " + captureErr.Error(), Remediation: "Rerun the capture after restoring read access, or disable allow_partial_data."})
 		} else {
-			snapshot.Data = append(snapshot.Data, result.Artifact)
+			snapshot.Dataset = &result.Dataset
 			if result.Truncated {
 				snapshot.Findings = append(snapshot.Findings, model.Finding{Code: "DYNAMODB_DATA_LIMIT_REACHED", Severity: model.SeverityInfo, Support: model.SupportPartial, Resource: ref.ID, Message: "The configured fixture boundary was reached."})
 			}

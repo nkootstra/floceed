@@ -71,6 +71,10 @@ func (*Adapter) Plan(project config.Project, includeData bool) catalog.PlanContr
 		options := model.CaptureOptions{}
 		if resource.Data != nil {
 			options.IncludeData = resource.Data.Enabled
+			options.Mode = string(resource.Data.Mode)
+			if options.Mode == "" {
+				options.Mode = string(config.DataModeBounded)
+			}
 			options.Prefixes = resource.Data.Prefixes
 			options.Overwrite = string(resource.Data.Overwrite)
 			options.Limits = model.DataLimits{MaxObjects: resource.Data.MaxObjects, MaxObjectBytes: resource.Data.MaxObjectBytes, MaxTotalBytes: resource.Data.MaxTotalBytes}

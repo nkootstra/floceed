@@ -31,7 +31,7 @@ func TestRenderIsDeterministicAndComplete(t *testing.T) {
 	if string(first) != string(second) {
 		t.Fatal("checksums changed")
 	}
-	for _, name := range []string{ComposeFile, "bundle/manifest.json", "runtime/replay.py", "init/ready.d/10-base-resources.py", "init/ready.d/30-resource-links.py", "init/ready.d/60-seed-data.py", ".gitignore"} {
+	for _, name := range []string{ComposeFile, "bundle/manifest.json", "runtime/replay.py", "init/ready.d/10-replay.py", ".gitignore"} {
 		if _, err := os.Stat(filepath.Join(target, filepath.FromSlash(name))); err != nil {
 			t.Errorf("missing %s: %v", name, err)
 		}
@@ -66,4 +66,42 @@ func TestCredentialPatternsRejectCredentialProcessJSON(t *testing.T) {
 		}
 	}
 	t.Fatal("credential_process JSON was not detected")
+}
+
+func TestRenderCopiesManifestV2DatasetArtifacts(t *testing.T) {
+	root := t.TempDir()
+	artRoot := filepath.Join(root, "capture")
+	rel := "bundle/data/dynamodb/table/part-000001.ndjson"
+	if err := os.MkdirAll(filepath.Dir(filepath.Join(artRoot, rel)), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	payload := []byte("{\"pk\":{\"S\":\"1\"}}\n")
+	if err := os.WriteFile(filepath.Join(artRoot, rel), payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sum, err := SumFile(filepath.Join(artRoot, rel))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum.Path = rel
+	sumRef := model.ArtifactRef{Path: rel, SHA256: sum.SHA256, Size: sum.Size, MediaType: "application/x-ndjson"}
+	snapshot, err := model.NewSnapshot(model.ResourceRef{Service: "dynamodb", Type: "table", ID: "orders"}, "dynamodb", map[string]any{"name": "orders", "attribute_definitions": []any{}, "key_schema": []any{map[string]any{"name": "pk"}}, "billing_mode": "PAY_PER_REQUEST"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot.Dataset = &model.Dataset{Format: "dynamodb-ndjson-v1", Records: 1, SourceBytes: int64(len(payload)), Consistency: "best_effort", Chunks: []model.DataChunk{{Data: sumRef, Records: 1, SourceBytes: int64(len(payload))}}}
+	manifest := model.Manifest{SchemaVersion: 2, Source: model.SourceMetadata{AccountID: "123456789012", Region: "eu-west-1"}, Snapshots: []model.Snapshot{*snapshot}}
+	project := config.NewProject()
+	project.Source.Region = "eu-west-1"
+	target := filepath.Join(root, ".floceed")
+	if err := Render(context.Background(), target, project, manifest, RenderOptions{ArtifactRoot: artRoot, ValidateCompose: func(context.Context, string) error { return nil }}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(filepath.Join(target, rel))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(payload) {
+		t.Fatalf("artifact = %q", got)
+	}
 }
