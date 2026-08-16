@@ -12,15 +12,109 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
+	"github.com/nkootstra/floceed/internal/captureledger"
+	"github.com/nkootstra/floceed/internal/catalog"
 	"github.com/nkootstra/floceed/internal/config"
 	"github.com/nkootstra/floceed/internal/governance"
 	"github.com/nkootstra/floceed/internal/model"
 	"github.com/nkootstra/floceed/internal/testutil"
 )
+
+func TestCompletedLedgerCandidateAlwaysRescansWithoutMaterializing(t *testing.T) {
+	root := t.TempDir()
+	client := &fakeClient{
+		described: map[string]*dynamodb.DescribeTableOutput{
+			"orders": {Table: &types.TableDescription{TableName: aws.String("orders"), TableArn: aws.String("arn:orders"), ItemCount: aws.Int64(1), TableSizeBytes: aws.Int64(8)}},
+		},
+		scans: []*dynamodb.ScanOutput{
+			{Items: []map[string]types.AttributeValue{{"pk": &types.AttributeValueMemberS{Value: "fresh"}}}},
+		},
+	}
+	opts := model.CaptureOptions{IncludeData: true, Mode: "full", ArtifactDirectory: filepath.Join(root, "artifacts"), CheckpointDirectory: filepath.Join(root, "checkpoint")}
+	scope := model.SourceScope{AccountID: "123456789012", Region: "eu-west-1"}
+	ref := model.ResourceRef{Service: "dynamodb", Type: "table", ID: "orders"}
+	definition, err := dynamoCaptureDefinition(scope, ref, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	materialized := false
+	result, err := New(client).CaptureReusable(context.Background(), scope, ref, opts, catalog.ReuseRequest{
+		Candidates:  []captureledger.Resource{{Descriptor: captureledger.ResourceDescriptor{Service: "dynamodb", Type: "table", ID: "orders"}, CaptureDefinition: definition, Units: []captureledger.Unit{{ID: "chunk-000001", Freshness: captureledger.FreshnessEvidence{Kind: "dynamodb_scan_v1", Digest: strings.Repeat("a", 64)}, Artifacts: []captureledger.Artifact{{Path: "bundle/data/dynamodb/prior.ndjson", SHA256: strings.Repeat("b", 64), Size: 99}}, Outcome: captureledger.UnitOutcomeRefreshed, Reason: captureledger.ReasonNoCandidate, CapturedAt: time.Now().UTC()}}}},
+		Materialize: func(captureledger.Artifact) error { materialized = true; return nil },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if materialized {
+		t.Fatal("completed DynamoDB candidate was materialized")
+	}
+	if len(client.scans) != 0 {
+		t.Fatal("completed DynamoDB candidate avoided the source scan")
+	}
+	if result.Snapshot == nil || result.Snapshot.Dataset == nil || result.Snapshot.Dataset.Records != 1 {
+		t.Fatalf("snapshot = %#v", result.Snapshot)
+	}
+	if result.Resource == nil || len(result.Resource.Units) != 1 || result.Resource.Units[0].Outcome != captureledger.UnitOutcomeRefreshed || result.Resource.Units[0].Reason != captureledger.ReasonFreshnessUnproven {
+		t.Fatalf("ledger resource = %#v", result.Resource)
+	}
+	metadata, err := json.Marshal(result.Resource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(metadata, []byte(`"S":"fresh"`)) {
+		t.Fatalf("ledger metadata leaked item payload: %s", metadata)
+	}
+}
+
+func TestCompletedLedgerCandidateClassifiesMismatchBeforeFreshness(t *testing.T) {
+	scope := model.SourceScope{AccountID: "123456789012", Region: "eu-west-1"}
+	ref := model.ResourceRef{Service: "dynamodb", Type: "table", ID: "orders"}
+	base := model.CaptureOptions{IncludeData: true, Mode: "full"}
+	definition, err := dynamoCaptureDefinition(scope, ref, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	validUnit := captureledger.Unit{ID: "chunk-000001", Freshness: captureledger.FreshnessEvidence{Kind: "dynamodb_scan_v1", Digest: strings.Repeat("a", 64)}, Artifacts: []captureledger.Artifact{{Path: "bundle/data/dynamodb/prior.ndjson", SHA256: strings.Repeat("b", 64), Size: 99}}, Outcome: captureledger.UnitOutcomeRefreshed, Reason: captureledger.ReasonNoCandidate, CapturedAt: time.Now().UTC()}
+	tests := []struct {
+		name       string
+		opts       model.CaptureOptions
+		request    catalog.ReuseRequest
+		wantReason captureledger.Reason
+	}{
+		{name: "matching definition", opts: base, request: catalog.ReuseRequest{Candidates: []captureledger.Resource{{CaptureDefinition: definition, Units: []captureledger.Unit{validUnit}}}}, wantReason: captureledger.ReasonFreshnessUnproven},
+		{name: "gzip changes definition", opts: model.CaptureOptions{IncludeData: true, Mode: "full", Gzip: true}, request: catalog.ReuseRequest{Candidates: []captureledger.Resource{{CaptureDefinition: definition, Units: []captureledger.Unit{validUnit}}}}, wantReason: captureledger.ReasonCaptureDefinitionChanged},
+		{name: "format mismatch", opts: base, request: catalog.ReuseRequest{Candidates: []captureledger.Resource{{CaptureDefinition: definition, Units: []captureledger.Unit{validUnit}}}, InvalidationReason: captureledger.ReasonFormatChanged}, wantReason: captureledger.ReasonFormatChanged},
+		{name: "corrupt artifact", opts: base, request: catalog.ReuseRequest{Candidates: []captureledger.Resource{{CaptureDefinition: definition, Units: []captureledger.Unit{{ID: validUnit.ID, Freshness: validUnit.Freshness, Outcome: captureledger.UnitOutcomeInvalidated, Reason: captureledger.ReasonArtifactCorrupt, CapturedAt: validUnit.CapturedAt}}}}}, wantReason: captureledger.ReasonArtifactCorrupt},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			opts := test.opts
+			opts.ArtifactDirectory = filepath.Join(root, "artifacts")
+			opts.CheckpointDirectory = filepath.Join(root, "checkpoint")
+			client := &fakeClient{described: map[string]*dynamodb.DescribeTableOutput{"orders": {Table: &types.TableDescription{TableName: aws.String("orders"), TableArn: aws.String("arn:orders"), ItemCount: aws.Int64(1), TableSizeBytes: aws.Int64(8)}}}, scans: []*dynamodb.ScanOutput{{Items: []map[string]types.AttributeValue{{"pk": &types.AttributeValueMemberS{Value: "secret-value"}}}}}}
+			result, err := New(client).CaptureReusable(context.Background(), scope, ref, opts, test.request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(result.Resource.Units) != 1 || result.Resource.Units[0].Outcome == captureledger.UnitOutcomeReused || result.Resource.Units[0].Reason != test.wantReason {
+				t.Fatalf("units = %#v, want refreshed/%s", result.Resource.Units, test.wantReason)
+			}
+			metadata, err := json.Marshal(result.Resource)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bytes.Contains(metadata, []byte("secret-value")) {
+				t.Fatalf("ledger metadata leaked item payload: %s", metadata)
+			}
+		})
+	}
+}
 
 type resumeClient struct {
 	failOnce   bool

@@ -24,10 +24,48 @@ import (
 	awsddb "github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/nkootstra/floceed/internal/bundle"
+	"github.com/nkootstra/floceed/internal/captureledger"
 	"github.com/nkootstra/floceed/internal/governance"
 	"github.com/nkootstra/floceed/internal/model"
 	"github.com/nkootstra/floceed/internal/storage"
 )
+
+func dynamoCaptureDefinition(scope model.SourceScope, ref model.ResourceRef, opts model.CaptureOptions) (string, error) {
+	format := "dynamodb-ndjson-v1"
+	if opts.Gzip {
+		format = "dynamodb-ndjson-gzip-v1"
+	}
+	return captureledger.DigestCaptureDefinition(captureledger.CaptureDefinition{
+		Source:   captureledger.SourceIdentity{AccountID: scope.AccountID, Region: scope.Region},
+		Resource: captureledger.ResourceDescriptor{Service: ref.Service, Type: ref.Type, ID: ref.ID},
+		Mode:     opts.Mode,
+		Limits:   captureledger.Limits{MaxItems: opts.Limits.MaxItems, MaxPages: opts.Limits.MaxPages},
+		Gzip:     opts.Gzip, PreserveProvisioned: opts.PreserveProvisioned, AllowPartialData: opts.AllowPartialData,
+		PolicyIdentity: governance.IdentityOf(opts.Governance), DatasetFormat: format, DatasetVersion: 1,
+		StructureVersion: model.CurrentSnapshotStructureVersion,
+	})
+}
+
+func dynamoLedgerResource(ref model.ResourceRef, definition string, dataset model.Dataset, reason captureledger.Reason) *captureledger.Resource {
+	resource := &captureledger.Resource{
+		Descriptor:        captureledger.ResourceDescriptor{Service: ref.Service, Type: ref.Type, ID: ref.ID},
+		CaptureDefinition: definition,
+	}
+	for index, chunk := range dataset.Chunks {
+		artifact := captureledger.Artifact{Path: chunk.Data.Path, SHA256: chunk.Data.SHA256, Size: chunk.Data.Size, MediaType: chunk.Data.MediaType}
+		hash := sha256.Sum256([]byte(artifact.Path + "\x00" + artifact.SHA256 + "\x00" + fmt.Sprintf("%d", artifact.Size)))
+		resource.Units = append(resource.Units, captureledger.Unit{
+			ID:        fmt.Sprintf("chunk-%06d", index+1),
+			Freshness: captureledger.FreshnessEvidence{Kind: "dynamodb_scan_v1", Digest: hex.EncodeToString(hash[:])},
+			Artifacts: []captureledger.Artifact{artifact}, Outcome: captureledger.UnitOutcomeRefreshed, Reason: reason, CapturedAt: time.Now().UTC(),
+		})
+	}
+	if len(resource.Units) == 0 {
+		hash := sha256.Sum256([]byte("dynamodb-empty-scan-v1"))
+		resource.Units = append(resource.Units, captureledger.Unit{ID: "table", Freshness: captureledger.FreshnessEvidence{Kind: "dynamodb_scan_v1", Digest: hex.EncodeToString(hash[:])}, Outcome: captureledger.UnitOutcomeRefreshed, Reason: reason, CapturedAt: time.Now().UTC()})
+	}
+	return resource
+}
 
 const dynamoChunkBytes int64 = 64 << 20
 const mergeFanIn = 64
