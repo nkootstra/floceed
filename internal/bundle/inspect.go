@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -12,6 +13,11 @@ import (
 	"strings"
 
 	"github.com/nkootstra/floceed/internal/model"
+)
+
+var (
+	ErrGeneratedSchema = errors.New("unsupported generated bundle schema")
+	ErrGeneratedPath   = errors.New("unsafe generated bundle path")
 )
 
 // Generated is a validated, read-only view of an installed bundle.
@@ -39,16 +45,18 @@ func LoadGenerated(ctx context.Context, root string) (Generated, error) {
 		return Generated{}, fmt.Errorf("decode checksums: %w", err)
 	}
 	if sums.SchemaVersion != 1 {
-		return Generated{}, fmt.Errorf("unsupported checksum schema %d", sums.SchemaVersion)
+		return Generated{}, fmt.Errorf("unsupported checksum schema %d: %w", sums.SchemaVersion, ErrGeneratedSchema)
 	}
 	seen := make(map[string]struct{}, len(sums.Files))
 	manifestFound := false
+	var manifestBytes []byte
+	scratch := make([]byte, 128*1024)
 	for _, expected := range sums.Files {
 		if err := ctx.Err(); err != nil {
 			return Generated{}, err
 		}
 		if err := ValidateRelativePath(expected.Path); err != nil {
-			return Generated{}, err
+			return Generated{}, fmt.Errorf("%w: %v", ErrGeneratedPath, err)
 		}
 		if _, exists := seen[expected.Path]; exists {
 			return Generated{}, fmt.Errorf("duplicate checksum path %q", expected.Path)
@@ -56,9 +64,18 @@ func LoadGenerated(ctx context.Context, root string) (Generated, error) {
 		seen[expected.Path] = struct{}{}
 		manifestFound = manifestFound || expected.Path == "bundle/manifest.json"
 		if err := requireRegular(root, expected.Path); err != nil {
-			return Generated{}, fmt.Errorf("validate %s: %w", expected.Path, err)
+			return Generated{}, fmt.Errorf("validate %s: %w: %v", expected.Path, ErrGeneratedPath, err)
 		}
-		if err := verifyChecksum(ctx, filepath.Join(root, filepath.FromSlash(expected.Path)), expected); err != nil {
+		filename := filepath.Join(root, filepath.FromSlash(expected.Path))
+		if expected.Path == "bundle/manifest.json" {
+			manifestBytes, err = os.ReadFile(filename)
+			if err == nil {
+				err = verifyBytes(manifestBytes, expected)
+			}
+		} else {
+			err = verifyChecksum(ctx, filename, expected, scratch)
+		}
+		if err != nil {
 			return Generated{}, fmt.Errorf("validate %s: %w", expected.Path, err)
 		}
 	}
@@ -71,15 +88,14 @@ func LoadGenerated(ctx context.Context, root string) (Generated, error) {
 	if err := ctx.Err(); err != nil {
 		return Generated{}, err
 	}
-	manifestBytes, err := os.ReadFile(filepath.Join(root, "bundle", "manifest.json"))
-	if err != nil {
-		return Generated{}, fmt.Errorf("read manifest: %w", err)
-	}
 	var manifest model.Manifest
 	if err := json.Unmarshal(manifestBytes, &manifest); err != nil {
 		return Generated{}, fmt.Errorf("decode manifest: %w", err)
 	}
 	if err := manifest.Validate(); err != nil {
+		if errors.Is(err, model.ErrSchema) {
+			return Generated{}, fmt.Errorf("validate manifest: %w: %v", ErrGeneratedSchema, err)
+		}
 		return Generated{}, fmt.Errorf("validate manifest: %w", err)
 	}
 	if err := validateManifestArtifacts(manifest, sums); err != nil {
@@ -107,7 +123,7 @@ func validateManifestArtifacts(manifest model.Manifest, sums Checksums) error {
 	}
 	for _, artifact := range artifacts {
 		if err := ValidateRelativePath(artifact.Path); err != nil {
-			return err
+			return fmt.Errorf("%w: %v", ErrGeneratedPath, err)
 		}
 		sum, exists := indexed[artifact.Path]
 		if !exists || sum.SHA256 != artifact.SHA256 || sum.Size != artifact.Size {
@@ -127,7 +143,7 @@ func validateChecksumCoverage(ctx context.Context, root string, indexed map[stri
 		}
 		if filename == root {
 			if entry.Type()&os.ModeSymlink != 0 || !entry.IsDir() {
-				return fmt.Errorf("bundle root is not a regular directory")
+				return fmt.Errorf("%w: bundle root is not a regular directory", ErrGeneratedPath)
 			}
 			return nil
 		}
@@ -137,10 +153,10 @@ func validateChecksumCoverage(ctx context.Context, root string, indexed map[stri
 		}
 		relative = filepath.ToSlash(relative)
 		if err := ValidateRelativePath(relative); err != nil {
-			return err
+			return fmt.Errorf("%w: %v", ErrGeneratedPath, err)
 		}
 		if entry.Type()&os.ModeSymlink != 0 {
-			return fmt.Errorf("symlink is not allowed: %s", relative)
+			return fmt.Errorf("%w: symlink is not allowed: %s", ErrGeneratedPath, relative)
 		}
 		if entry.IsDir() {
 			return nil
@@ -150,7 +166,7 @@ func validateChecksumCoverage(ctx context.Context, root string, indexed map[stri
 			return err
 		}
 		if !info.Mode().IsRegular() {
-			return fmt.Errorf("bundle entry is not a regular file: %s", relative)
+			return fmt.Errorf("%w: bundle entry is not a regular file: %s", ErrGeneratedPath, relative)
 		}
 		if relative == "checksums.json" {
 			return nil
@@ -184,14 +200,13 @@ func requireRegular(root, relative string) error {
 	return nil
 }
 
-func verifyChecksum(ctx context.Context, filename string, expected Checksum) error {
+func verifyChecksum(ctx context.Context, filename string, expected Checksum, buffer []byte) error {
 	f, err := os.Open(filename)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
 	h := sha256.New()
-	buffer := make([]byte, 128*1024)
 	var size int64
 	for {
 		if err := ctx.Err(); err != nil {
@@ -210,6 +225,14 @@ func verifyChecksum(ctx context.Context, filename string, expected Checksum) err
 		}
 	}
 	if size != expected.Size || hex.EncodeToString(h.Sum(nil)) != expected.SHA256 {
+		return fmt.Errorf("checksum mismatch")
+	}
+	return nil
+}
+
+func verifyBytes(data []byte, expected Checksum) error {
+	sum := sha256.Sum256(data)
+	if int64(len(data)) != expected.Size || hex.EncodeToString(sum[:]) != expected.SHA256 {
 		return fmt.Errorf("checksum mismatch")
 	}
 	return nil

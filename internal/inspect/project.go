@@ -32,6 +32,7 @@ func ProjectManifest(manifest model.Manifest) (Projection, error) {
 	}
 	structures := make(map[string]string, len(manifest.Snapshots))
 	datasets := make(map[string]string, len(manifest.Snapshots))
+	snapshotFindings := make(map[string][]Finding, len(manifest.Snapshots))
 	for _, snapshot := range manifest.Snapshots {
 		key := resourceKey(snapshot.Resource)
 		if _, exists := structures[key]; exists {
@@ -43,6 +44,7 @@ func ProjectManifest(manifest model.Manifest) (Projection, error) {
 			return Projection{}, fmt.Errorf("project %s structure: %w", key, err)
 		}
 		structures[key] = digestBytes(structure)
+		snapshotFindings[key] = ProjectFindings(snapshot.Findings)
 		dataset, err := projectDataset(snapshot)
 		if err != nil {
 			return Projection{}, fmt.Errorf("project %s dataset: %w", key, err)
@@ -60,7 +62,16 @@ func ProjectManifest(manifest model.Manifest) (Projection, error) {
 		p.Operations = append(p.Operations, op)
 	}
 	sort.Slice(p.Operations, func(i, j int) bool { return operationKey(p.Operations[i]) < operationKey(p.Operations[j]) })
-	p.Findings = projectFindings(manifest.Findings)
+	p.Findings = ProjectFindings(manifest.Findings)
+	operationsByResource := make(map[string][]ProjectedOperation)
+	for _, operation := range p.Operations {
+		key := operation.Service + "\x00" + operation.ResourceID
+		operationsByResource[key] = append(operationsByResource[key], operation)
+	}
+	findingsByResource := make(map[string][]Finding)
+	for _, finding := range p.Findings {
+		findingsByResource[finding.Resource] = append(findingsByResource[finding.Resource], finding)
+	}
 	governanceDigest, err := optionalDigest(p.Governance)
 	if err != nil {
 		return Projection{}, err
@@ -72,13 +83,9 @@ func ProjectManifest(manifest model.Manifest) (Projection, error) {
 	sort.Strings(keys)
 	for _, key := range keys {
 		ref := refs[key]
-		resourceOps := operationsFor(p.Operations, ref)
-		resourceFindings := findingsFor(manifest.Findings, ref)
-		for _, snapshot := range manifest.Snapshots {
-			if resourceKey(snapshot.Resource) == key {
-				resourceFindings = append(resourceFindings, projectFindings(snapshot.Findings)...)
-			}
-		}
+		resourceOps := operationsByResource[ref.Service+"\x00"+ref.ID]
+		resourceFindings := append([]Finding(nil), findingsByResource[ref.ID]...)
+		resourceFindings = append(resourceFindings, snapshotFindings[key]...)
 		sort.Slice(resourceFindings, func(i, j int) bool { return findingKey(resourceFindings[i]) < findingKey(resourceFindings[j]) })
 		operationsDigest, err := optionalDigest(resourceOps)
 		if err != nil {
@@ -198,31 +205,14 @@ func projectGovernance(a *model.GovernanceAudit) *GovernanceSummary {
 	return g
 }
 
-func projectFindings(in []model.Finding) []Finding {
+// ProjectFindings returns the disclosure-safe canonical finding projection.
+func ProjectFindings(in []model.Finding) []Finding {
 	out := make([]Finding, 0, len(in))
 	for _, f := range in {
 		out = append(out, Finding{Code: f.Code, Severity: string(f.Severity), Support: string(f.Support), Resource: f.Resource, Property: f.Property})
 	}
 	sort.Slice(out, func(i, j int) bool { return findingKey(out[i]) < findingKey(out[j]) })
 	return out
-}
-func findingsFor(in []model.Finding, ref model.ResourceRef) []Finding {
-	var values []model.Finding
-	for _, f := range in {
-		if f.Resource == ref.ID {
-			values = append(values, f)
-		}
-	}
-	return projectFindings(values)
-}
-func operationsFor(in []ProjectedOperation, ref model.ResourceRef) []ProjectedOperation {
-	var values []ProjectedOperation
-	for _, op := range in {
-		if op.Service == ref.Service && op.ResourceID == ref.ID {
-			values = append(values, op)
-		}
-	}
-	return values
 }
 func findingKey(f Finding) string {
 	return f.Code + "\x00" + f.Resource + "\x00" + f.Property + "\x00" + f.Severity + "\x00" + f.Support
@@ -243,12 +233,13 @@ func digestValue(value any) (string, error) {
 	return digestBytes(b), nil
 }
 func optionalDigest(value any) (string, error) {
-	b, err := json.Marshal(value)
+	b, err := bundle.CanonicalJSON(value)
 	if err != nil {
 		return "", err
 	}
-	if string(b) == "null" || string(b) == "[]" {
+	trimmed := bytes.TrimSpace(b)
+	if bytes.Equal(trimmed, []byte("null")) || bytes.Equal(trimmed, []byte("[]")) {
 		return "", nil
 	}
-	return digestValue(value)
+	return digestBytes(b), nil
 }

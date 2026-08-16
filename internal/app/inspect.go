@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
@@ -130,13 +129,7 @@ func summarizeInspection(generated bundle.Generated, projection inspection.Proje
 		resource := inspection.Resource{Identity: projected.Identity, Selected: projected.Selected, Governance: projection.Governance}
 		if snapshot, ok := snapshots[inspectionIdentityKey(projected.Identity)]; ok {
 			resource.Dataset = summarizeDataset(snapshot)
-			for _, finding := range snapshot.Findings {
-				resource.Findings = append(resource.Findings, inspection.Finding{Code: finding.Code, Severity: string(finding.Severity), Support: string(finding.Support), Resource: finding.Resource, Property: finding.Property})
-			}
-			sort.Slice(resource.Findings, func(i, j int) bool {
-				a, b := resource.Findings[i], resource.Findings[j]
-				return a.Code+"\x00"+a.Resource+"\x00"+a.Property+"\x00"+a.Severity+"\x00"+a.Support < b.Code+"\x00"+b.Resource+"\x00"+b.Property+"\x00"+b.Severity+"\x00"+b.Support
-			})
+			resource.Findings = inspection.ProjectFindings(snapshot.Findings)
 		}
 		result.Resources = append(result.Resources, resource)
 	}
@@ -190,10 +183,10 @@ func inspectError(err error) error {
 	if errors.Is(err, os.ErrNotExist) {
 		return &Error{Kind: ErrorFilesystem, Code: "BUNDLE_NOT_FOUND", Message: err.Error(), Remediation: "Run floceed pull to generate the bundle, then retry inspection.", Err: err}
 	}
-	if errors.Is(err, model.ErrSchema) || strings.Contains(err.Error(), "unsupported manifest schema") {
+	if errors.Is(err, bundle.ErrGeneratedSchema) || errors.Is(err, model.ErrSchema) {
 		return &Error{Kind: ErrorPlan, Code: "MANIFEST_SCHEMA_UNSUPPORTED", Message: err.Error(), Remediation: "Use a floceed version that supports this bundle schema.", Err: err}
 	}
-	if strings.Contains(err.Error(), "unsafe bundle path") || strings.Contains(err.Error(), "symlink is not allowed") || strings.Contains(err.Error(), "not a regular file") {
+	if errors.Is(err, bundle.ErrGeneratedPath) {
 		return &Error{Kind: ErrorFilesystem, Code: "BUNDLE_PATH_UNSAFE", Message: err.Error(), Remediation: "Regenerate the bundle; generated artifacts must be regular files with safe relative paths.", Err: err}
 	}
 	return &Error{Kind: ErrorFilesystem, Code: "BUNDLE_INTEGRITY_INVALID", Message: fmt.Sprintf("bundle inspection failed: %v", err), Remediation: "Regenerate the bundle with floceed pull and retry inspection.", Err: err}
