@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/nkootstra/floceed/internal/bundle"
+	"github.com/nkootstra/floceed/internal/captureledger"
 	"github.com/nkootstra/floceed/internal/compose"
 	"github.com/nkootstra/floceed/internal/config"
 	"github.com/nkootstra/floceed/internal/governance"
@@ -129,6 +130,10 @@ func (a *Application) PullWithOptions(ctx context.Context, p config.Project, pro
 	if err := os.MkdirAll(workBase, 0o700); err != nil {
 		return PullResult{}, filesystemError(err)
 	}
+	ledger, err := captureledger.OpenStore(filepath.Join(workBase, "ledger"))
+	if err != nil {
+		return PullResult{}, filesystemError(err)
+	}
 	lockPath := tmp + ".lock"
 	release, err := acquireCaptureLock(lockPath)
 	if err != nil {
@@ -171,6 +176,8 @@ func (a *Application) PullWithOptions(ctx context.Context, p config.Project, pro
 		CheckpointRoot: filepath.Join(tmp, "checkpoints"),
 		Progress:       report,
 		Source:         &source,
+		Ledger:         ledger,
+		LedgerSource:   captureledger.SourceIdentity{AccountID: source.Identity.AccountID, Region: effectiveRegion},
 	})
 	if err != nil {
 		return PullResult{}, err
@@ -179,6 +186,25 @@ func (a *Application) PullWithOptions(ctx context.Context, p config.Project, pro
 	currentProjection, err := inspection.ProjectManifest(manifest)
 	if err != nil {
 		return PullResult{}, &Error{Kind: ErrorPlan, Code: "MANIFEST_INVALID", Message: err.Error(), Err: err}
+	}
+	var ledgerGeneration *captureledger.Generation
+	if len(planned.ledgerResources) != 0 {
+		completedAt := time.Now().UTC()
+		if a.Now != nil {
+			completedAt = a.Now().UTC()
+		}
+		generation := captureledger.Generation{
+			SchemaVersion: captureledger.CurrentSchemaVersion,
+			Source:        captureledger.SourceIdentity{AccountID: source.Identity.AccountID, Region: effectiveRegion},
+			CreatedAt:     completedAt,
+			CompletedAt:   completedAt,
+			Resources:     planned.ledgerResources,
+		}
+		generation.ID = ledgerGenerationID(generation)
+		if _, err := generation.CanonicalJSON(); err != nil {
+			return PullResult{}, &Error{Kind: ErrorPlan, Code: "CAPTURE_LEDGER_INVALID", Message: err.Error(), Err: err}
+		}
+		ledgerGeneration = &generation
 	}
 	report(model.ProgressEvent{Operation: "pull", Phase: "install", Message: "validating and installing bundle"})
 	beforeInstall := func() error {
@@ -206,6 +232,11 @@ func (a *Application) PullWithOptions(ctx context.Context, p config.Project, pro
 		}
 		return PullResult{}, filesystemError(err)
 	}
+	if ledgerGeneration != nil {
+		if err := ledger.Publish(*ledgerGeneration, filepath.Join(tmp, "artifacts")); err != nil {
+			return PullResult{}, filesystemError(err)
+		}
+	}
 	if err := os.RemoveAll(tmp); err != nil {
 		return PullResult{}, filesystemError(err)
 	}
@@ -216,6 +247,16 @@ func (a *Application) PullWithOptions(ctx context.Context, p config.Project, pro
 		result.Receipt = &receipt
 	}
 	return result, nil
+}
+
+func ledgerGenerationID(generation captureledger.Generation) string {
+	payload, _ := json.Marshal(struct {
+		Source      captureledger.SourceIdentity
+		CompletedAt time.Time
+		Resources   []captureledger.Resource
+	}{generation.Source, generation.CompletedAt, generation.Resources})
+	sum := sha256.Sum256(payload)
+	return hex.EncodeToString(sum[:])
 }
 
 func invalidBaselineError(err error) error {

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 
+	"github.com/nkootstra/floceed/internal/captureledger"
 	"github.com/nkootstra/floceed/internal/config"
 	"github.com/nkootstra/floceed/internal/model"
 )
@@ -34,6 +35,25 @@ type Adapter interface {
 	Capture(context.Context, model.SourceScope, model.ResourceRef, model.CaptureOptions) (*model.Snapshot, error)
 	Dependencies(*model.Snapshot) []model.Dependency
 	Validate(*model.Snapshot, model.Capabilities) []model.Finding
+}
+
+// ReusableAdapter is an optional extension implemented by adapters that can
+// prove completed capture units are still fresh. The adapter owns freshness
+// semantics; the orchestrator owns candidate integrity and materialization.
+type ReusableAdapter interface {
+	Adapter
+	CaptureReusable(context.Context, model.SourceScope, model.ResourceRef, model.CaptureOptions, ReuseRequest) (ReuseResult, error)
+}
+
+type ReuseRequest struct {
+	Candidates         []captureledger.Resource
+	InvalidationReason captureledger.Reason
+	Materialize        func(captureledger.Artifact) error
+}
+
+type ReuseResult struct {
+	Snapshot *model.Snapshot
+	Resource *captureledger.Resource
 }
 
 type Registry struct{ adapters map[string]Adapter }

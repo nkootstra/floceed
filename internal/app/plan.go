@@ -13,6 +13,7 @@ import (
 	"sort"
 	"sync"
 
+	"github.com/nkootstra/floceed/internal/captureledger"
 	"github.com/nkootstra/floceed/internal/catalog"
 	"github.com/nkootstra/floceed/internal/config"
 	"github.com/nkootstra/floceed/internal/governance"
@@ -31,6 +32,7 @@ type Plan struct {
 	EstimatedBytes     int64                  `json:"estimated_bytes"`
 	RequiredIAMActions []string               `json:"required_iam_actions"`
 	Governance         *model.GovernanceAudit `json:"governance,omitempty"`
+	ledgerResources    []captureledger.Resource
 }
 
 func (a *Application) Plan(ctx context.Context, p config.Project, profile, region string) (Plan, error) {
@@ -71,6 +73,8 @@ type captureRequest struct {
 	CheckpointRoot string
 	Progress       func(model.ProgressEvent)
 	Source         *Source
+	Ledger         *captureledger.Store
+	LedgerSource   captureledger.SourceIdentity
 }
 
 func (a *Application) capture(ctx context.Context, req captureRequest) (Plan, []model.Snapshot, error) {
@@ -106,8 +110,10 @@ func (a *Application) capture(ctx context.Context, req captureRequest) (Plan, []
 		return cmp.Or(cmp.Compare(selections[i].Resource.Service, selections[j].Resource.Service), cmp.Compare(selections[i].Resource.ID, selections[j].Resource.ID)) < 0
 	})
 	type captureJob struct {
-		adapter catalog.Adapter
-		options model.CaptureOptions
+		adapter       catalog.Adapter
+		options       model.CaptureOptions
+		candidate     []captureledger.Resource
+		invalidReason captureledger.Reason
 	}
 	jobs := make([]captureJob, len(selections))
 	for i, selection := range selections {
@@ -130,11 +136,26 @@ func (a *Application) capture(ctx context.Context, req captureRequest) (Plan, []
 		} else {
 			options.IncludeData = false
 		}
-		jobs[i] = captureJob{adapter: adapter, options: options}
+		job := captureJob{adapter: adapter, options: options}
+		if req.IncludeData && req.Ledger != nil {
+			descriptor := captureledger.ResourceDescriptor{Service: selection.Resource.Service, Type: selection.Resource.Type, ID: selection.Resource.ID}
+			generation, loadErr := req.Ledger.Load(req.LedgerSource, descriptor)
+			if loadErr != nil {
+				job.invalidReason, _ = captureledger.InvalidationReason(loadErr)
+			} else {
+				for _, resource := range generation.Resources {
+					if resource.Descriptor == descriptor {
+						job.candidate = append(job.candidate, resource)
+					}
+				}
+			}
+		}
+		jobs[i] = job
 	}
 
 	type captureOutcome struct {
 		snapshot *model.Snapshot
+		resource *captureledger.Resource
 		err      error
 	}
 	outcomes := make([]captureOutcome, len(jobs))
@@ -157,7 +178,16 @@ func (a *Application) capture(ctx context.Context, req captureRequest) (Plan, []
 				outcomes[i].err = captureCtx.Err()
 				return
 			}
-			outcomes[i].snapshot, outcomes[i].err = job.adapter.Capture(captureCtx, source.Scope, selections[i].Resource, job.options)
+			if reusable, ok := job.adapter.(catalog.ReusableAdapter); ok && req.Ledger != nil {
+				result, captureErr := reusable.CaptureReusable(captureCtx, source.Scope, selections[i].Resource, job.options, catalog.ReuseRequest{
+					Candidates:         job.candidate,
+					InvalidationReason: job.invalidReason,
+					Materialize:        func(artifact captureledger.Artifact) error { return req.Ledger.Materialize(artifact, req.ArtifactRoot) },
+				})
+				outcomes[i].snapshot, outcomes[i].resource, outcomes[i].err = result.Snapshot, result.Resource, captureErr
+			} else {
+				outcomes[i].snapshot, outcomes[i].err = job.adapter.Capture(captureCtx, source.Scope, selections[i].Resource, job.options)
+			}
 			if outcomes[i].err != nil {
 				cancelCaptures()
 			}
@@ -211,6 +241,9 @@ func (a *Application) capture(ctx context.Context, req captureRequest) (Plan, []
 		}
 		result.Operations = append(result.Operations, operations(snapshot, deps)...)
 		snapshots = append(snapshots, *snapshot)
+		if outcomes[i].resource != nil {
+			result.ledgerResources = append(result.ledgerResources, *outcomes[i].resource)
+		}
 		if result.Governance != nil {
 			appendGovernanceAudit(result.Governance, policy, jobs[i].options.GovernanceAudit.Result())
 		}

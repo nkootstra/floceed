@@ -162,6 +162,40 @@ func (s *Store) OpenArtifact(artifact Artifact) (*os.File, error) {
 	return f, nil
 }
 
+// Materialize verifies a blob, then hard-links it into the current capture
+// root or copies it when linking is unavailable. The destination is verified
+// before it can be consumed by bundle rendering.
+func (s *Store) Materialize(artifact Artifact, artifactRoot string) error {
+	if err := bundle.ValidateRelativePath(artifact.Path); err != nil {
+		return &InvalidationError{Reason: ReasonArtifactCorrupt, Err: err}
+	}
+	f, err := s.OpenArtifact(artifact)
+	if err != nil {
+		return err
+	}
+	_ = f.Close()
+	destination := filepath.Join(artifactRoot, filepath.FromSlash(artifact.Path))
+	if err := os.MkdirAll(filepath.Dir(destination), 0o700); err != nil {
+		return err
+	}
+	if err := os.Link(s.blobPath(artifact), destination); err != nil {
+		if !errors.Is(err, os.ErrExist) {
+			if err := copyExclusive(destination, s.blobPath(artifact)); err != nil {
+				return err
+			}
+		}
+	}
+	got, err := bundle.SumFile(destination)
+	if err != nil {
+		return err
+	}
+	if got.SHA256 != artifact.SHA256 || got.Size != artifact.Size {
+		_ = os.Remove(destination)
+		return &InvalidationError{Reason: ReasonArtifactCorrupt, Err: fmt.Errorf("materialized blob size or checksum mismatch")}
+	}
+	return nil
+}
+
 func (s *Store) admit(root string, artifact Artifact) error {
 	if err := bundle.ValidateRelativePath(artifact.Path); err != nil {
 		return &InvalidationError{Reason: ReasonArtifactCorrupt, Err: err}
