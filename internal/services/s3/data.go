@@ -44,9 +44,14 @@ const (
 var requireS3Available = storage.RequireAvailable
 
 type inventoryEntry struct {
-	Key  string `json:"key"`
-	ETag string `json:"etag,omitempty"`
-	Size int64  `json:"size"`
+	Key            string `json:"key"`
+	ETag           string `json:"etag,omitempty"`
+	Size           int64  `json:"size"`
+	MetadataDigest string `json:"metadata_digest,omitempty"`
+}
+
+type objectMetadataClient interface {
+	HeadObject(context.Context, *awss3.HeadObjectInput, ...func(*awss3.Options)) (*awss3.HeadObjectOutput, error)
 }
 
 type captureGovernance struct {
@@ -282,7 +287,7 @@ func (a *Adapter) captureObjectsReusable(ctx context.Context, scope model.Source
 		}
 		var chunk model.DataChunk
 		dataArtifact, indexArtifact, artifactErr := s3UnitArtifacts(unit)
-		reused := found && unit.Outcome != captureledger.UnitOutcomeInvalidated && unit.Freshness.Kind == freshness.Kind && unit.Freshness.Digest == freshness.Digest && unit.Freshness.Records == freshness.Records && unit.Freshness.Bytes == freshness.Bytes && artifactErr == nil && reuseEnabled
+		reused := found && unit.Outcome != captureledger.UnitOutcomeInvalidated && freshness.Kind == "s3_inventory_v2" && unit.Freshness.Kind == freshness.Kind && unit.Freshness.Digest == freshness.Digest && unit.Freshness.Records == freshness.Records && unit.Freshness.Bytes == freshness.Bytes && artifactErr == nil && reuseEnabled
 		if reused {
 			for _, artifact := range []captureledger.Artifact{dataArtifact, indexArtifact} {
 				if err := reuse.Materialize(artifact); err != nil {
@@ -437,13 +442,64 @@ func s3CaptureDefinition(scope model.SourceScope, ref model.ResourceRef, opts mo
 
 func s3PackFreshness(entries []inventoryEntry) captureledger.FreshnessEvidence {
 	h := sha256.New()
+	complete := true
 	for _, entry := range entries {
 		identity := sha256.Sum256([]byte(entry.Key))
-		value := sha256.Sum256([]byte(entry.ETag + "\x00" + strconv.FormatInt(entry.Size, 10)))
+		if entry.MetadataDigest == "" {
+			complete = false
+		}
+		value := sha256.Sum256([]byte(entry.ETag + "\x00" + strconv.FormatInt(entry.Size, 10) + "\x00" + entry.MetadataDigest))
 		id, digest := hex.EncodeToString(identity[:]), hex.EncodeToString(value[:])
 		_, _ = io.WriteString(h, id+"\x00"+digest+"\n")
 	}
-	return captureledger.FreshnessEvidence{Kind: "s3_inventory_v1", Digest: hex.EncodeToString(h.Sum(nil)), Records: int64(len(entries)), Bytes: inventorySize(entries)}
+	kind := "s3_inventory_v2"
+	if !complete {
+		kind = "s3_inventory_unproven"
+	}
+	return captureledger.FreshnessEvidence{Kind: kind, Digest: hex.EncodeToString(h.Sum(nil)), Records: int64(len(entries)), Bytes: inventorySize(entries)}
+}
+
+func (a *Adapter) objectMetadataDigest(ctx context.Context, client objectMetadataClient, bucket, key string) string {
+	head, err := client.HeadObject(ctx, &awss3.HeadObjectInput{Bucket: aws.String(bucket), Key: aws.String(key)})
+	if err != nil {
+		return ""
+	}
+	tags, err := a.client.GetObjectTagging(ctx, &awss3.GetObjectTaggingInput{Bucket: aws.String(bucket), Key: aws.String(key)})
+	if err != nil {
+		return ""
+	}
+	objectTags := make([]Tag, 0, len(tags.TagSet))
+	for _, tag := range tags.TagSet {
+		objectTags = append(objectTags, Tag{Key: aws.ToString(tag.Key), Value: aws.ToString(tag.Value)})
+	}
+	sortTags(objectTags)
+	metadata := struct {
+		CacheControl    string            `json:"cache_control,omitempty"`
+		ContentEncoding string            `json:"content_encoding,omitempty"`
+		ContentType     string            `json:"content_type,omitempty"`
+		Metadata        map[string]string `json:"metadata,omitempty"`
+		Tags            []Tag             `json:"tags,omitempty"`
+		ChecksumCRC32   string            `json:"checksum_crc32,omitempty"`
+		ChecksumCRC32C  string            `json:"checksum_crc32c,omitempty"`
+		ChecksumSHA1    string            `json:"checksum_sha1,omitempty"`
+		ChecksumSHA256  string            `json:"checksum_sha256,omitempty"`
+	}{
+		CacheControl:    aws.ToString(head.CacheControl),
+		ContentEncoding: aws.ToString(head.ContentEncoding),
+		ContentType:     aws.ToString(head.ContentType),
+		Metadata:        head.Metadata,
+		Tags:            objectTags,
+		ChecksumCRC32:   aws.ToString(head.ChecksumCRC32),
+		ChecksumCRC32C:  aws.ToString(head.ChecksumCRC32C),
+		ChecksumSHA1:    aws.ToString(head.ChecksumSHA1),
+		ChecksumSHA256:  aws.ToString(head.ChecksumSHA256),
+	}
+	payload, err := json.Marshal(metadata)
+	if err != nil {
+		return ""
+	}
+	digest := sha256.Sum256(payload)
+	return hex.EncodeToString(digest[:])
 }
 
 func chunkArtifacts(chunk model.DataChunk) []captureledger.Artifact {
@@ -553,7 +609,11 @@ func (a *Adapter) buildInventory(ctx context.Context, bucket string, prefixes []
 				stop = true
 				break
 			}
-			line, _ := json.Marshal(inventoryEntry{key, etag, size})
+			metadataDigest := ""
+			if metadataClient, ok := a.client.(objectMetadataClient); ok {
+				metadataDigest = a.objectMetadataDigest(ctx, metadataClient, bucket, key)
+			}
+			line, _ := json.Marshal(inventoryEntry{Key: key, ETag: etag, Size: size, MetadataDigest: metadataDigest})
 			line = append(line, '\n')
 			if _, err = w.Write(line); err != nil {
 				return false, err

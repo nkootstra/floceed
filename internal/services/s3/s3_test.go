@@ -262,6 +262,8 @@ type packedDataClient struct {
 	gets      int
 	inventory []types.Object
 	ifMatches []string
+	metadata  string
+	tags      []types.Tag
 }
 
 func (c packedDataClient) ListObjectsV2(context.Context, *awss3.ListObjectsV2Input, ...func(*awss3.Options)) (*awss3.ListObjectsV2Output, error) {
@@ -276,8 +278,50 @@ func (c *packedDataClient) GetObject(_ context.Context, in *awss3.GetObjectInput
 	c.ifMatches = append(c.ifMatches, aws.ToString(in.IfMatch))
 	return &awss3.GetObjectOutput{Body: io.NopCloser(strings.NewReader(aws.ToString(in.Key)[:1]))}, nil
 }
-func (packedDataClient) GetObjectTagging(context.Context, *awss3.GetObjectTaggingInput, ...func(*awss3.Options)) (*awss3.GetObjectTaggingOutput, error) {
-	return &awss3.GetObjectTaggingOutput{}, nil
+func (c *packedDataClient) HeadObject(context.Context, *awss3.HeadObjectInput, ...func(*awss3.Options)) (*awss3.HeadObjectOutput, error) {
+	return &awss3.HeadObjectOutput{Metadata: map[string]string{"fixture": c.metadata}, ContentType: aws.String("text/plain")}, nil
+}
+func (c *packedDataClient) GetObjectTagging(context.Context, *awss3.GetObjectTaggingInput, ...func(*awss3.Options)) (*awss3.GetObjectTaggingOutput, error) {
+	return &awss3.GetObjectTaggingOutput{TagSet: c.tags}, nil
+}
+
+func TestReusableS3CaptureRefreshesWhenObjectMetadataChanges(t *testing.T) {
+	client := &packedDataClient{metadata: "v1", tags: []types.Tag{{Key: aws.String("env"), Value: aws.String("one")}}}
+	adapter := New(client)
+	scope := model.SourceScope{AccountID: "123456789012", Region: "eu-west-1"}
+	ref := model.ResourceRef{Service: "s3", Type: "bucket", ID: "assets"}
+	firstRoot := t.TempDir()
+	firstSnapshot, _ := model.NewSnapshot(ref, "s3", Bucket{Name: ref.ID})
+	firstOptions := model.CaptureOptions{IncludeData: true, Mode: "full", ArtifactDirectory: filepath.Join(firstRoot, "artifacts"), CheckpointDirectory: filepath.Join(firstRoot, "checkpoint"), Overwrite: "if-different", GovernanceAudit: governance.NewAudit()}
+	first, err := adapter.captureObjectsReusable(context.Background(), scope, ref, &Bucket{Name: ref.ID}, firstSnapshot, firstOptions, catalog.ReuseRequest{Materialize: func(captureledger.Artifact) error { return nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledger, err := captureledger.OpenStore(filepath.Join(firstRoot, "ledger"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	generation := captureledger.Generation{SchemaVersion: captureledger.CurrentSchemaVersion, ID: strings.Repeat("d", 64), Source: captureledger.SourceIdentity{AccountID: scope.AccountID, Region: scope.Region}, CreatedAt: time.Unix(1, 0).UTC(), CompletedAt: time.Unix(2, 0).UTC(), Resources: []captureledger.Resource{*first}}
+	if err := ledger.Publish(generation, firstOptions.ArtifactDirectory); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := ledger.LoadCandidates(generation.Source, first.Descriptor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.metadata = "v2"
+	client.tags = []types.Tag{{Key: aws.String("env"), Value: aws.String("two")}}
+	secondRoot := t.TempDir()
+	secondOptions := firstOptions
+	secondOptions.ArtifactDirectory, secondOptions.CheckpointDirectory = filepath.Join(secondRoot, "artifacts"), filepath.Join(secondRoot, "checkpoint")
+	secondSnapshot, _ := model.NewSnapshot(ref, "s3", Bucket{Name: ref.ID})
+	second, err := adapter.captureObjectsReusable(context.Background(), scope, ref, &Bucket{Name: ref.ID}, secondSnapshot, secondOptions, catalog.ReuseRequest{Candidate: &loaded.Resources[0], Materialize: func(captureledger.Artifact) error { return nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Units[0].Outcome != captureledger.UnitOutcomeRefreshed || second.Units[0].Reason != captureledger.ReasonSourceContentChanged {
+		t.Fatalf("metadata change was reused: %#v", second.Units[0])
+	}
 }
 
 func TestFullS3CaptureUsesPackedDatasetInsteadOfOneFilePerObject(t *testing.T) {
