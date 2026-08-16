@@ -1,6 +1,7 @@
 package app
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -9,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 
@@ -244,9 +246,46 @@ func (a *Application) PullWithOptions(ctx context.Context, p config.Project, pro
 	result := PullResult{Manifest: manifest, Baseline: baselineState}
 	if baselineState == BaselinePresent {
 		receipt := inspection.Compare(baselineProjection, currentProjection)
+		if ledgerGeneration != nil {
+			attachLedgerDecisions(&receipt, *ledgerGeneration, planned.ledgerGenerations)
+		}
 		result.Receipt = &receipt
 	}
 	return result, nil
+}
+
+func attachLedgerDecisions(receipt *inspection.Receipt, generation captureledger.Generation, previous map[string]string) {
+	changes := make(map[string]*inspection.ResourceChange, len(receipt.Resources))
+	for index := range receipt.Resources {
+		identity := receipt.Resources[index].Resource
+		changes[identity.Service+"\x00"+identity.Type+"\x00"+identity.ID] = &receipt.Resources[index]
+	}
+	for _, resource := range generation.Resources {
+		key := resource.Descriptor.Service + "\x00" + resource.Descriptor.Type + "\x00" + resource.Descriptor.ID
+		change := changes[key]
+		if change == nil { // Defensive: ledger resources are selected manifest resources.
+			continue
+		}
+		for _, unit := range resource.Units {
+			decision := inspection.UnitDecision{
+				ID: unit.ID, Outcome: string(unit.Outcome), Reason: string(unit.Reason),
+				FreshnessDigest: unit.Freshness.Digest, ArtifactCount: len(unit.Artifacts), Generation: generation.ID, PreviousGeneration: previous[key],
+			}
+			for _, artifact := range unit.Artifacts {
+				decision.ArtifactBytes += artifact.Size
+			}
+			change.Units = append(change.Units, decision)
+			if unit.Reason == captureledger.ReasonCaptureDefinitionChanged && change.Outcome == inspection.OutcomeUnchanged {
+				change.Outcome = inspection.OutcomeChanged
+				change.Categories = append(change.Categories, inspection.CategoryDataset)
+				receipt.Counts.Unchanged--
+				receipt.Counts.Changed++
+			}
+		}
+		sort.Slice(change.Units, func(i, j int) bool {
+			return cmp.Or(cmp.Compare(change.Units[i].ID, change.Units[j].ID), cmp.Compare(change.Units[i].Outcome, change.Units[j].Outcome), cmp.Compare(change.Units[i].Reason, change.Units[j].Reason)) < 0
+		})
+	}
 }
 
 func ledgerGenerationID(generation captureledger.Generation) string {

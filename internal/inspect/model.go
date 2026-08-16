@@ -143,6 +143,20 @@ type ResourceChange struct {
 	Resource   ResourceIdentity `json:"resource"`
 	Outcome    Outcome          `json:"outcome"`
 	Categories []ChangeCategory `json:"categories,omitempty"`
+	Units      []UnitDecision   `json:"units,omitempty"`
+}
+
+// UnitDecision explains how a capture unit was materialized without exposing
+// source keys, payloads, or ledger filesystem locations.
+type UnitDecision struct {
+	ID                 string `json:"id"`
+	Outcome            string `json:"outcome"`
+	Reason             string `json:"reason"`
+	FreshnessDigest    string `json:"freshness_digest,omitempty"`
+	ArtifactCount      int    `json:"artifact_count,omitempty"`
+	ArtifactBytes      int64  `json:"artifact_bytes,omitempty"`
+	Generation         string `json:"generation,omitempty"`
+	PreviousGeneration string `json:"previous_generation,omitempty"`
 }
 
 type Receipt struct {

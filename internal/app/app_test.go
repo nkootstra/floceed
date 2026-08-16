@@ -16,6 +16,7 @@ import (
 
 	"github.com/nkootstra/floceed/internal/awsconfig"
 	"github.com/nkootstra/floceed/internal/bundle"
+	"github.com/nkootstra/floceed/internal/captureledger"
 	"github.com/nkootstra/floceed/internal/catalog"
 	"github.com/nkootstra/floceed/internal/compose"
 	"github.com/nkootstra/floceed/internal/config"
@@ -589,6 +590,38 @@ func TestPullReturnsChangedReceiptAfterSuccessfulReplacement(t *testing.T) {
 		if bytes.Contains(serialized, []byte(forbidden)) {
 			t.Fatalf("pull receipt disclosed %q: %s", forbidden, serialized)
 		}
+	}
+}
+
+func TestLedgerDecisionsPreserveReceiptClassificationsAndSortUnits(t *testing.T) {
+	receipt := inspection.Receipt{
+		Counts: inspection.ReceiptCounts{Removed: 1, Unchanged: 1},
+		Resources: []inspection.ResourceChange{
+			{Resource: inspection.ResourceIdentity{Service: "s3", Type: "bucket", ID: "assets"}, Outcome: inspection.OutcomeUnchanged},
+			{Resource: inspection.ResourceIdentity{Service: "s3", Type: "bucket", ID: "old"}, Outcome: inspection.OutcomeRemoved},
+		},
+	}
+	generation := captureledger.Generation{ID: strings.Repeat("a", 64), Resources: []captureledger.Resource{{
+		Descriptor: captureledger.ResourceDescriptor{Service: "s3", Type: "bucket", ID: "assets"},
+		Units: []captureledger.Unit{
+			{ID: "pack-2", Outcome: captureledger.UnitOutcomeRefreshed, Reason: captureledger.ReasonSourceContentChanged},
+			{ID: "pack-1", Outcome: captureledger.UnitOutcomeRefreshed, Reason: captureledger.ReasonCaptureDefinitionChanged},
+		},
+	}}}
+	attachLedgerDecisions(&receipt, generation, map[string]string{"s3\x00bucket\x00assets": strings.Repeat("b", 64)})
+
+	if receipt.Counts != (inspection.ReceiptCounts{Removed: 1, Changed: 1}) {
+		t.Fatalf("receipt counts = %#v", receipt.Counts)
+	}
+	changed, removed := receipt.Resources[0], receipt.Resources[1]
+	if changed.Outcome != inspection.OutcomeChanged || !reflect.DeepEqual(changed.Categories, []inspection.ChangeCategory{inspection.CategoryDataset}) {
+		t.Fatalf("policy invalidation classification = %#v", changed)
+	}
+	if len(changed.Units) != 2 || changed.Units[0].ID != "pack-1" || changed.Units[1].ID != "pack-2" {
+		t.Fatalf("unit order = %#v", changed.Units)
+	}
+	if removed.Outcome != inspection.OutcomeRemoved || len(removed.Units) != 0 {
+		t.Fatalf("selection removal classification changed = %#v", removed)
 	}
 }
 

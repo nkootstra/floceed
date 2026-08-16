@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -26,6 +27,7 @@ type reusableTestAdapter struct {
 	failCorruptRefresh bool
 	invalidReasons     []captureledger.Reason
 	refresh            map[string]bool
+	payloadSuffix      string
 }
 
 func (*reusableTestAdapter) Service() model.ServiceDescriptor {
@@ -86,7 +88,7 @@ func (a *reusableTestAdapter) CaptureReusable(_ context.Context, scope model.Sou
 	if a.failCorruptRefresh && request.InvalidationReason == captureledger.ReasonArtifactCorrupt {
 		return catalog.ReuseResult{}, errors.New("fresh capture failed")
 	}
-	payload := []byte("payload-" + ref.ID)
+	payload := []byte("payload-" + ref.ID + a.payloadSuffix)
 	files := []struct {
 		path, mediaType string
 		payload         []byte
@@ -144,6 +146,23 @@ func TestPullCombinesReusedAndFreshArtifactsInOneBundle(t *testing.T) {
 	if len(result.Snapshots) != 2 {
 		t.Fatalf("snapshots = %d, want 2", len(result.Snapshots))
 	}
+	if result.Receipt == nil || len(result.Receipt.Resources) != 2 {
+		t.Fatalf("mixed reuse receipt = %#v", result.Receipt)
+	}
+	if got := result.Receipt.Resources[0].Units; len(got) != 1 || got[0].Outcome != "reused" || got[0].Reason != "reused" || got[0].Generation == "" || got[0].PreviousGeneration == "" {
+		t.Fatalf("reused unit decisions = %#v", got)
+	}
+	if got := result.Receipt.Resources[1].Units; len(got) != 1 || got[0].Outcome != "refreshed" || got[0].Reason != "source_content_changed" {
+		t.Fatalf("refreshed unit decisions = %#v", got)
+	}
+	firstJSON, err := json.Marshal(result.Receipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondJSON, err := json.Marshal(result.Receipt)
+	if err != nil || !bytes.Equal(firstJSON, secondJSON) {
+		t.Fatalf("receipt serialization drifted: %q %q, %v", firstJSON, secondJSON, err)
+	}
 	root := filepath.Join(projectDir, project.Output.Directory)
 	if err := bundle.ValidateGenerated(root); err != nil {
 		t.Fatal(err)
@@ -172,8 +191,16 @@ func TestPullReusesVerifiedCandidateIntoCompleteStandaloneBundle(t *testing.T) {
 	if _, err := service.PullWithOptions(context.Background(), project, projectDir, "", "", PullOptions{WorkDir: workDir}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.PullWithOptions(context.Background(), project, projectDir, "", "", PullOptions{WorkDir: workDir, Restart: true}); err != nil {
+	restarted, err := service.PullWithOptions(context.Background(), project, projectDir, "", "", PullOptions{WorkDir: workDir, Restart: true})
+	if err != nil {
 		t.Fatal(err)
+	}
+	serialized, err := json.Marshal(restarted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(serialized, []byte(`"outcome":"reused"`)) || bytes.Contains(bytes.ToLower(serialized), []byte("ledger cleared")) {
+		t.Fatalf("restart receipt = %s", serialized)
 	}
 	if adapter.freshCaptures != 1 || adapter.candidateCalls != 1 {
 		t.Fatalf("fresh captures = %d, candidate calls = %d; want 1, 1", adapter.freshCaptures, adapter.candidateCalls)
@@ -253,6 +280,24 @@ func TestPullRejectsCorruptCandidateAndPreservesBundleAndLedgerOnRefreshFailure(
 	}
 	if got := adapter.invalidReasons[len(adapter.invalidReasons)-1]; got != captureledger.ReasonArtifactCorrupt {
 		t.Fatalf("invalidation reason = %q, want artifact_corrupt", got)
+	}
+	adapter.failCorruptRefresh = false
+	adapter.payloadSuffix = "-refreshed"
+	result, err := service.PullWithOptions(context.Background(), project, projectDir, "", "", PullOptions{WorkDir: workDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	serialized, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(serialized, []byte(`"reason":"artifact_corrupt"`)) {
+		t.Fatalf("successful fallback did not explain corruption: %s", serialized)
+	}
+	for _, forbidden := range [][]byte{[]byte(workDir), []byte(blobs[0]), []byte("payload-assets")} {
+		if bytes.Contains(serialized, forbidden) {
+			t.Fatalf("receipt disclosed private capture data %q: %s", forbidden, serialized)
+		}
 	}
 }
 

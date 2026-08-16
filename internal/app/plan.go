@@ -33,6 +33,7 @@ type Plan struct {
 	RequiredIAMActions []string               `json:"required_iam_actions"`
 	Governance         *model.GovernanceAudit `json:"governance,omitempty"`
 	ledgerResources    []captureledger.Resource
+	ledgerGenerations  map[string]string
 }
 
 func (a *Application) Plan(ctx context.Context, p config.Project, profile, region string) (Plan, error) {
@@ -114,6 +115,7 @@ func (a *Application) capture(ctx context.Context, req captureRequest) (Plan, []
 		options       model.CaptureOptions
 		candidate     []captureledger.Resource
 		invalidReason captureledger.Reason
+		generationID  string
 	}
 	jobs := make([]captureJob, len(selections))
 	for i, selection := range selections {
@@ -143,6 +145,7 @@ func (a *Application) capture(ctx context.Context, req captureRequest) (Plan, []
 			if loadErr != nil {
 				job.invalidReason, _ = captureledger.InvalidationReason(loadErr)
 			} else {
+				job.generationID = generation.ID
 				for _, resource := range generation.Resources {
 					if resource.Descriptor == descriptor {
 						job.candidate = append(job.candidate, resource)
@@ -248,6 +251,13 @@ func (a *Application) capture(ctx context.Context, req captureRequest) (Plan, []
 		snapshots = append(snapshots, *snapshot)
 		if outcomes[i].resource != nil {
 			result.ledgerResources = append(result.ledgerResources, *outcomes[i].resource)
+			if jobs[i].generationID != "" {
+				if result.ledgerGenerations == nil {
+					result.ledgerGenerations = make(map[string]string)
+				}
+				descriptor := outcomes[i].resource.Descriptor
+				result.ledgerGenerations[descriptor.Service+"\x00"+descriptor.Type+"\x00"+descriptor.ID] = jobs[i].generationID
+			}
 		}
 		if result.Governance != nil {
 			appendGovernanceAudit(result.Governance, policy, jobs[i].options.GovernanceAudit.Result())
