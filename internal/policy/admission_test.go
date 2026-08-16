@@ -74,3 +74,16 @@ func TestEvaluateRequiresExactTrustedProducerBinding(t *testing.T) {
 		t.Fatalf("matching trusted producer rejected: %#v", d)
 	}
 }
+
+func TestTrustedProducerFromEnvironment(t *testing.T) {
+	t.Setenv("FLOCEED_TRUSTED_PRODUCER_REPOSITORY", "nkootstra/floceed")
+	t.Setenv("FLOCEED_TRUSTED_PRODUCER_WORKFLOW", "CI")
+	got := TrustedProducerFromEnvironment()
+	if got == nil || got.Repository != "nkootstra/floceed" || got.Workflow != "CI" {
+		t.Fatalf("trusted producer = %#v", got)
+	}
+	t.Setenv("FLOCEED_TRUSTED_PRODUCER_WORKFLOW", "")
+	if TrustedProducerFromEnvironment() != nil {
+		t.Fatal("partial trusted producer accepted")
+	}
+}

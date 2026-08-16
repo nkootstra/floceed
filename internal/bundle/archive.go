@@ -26,11 +26,14 @@ const (
 // PackFixture writes a deterministic gzip-compressed tar archive after
 // validating the source fixture completely.
 func PackFixture(ctx context.Context, source, destination string) error {
-	if _, err := VerifyFixture(source); err != nil {
-		return err
-	}
+	// Read the inventory before verification and use those exact bytes below.
+	// This prevents a later replacement of checksums.json from becoming the
+	// source of truth after VerifyFixture has admitted the original fixture.
 	checksumsBytes, err := os.ReadFile(filepath.Join(source, "checksums.json"))
 	if err != nil {
+		return err
+	}
+	if _, err := VerifyFixture(source); err != nil {
 		return err
 	}
 	var checksums Checksums

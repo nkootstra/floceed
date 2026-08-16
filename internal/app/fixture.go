@@ -40,5 +40,5 @@ func (a *Application) AdmitFixture(ctx context.Context, input, policyPath string
 	if a.Now != nil {
 		now = a.Now()
 	}
-	return admission.Evaluate(policy.Facts{Identity: result.Identity, Manifest: generated.Manifest, CapturedAt: generated.Manifest.Capture.CapturedAt, Provenance: result.Provenance}, now), nil
+	return admission.Evaluate(policy.Facts{Identity: result.Identity, Manifest: generated.Manifest, CapturedAt: generated.Manifest.Capture.CapturedAt, Provenance: result.Provenance, TrustedProducer: policy.TrustedProducerFromEnvironment()}, now), nil
 }

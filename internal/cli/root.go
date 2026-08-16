@@ -128,7 +128,7 @@ func fixtureCommand() *cobra.Command {
 		if err != nil {
 			return &CommandError{Kind: KindFilesystem, Code: "FIXTURE_INVALID", Message: err.Error()}
 		}
-		decision := admission.Evaluate(policy.Facts{Identity: result.Identity, Manifest: generated.Manifest, CapturedAt: generated.Manifest.Capture.CapturedAt, Provenance: result.Provenance}, time.Now())
+		decision := admission.Evaluate(policy.Facts{Identity: result.Identity, Manifest: generated.Manifest, CapturedAt: generated.Manifest.Capture.CapturedAt, Provenance: result.Provenance, TrustedProducer: policy.TrustedProducerFromEnvironment()}, time.Now())
 		if !decision.Allowed {
 			return &CommandError{Kind: KindLocal, Code: "FIXTURE_ADMISSION_REJECTED", Message: "fixture admission rejected", Data: decision}
 		}

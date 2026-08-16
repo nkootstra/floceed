@@ -6,7 +6,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"os"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/nkootstra/floceed/internal/model"
@@ -30,6 +32,17 @@ type Policy struct {
 type ProducerBinding struct {
 	Repository string `yaml:"repository" json:"repository"`
 	Workflow   string `yaml:"workflow" json:"workflow"`
+}
+
+// TrustedProducerFromEnvironment reads producer identity supplied by the
+// consumer's CI runtime. Fixture contents and repository files cannot set it.
+func TrustedProducerFromEnvironment() *ProducerBinding {
+	repository := strings.TrimSpace(os.Getenv("FLOCEED_TRUSTED_PRODUCER_REPOSITORY"))
+	workflow := strings.TrimSpace(os.Getenv("FLOCEED_TRUSTED_PRODUCER_WORKFLOW"))
+	if repository == "" || workflow == "" {
+		return nil
+	}
+	return &ProducerBinding{Repository: repository, Workflow: workflow}
 }
 
 type Facts struct {
