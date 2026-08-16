@@ -29,10 +29,11 @@ const (
 )
 
 type Options struct {
-	NoColor     bool
-	ProjectFile string
-	Profile     string
-	Region      string
+	NoColor        bool
+	ProjectFile    string
+	Profile        string
+	Region         string
+	FixtureProfile string
 }
 
 type Model struct {

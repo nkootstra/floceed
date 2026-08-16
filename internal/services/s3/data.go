@@ -11,6 +11,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
+	"mime"
 	"os"
 	"path/filepath"
 	"slices"
@@ -23,6 +25,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/nkootstra/floceed/internal/awsconfig"
 	"github.com/nkootstra/floceed/internal/bundle"
+	"github.com/nkootstra/floceed/internal/governance"
 	"github.com/nkootstra/floceed/internal/model"
 	"github.com/nkootstra/floceed/internal/storage"
 )
@@ -30,16 +33,52 @@ import (
 const s3PackBytes int64 = 256 << 20
 const s3PackObjects = 10000
 
+const (
+	s3PreflightBaseOverhead      int64 = 1 << 20
+	s3PreflightPerObjectOverhead int64 = 64 << 10
+)
+
+var requireS3Available = storage.RequireAvailable
+
 type inventoryEntry struct {
 	Key  string `json:"key"`
 	ETag string `json:"etag,omitempty"`
 	Size int64  `json:"size"`
 }
 
-// s3CheckpointVersion 2 records the capture definition (mode, prefixes, limits,
-// overwrite) alongside progress so a checkpoint can only be resumed by a run
-// with identical capture options.
-const s3CheckpointVersion = 2
+type captureGovernance struct {
+	body     *governance.Rule
+	metadata map[string][]governance.Rule
+	engine   *governance.Engine
+}
+
+func newCaptureGovernance(bucket string, policy *governance.EffectivePolicy) *captureGovernance {
+	compiled := &captureGovernance{metadata: make(map[string][]governance.Rule)}
+	if policy == nil {
+		return compiled
+	}
+	compiled.engine = governance.NewEngine(policy.Profile, policy.Secret())
+	for _, rule := range policy.Rules {
+		if rule.Service != governance.ServiceS3 || rule.Resource != bucket {
+			continue
+		}
+		switch rule.Target.Kind {
+		case governance.TargetS3TextBody:
+			if compiled.body == nil {
+				copy := rule
+				compiled.body = &copy
+			}
+		case governance.TargetS3Metadata:
+			key := strings.ToLower(rule.Target.Path)
+			compiled.metadata[key] = append(compiled.metadata[key], rule)
+		}
+	}
+	return compiled
+}
+
+// s3CheckpointVersion 3 also records the effective governance policy identity
+// so transformed and untransformed chunks can never be mixed on resume.
+const s3CheckpointVersion = 3
 
 type s3Checkpoint struct {
 	Version           int               `json:"version"`
@@ -50,6 +89,7 @@ type s3Checkpoint struct {
 	MaxObjectBytes    int64             `json:"max_object_bytes,omitempty"`
 	MaxTotalBytes     int64             `json:"max_total_bytes,omitempty"`
 	Overwrite         string            `json:"overwrite,omitempty"`
+	PolicyIdentity    string            `json:"policy_identity,omitempty"`
 	Prefix            int               `json:"prefix"`
 	Token             string            `json:"token,omitempty"`
 	InventoryBytes    int64             `json:"inventory_bytes"`
@@ -59,6 +99,7 @@ type s3Checkpoint struct {
 	ProcessedOffset   int64             `json:"processed_offset"`
 	ProcessedRecords  int64             `json:"processed_records"`
 	Chunks            []model.DataChunk `json:"chunks,omitempty"`
+	GovernanceCounts  map[string]int    `json:"governance_rule_counts,omitempty"`
 }
 
 func (a *Adapter) captureObjects(ctx context.Context, bucket string, b *Bucket, snap *model.Snapshot, opts model.CaptureOptions) error {
@@ -100,6 +141,8 @@ func (a *Adapter) captureObjects(ctx context.Context, bucket string, b *Bucket, 
 	if err != nil {
 		return err
 	}
+	opts.GovernanceAudit.RestoreRuleCounts(cp.GovernanceCounts)
+	compiledGovernance := newCaptureGovernance(bucket, opts.Governance)
 	// Integrity verification is O(total previously captured data) on every
 	// resume; the checkpoint only references chunks that were fully written
 	// and fsynced, so a mismatch means the capture is not resumable.
@@ -128,8 +171,11 @@ func (a *Adapter) captureObjects(ctx context.Context, bucket string, b *Bucket, 
 		}
 	}
 	if full {
-		remaining := cp.SourceBytes - chunkBytes(cp.Chunks)
-		if err := storage.RequireAvailable(opts.ArtifactDirectory, remaining, 1); err != nil {
+		remaining, err := estimateS3RemainingArtifactBytes(invPath, cp.ProcessedOffset, compiledGovernance)
+		if err != nil {
+			return err
+		}
+		if err := requireS3Available(opts.ArtifactDirectory, remaining, 1); err != nil {
 			return err
 		}
 	}
@@ -178,13 +224,14 @@ func (a *Adapter) captureObjects(ctx context.Context, bucket string, b *Bucket, 
 		if len(entries) == 0 {
 			break
 		}
-		chunk, err := a.capturePack(ctx, bucket, len(cp.Chunks)+1, entries, opts, snap)
+		chunk, err := a.capturePack(ctx, bucket, len(cp.Chunks)+1, entries, opts, compiledGovernance, snap)
 		if err != nil {
 			return err
 		}
 		cp.Chunks = append(cp.Chunks, chunk)
 		cp.ProcessedRecords += int64(len(entries))
 		cp.ProcessedOffset += linesBytes
+		cp.GovernanceCounts = opts.GovernanceAudit.RuleCounts()
 		if err := saveS3Checkpoint(cpPath, cp); err != nil {
 			return err
 		}
@@ -197,6 +244,62 @@ func (a *Adapter) captureObjects(ctx context.Context, bucket string, b *Bucket, 
 	b.Objects = nil
 	snap.Dataset = &dataset
 	return nil
+}
+
+// estimateS3RemainingArtifactBytes uses only the durable inventory. Completed
+// packs are excluded by starting at ProcessedOffset, and no object body is read
+// before the disk-space decision. The allowance covers tar framing, compressed
+// stream expansion, the object index, and checkpoint updates.
+func estimateS3RemainingArtifactBytes(invPath string, processedOffset int64, compiled *captureGovernance) (int64, error) {
+	f, err := os.Open(invPath)
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+	if _, err = f.Seek(processedOffset, io.SeekStart); err != nil {
+		return 0, err
+	}
+
+	estimate := s3PreflightBaseOverhead
+	var remainingObjects int64
+	scanner := bufio.NewScanner(f)
+	// Inventory records contain S3 keys and can legitimately exceed Scanner's
+	// small default token limit.
+	scanner.Buffer(make([]byte, 64<<10), 16<<20)
+	for scanner.Scan() {
+		remainingObjects++
+		var entry inventoryEntry
+		if err := json.Unmarshal(scanner.Bytes(), &entry); err != nil {
+			return 0, err
+		}
+		outputSize := entry.Size
+		if compiled != nil && compiled.body != nil {
+			outputSize, err = governedS3OutputSize(*compiled.body)
+			if err != nil {
+				return 0, err
+			}
+		}
+		// Deflate can expand incompressible input slightly. Add 12.5%, then a
+		// deliberately generous per-object allowance for tar padding and index
+		// metadata that is unavailable until GetObject.
+		estimate = saturatedAdd(estimate, outputSize)
+		estimate = saturatedAdd(estimate, outputSize/8)
+		estimate = saturatedAdd(estimate, s3PreflightPerObjectOverhead)
+	}
+	if err := scanner.Err(); err != nil {
+		return 0, err
+	}
+	if remainingObjects == 0 {
+		return 0, nil
+	}
+	return estimate, nil
+}
+
+func saturatedAdd(left, right int64) int64 {
+	if right < 0 || left > math.MaxInt64-right {
+		return math.MaxInt64
+	}
+	return left + right
 }
 
 func (a *Adapter) buildInventory(ctx context.Context, bucket string, prefixes []string, full bool, opts model.CaptureOptions, invPath, cpPath string, cp *s3Checkpoint, snap *model.Snapshot) (bool, error) {
@@ -277,7 +380,7 @@ func (a *Adapter) buildInventory(ctx context.Context, bucket string, prefixes []
 	return false, nil
 }
 
-func (a *Adapter) capturePack(ctx context.Context, bucket string, number int, entries []inventoryEntry, opts model.CaptureOptions, snap *model.Snapshot) (model.DataChunk, error) {
+func (a *Adapter) capturePack(ctx context.Context, bucket string, number int, entries []inventoryEntry, opts model.CaptureOptions, compiled *captureGovernance, snap *model.Snapshot) (model.DataChunk, error) {
 	sum := sha256.Sum256([]byte(bucket))
 	base := "bundle/data/s3/" + hex.EncodeToString(sum[:16])
 	packRel := fmt.Sprintf("%s/pack-%06d.tar.gz", base, number)
@@ -296,13 +399,36 @@ func (a *Adapter) capturePack(ctx context.Context, bucket string, number int, en
 			}
 			id := sha256.Sum256([]byte(bucket + "\x00" + entry.Key))
 			tarName := hex.EncodeToString(id[:]) + ".bin"
-			if e = tw.WriteHeader(&tar.Header{Name: tarName, Mode: 0o600, Size: entry.Size, ModTime: time.Unix(0, 0), Typeflag: tar.TypeReg}); e != nil {
+			bodyRule, governed, e := compiled.bodyRule(o)
+			if e != nil {
+				o.Body.Close()
+				return e
+			}
+			bodySize := entry.Size
+			if governed {
+				bodySize, e = governedS3OutputSize(bodyRule)
+				if e != nil {
+					o.Body.Close()
+					return e
+				}
+			}
+			if e = tw.WriteHeader(&tar.Header{Name: tarName, Mode: 0o600, Size: bodySize, ModTime: time.Unix(0, 0), Typeflag: tar.TypeReg}); e != nil {
 				o.Body.Close()
 				return e
 			}
 			h := sha256.New()
 			detector := bundle.NewCredentialDetector()
-			n, e := io.CopyN(io.MultiWriter(tw, h, detector), &contextReader{ctx, o.Body}, entry.Size)
+			var n int64
+			output := &countingWriter{w: io.MultiWriter(tw, h, detector), n: &n}
+			if governed {
+				limited := &io.LimitedReader{R: &contextReader{ctx, o.Body}, N: entry.Size}
+				_, e = compiled.engine.ApplyReader(bodyRule, limited, output)
+				if e == nil && (bodyRule.Action == governance.ActionHash || bodyRule.Action == governance.ActionPseudonymize) && limited.N != 0 {
+					e = io.ErrUnexpectedEOF
+				}
+			} else {
+				_, e = io.CopyN(output, &contextReader{ctx, o.Body}, entry.Size)
+			}
 			closeErr := o.Body.Close()
 			if e == nil {
 				e = closeErr
@@ -313,10 +439,19 @@ func (a *Adapter) capturePack(ctx context.Context, bucket string, number int, en
 			if e = detector.Err(); e != nil {
 				return fmt.Errorf("%w in S3 object %q", e, entry.Key)
 			}
-			obj := Object{Key: entry.Key, Path: tarName, Size: n, SHA256: hex.EncodeToString(h.Sum(nil)), ETag: entry.ETag, ContentType: aws.ToString(o.ContentType), ContentEncoding: aws.ToString(o.ContentEncoding), CacheControl: aws.ToString(o.CacheControl), Metadata: o.Metadata, Checksums: map[string]string{}, Overwrite: s3CaptureOverwrite(opts.Overwrite)}
-			for k, v := range map[string]*string{"crc32": o.ChecksumCRC32, "crc32c": o.ChecksumCRC32C, "sha1": o.ChecksumSHA1, "sha256": o.ChecksumSHA256} {
-				if v != nil {
-					obj.Checksums[k] = *v
+			if governed {
+				opts.GovernanceAudit.Record(bodyRule.ID)
+			}
+			metadata, e := compiled.governMetadata(o.Metadata, opts.GovernanceAudit)
+			if e != nil {
+				return e
+			}
+			obj := Object{Key: entry.Key, Path: tarName, Size: n, SHA256: hex.EncodeToString(h.Sum(nil)), ETag: entry.ETag, ContentType: aws.ToString(o.ContentType), ContentEncoding: aws.ToString(o.ContentEncoding), CacheControl: aws.ToString(o.CacheControl), Metadata: metadata, Checksums: map[string]string{}, Overwrite: s3CaptureOverwrite(opts.Overwrite)}
+			if !governed {
+				for k, v := range map[string]*string{"crc32": o.ChecksumCRC32, "crc32c": o.ChecksumCRC32C, "sha1": o.ChecksumSHA1, "sha256": o.ChecksumSHA256} {
+					if v != nil {
+						obj.Checksums[k] = *v
+					}
 				}
 			}
 			if len(obj.Checksums) == 0 {
@@ -359,6 +494,84 @@ func (a *Adapter) capturePack(ctx context.Context, bucket string, number int, en
 		return model.DataChunk{}, err
 	}
 	return model.DataChunk{Data: pack, Index: &index, Records: int64(len(entries)), SourceBytes: inventorySize(entries)}, nil
+}
+
+func governedS3BodyRule(bucket string, object *awss3.GetObjectOutput, policy *governance.EffectivePolicy) (governance.Rule, bool, error) {
+	return newCaptureGovernance(bucket, policy).bodyRule(object)
+}
+
+func (compiled *captureGovernance) bodyRule(object *awss3.GetObjectOutput) (governance.Rule, bool, error) {
+	if compiled == nil || compiled.body == nil {
+		return governance.Rule{}, false, nil
+	}
+	rule := *compiled.body
+	contentType := aws.ToString(object.ContentType)
+	mediaType, _, err := mime.ParseMediaType(contentType)
+	if err != nil || !slices.Contains(rule.ContentTypes, strings.ToLower(mediaType)) {
+		return governance.Rule{}, false, fmt.Errorf("S3 object content type %q is not allowed by governance rule %q", contentType, rule.ID)
+	}
+	return rule, true, nil
+}
+
+func governedS3OutputSize(rule governance.Rule) (int64, error) {
+	switch rule.Action {
+	case governance.ActionOmit:
+		return 0, nil
+	case governance.ActionReplace:
+		return int64(len(rule.Replacement)), nil
+	case governance.ActionHash:
+		return int64(len(governance.HashAlgorithm) + 1 + hex.EncodedLen(sha256.Size)), nil
+	case governance.ActionPseudonymize:
+		return int64(len(governance.PseudonymAlgorithm) + 1 + hex.EncodedLen(sha256.Size)), nil
+	default:
+		return 0, governance.ErrInvalidTransformation
+	}
+}
+
+func governedS3Metadata(bucket string, source map[string]string, policy *governance.EffectivePolicy, audit *governance.Audit) (map[string]string, error) {
+	return newCaptureGovernance(bucket, policy).governMetadata(source, audit)
+}
+
+func (compiled *captureGovernance) governMetadata(source map[string]string, audit *governance.Audit) (map[string]string, error) {
+	result := make(map[string]string, len(source))
+	for key, value := range source {
+		result[key] = value
+	}
+	if compiled == nil || compiled.engine == nil {
+		return result, nil
+	}
+	for key, value := range result {
+		for _, rule := range compiled.metadata[strings.ToLower(key)] {
+			transformed, err := compiled.engine.Apply(rule, []byte(value))
+			if err != nil {
+				return nil, fmt.Errorf("apply S3 governance rule %q: %w", rule.ID, err)
+			}
+			if transformed.Omit {
+				delete(result, key)
+			} else {
+				result[key] = string(transformed.Value)
+			}
+			if audit != nil {
+				audit.Record(rule.ID)
+			}
+			if transformed.Omit {
+				break
+			}
+			value = string(transformed.Value)
+		}
+	}
+	return result, nil
+}
+
+func s3BodyRule(bucket string, policy *governance.EffectivePolicy) (governance.Rule, bool) {
+	if policy != nil {
+		for _, rule := range policy.Rules {
+			if rule.Service == governance.ServiceS3 && rule.Resource == bucket && rule.Target.Kind == governance.TargetS3TextBody {
+				return rule, true
+			}
+		}
+	}
+	return governance.Rule{}, false
 }
 
 func writeS3Artifact(ctx context.Context, root, rel, media string, write func(io.Writer) error) (model.ArtifactRef, error) {
@@ -446,6 +659,7 @@ func newS3Checkpoint(bucket string, opts model.CaptureOptions, prefixes []string
 		MaxObjectBytes: opts.Limits.MaxObjectBytes,
 		MaxTotalBytes:  opts.Limits.MaxTotalBytes,
 		Overwrite:      s3CaptureOverwrite(opts.Overwrite),
+		PolicyIdentity: governance.IdentityOf(opts.Governance),
 	}
 }
 
@@ -459,7 +673,8 @@ func s3CaptureIdentityMatches(cp s3Checkpoint, opts model.CaptureOptions, prefix
 		cp.MaxObjects == opts.Limits.MaxObjects &&
 		cp.MaxObjectBytes == opts.Limits.MaxObjectBytes &&
 		cp.MaxTotalBytes == opts.Limits.MaxTotalBytes &&
-		cp.Overwrite == s3CaptureOverwrite(opts.Overwrite)
+		cp.Overwrite == s3CaptureOverwrite(opts.Overwrite) &&
+		cp.PolicyIdentity == governance.IdentityOf(opts.Governance)
 }
 
 func s3CaptureMode(mode string) string {

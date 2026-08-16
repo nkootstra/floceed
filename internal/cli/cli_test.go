@@ -28,16 +28,44 @@ func TestRootHelpUsesFloceedName(t *testing.T) {
 	}
 }
 
-type fakeService struct {
-	planned   bool
-	pulled    bool
-	rendered  bool
-	doctored  bool
-	started   bool
-	wait      time.Duration
-	doctor    app.DoctorResult
-	doctorErr error
+func TestRootExposesFixtureProfileForInteractiveMode(t *testing.T) {
+	cmd := New(Options{})
+	flag := cmd.Flags().Lookup("fixture-profile")
+	if flag == nil {
+		t.Fatal("root command does not expose --fixture-profile")
+	}
+	if err := flag.Value.Set("share-safe"); err != nil {
+		t.Fatal(err)
+	}
+	if got := flag.Value.String(); got != "share-safe" {
+		t.Fatalf("fixture profile = %q, want share-safe", got)
+	}
 }
+
+type fakeService struct {
+	planned        bool
+	pulled         bool
+	rendered       bool
+	doctored       bool
+	started        bool
+	wait           time.Duration
+	doctor         app.DoctorResult
+	doctorErr      error
+	fixtureProfile string
+}
+
+func (f *fakeService) PlanWithOptions(_ context.Context, _ config.Project, options app.PlanOptions) (app.Plan, error) {
+	f.planned = true
+	f.fixtureProfile = options.FixtureProfile
+	return app.Plan{}, nil
+}
+
+func (f *fakeService) PullWithOptions(_ context.Context, _ config.Project, _ string, _ string, _ string, options app.PullOptions) (model.Manifest, error) {
+	f.pulled = true
+	f.fixtureProfile = options.FixtureProfile
+	return model.Manifest{SchemaVersion: model.CurrentManifestSchemaVersion}, nil
+}
+
 type progressService struct{ fakeService }
 
 func (f *progressService) PullWithOptions(_ context.Context, _ config.Project, _ string, _ string, _ string, options app.PullOptions) (model.Manifest, error) {
@@ -199,6 +227,30 @@ func TestPlanHasRealProjectAndOutputFlags(t *testing.T) {
 	}
 }
 
+func TestPlanForwardsFixtureProfileSeparatelyFromAWSProfile(t *testing.T) {
+	fake := &fakeService{}
+	cmd := New(Options{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}, App: fake})
+	cmd.SetArgs([]string{"plan", "--project", writeProject(t), "--profile", "aws-dev", "--fixture-profile", "share-safe"})
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if fake.fixtureProfile != "share-safe" {
+		t.Fatalf("fixture profile = %q, want share-safe", fake.fixtureProfile)
+	}
+}
+
+func TestPullForwardsFixtureProfile(t *testing.T) {
+	fake := &fakeService{}
+	cmd := New(Options{Stdin: strings.NewReader(""), Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}, App: fake})
+	cmd.SetArgs([]string{"pull", "--project", writeProject(t), "--yes", "--fixture-profile", "share-safe"})
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if fake.fixtureProfile != "share-safe" {
+		t.Fatalf("fixture profile = %q, want share-safe", fake.fixtureProfile)
+	}
+}
+
 func TestPullRequiresYesWhenNonInteractive(t *testing.T) {
 	fake := &fakeService{}
 	cmd := New(Options{Stdin: strings.NewReader(""), Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}, App: fake})
@@ -218,8 +270,8 @@ func TestProjectCommandsExposeOnlyTheirOwnFlags(t *testing.T) {
 		present []string
 		absent  []string
 	}{
-		{name: "plan", present: []string{"project", "output", "profile", "region"}, absent: []string{"yes", "wait"}},
-		{name: "pull", present: []string{"project", "output", "profile", "region", "yes"}, absent: []string{"wait"}},
+		{name: "plan", present: []string{"project", "output", "profile", "region", "fixture-profile"}, absent: []string{"yes", "wait"}},
+		{name: "pull", present: []string{"project", "output", "profile", "region", "fixture-profile", "yes"}, absent: []string{"wait"}},
 		{name: "render", present: []string{"project", "output"}, absent: []string{"profile", "region", "yes", "wait"}},
 		{name: "doctor", present: []string{"project", "output", "profile", "region"}, absent: []string{"yes", "wait"}},
 		{name: "up", present: []string{"project", "output", "wait"}, absent: []string{"profile", "region", "yes"}},

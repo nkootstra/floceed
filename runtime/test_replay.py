@@ -69,10 +69,42 @@ class ReplayValidationTests(unittest.TestCase):
             replay.validate_bundle()
 
     def test_rejects_unsupported_manifest_schema(self):
-        self.manifest["schema_version"] = 3
+        self.manifest["schema_version"] = 4
         self.write_json("bundle/manifest.json", self.manifest)
 
-        self.assert_rejected("manifest schema 3 is unsupported")
+        self.assert_rejected("manifest schema 4 is unsupported")
+
+    def test_accepts_schema_3_governance_allowlist_without_changing_replay_data(self):
+        self.manifest["schema_version"] = 3
+        self.manifest["governance"] = {
+            "profile": "share-safe",
+            "policy_identity": "opaque-policy",
+            "rules": [{"rule_id": "rule-001", "action": "omit", "count": "1-9"}],
+        }
+        self.write_json("bundle/manifest.json", self.manifest)
+
+        manifest = replay.validate_bundle()
+
+        self.assertEqual("share-safe", manifest["governance"]["profile"])
+
+    def test_rejects_unapproved_schema_3_governance_fields(self):
+        self.manifest["schema_version"] = 3
+        self.manifest["governance"] = {"profile": "safe", "policy_identity": "opaque", "target": "customer.email"}
+        self.write_json("bundle/manifest.json", self.manifest)
+
+        self.assert_rejected("governance contains unapproved fields")
+
+    def test_rejects_malformed_schema_3_governance_collections(self):
+        self.manifest["schema_version"] = 3
+        for field, value in (("rules", None), ("cohorts", {}), ("key_ids", "key-1"), ("algorithms", 1)):
+            with self.subTest(field=field):
+                self.manifest["governance"] = {
+                    "profile": "safe",
+                    "policy_identity": "opaque",
+                    field: value,
+                }
+                self.write_json("bundle/manifest.json", self.manifest)
+                self.assert_rejected("governance collections must be arrays")
 
     def test_rejects_invalid_source_account(self):
         for account_id in ("123", "12345678901x"):

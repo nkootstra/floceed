@@ -148,7 +148,10 @@ func TestScanSkipsDeselectedServices(t *testing.T) {
 	}
 }
 
-type adapter struct{ captures int }
+type adapter struct {
+	captures    int
+	lastOptions model.CaptureOptions
+}
 
 func (*adapter) Service() model.ServiceDescriptor { return model.ServiceDescriptor{Name: "s3"} }
 func (*adapter) Discover(context.Context, model.SourceScope) (model.DiscoveryResult, error) {
@@ -156,6 +159,7 @@ func (*adapter) Discover(context.Context, model.SourceScope) (model.DiscoveryRes
 }
 func (a *adapter) Capture(_ context.Context, scope model.SourceScope, ref model.ResourceRef, opts model.CaptureOptions) (*model.Snapshot, error) {
 	a.captures++
+	a.lastOptions = opts
 	return model.NewSnapshot(ref, "s3", map[string]any{"name": ref.ID, "region": scope.Region})
 }
 func (*adapter) Dependencies(*model.Snapshot) []model.Dependency              { return nil }
@@ -175,12 +179,124 @@ func (*adapter) FinalizePlanning(*model.Snapshot, []model.Dependency) ([]model.F
 type factory struct {
 	adapter *adapter
 	calls   int
+	request SourceRequest
 }
 
 func (f *factory) Open(_ context.Context, req SourceRequest) (Source, error) {
 	f.calls++
+	f.request = req
 	r, _ := catalog.New(f.adapter)
 	return Source{Scope: model.SourceScope{Profile: req.Profile, Region: req.Region, AccountID: "123456789012"}, Identity: awsconfig.Identity{AccountID: "123456789012"}, Registry: r}, nil
+}
+
+func TestPlanResolvesFixtureProfileBeforeOpeningSource(t *testing.T) {
+	f := &factory{adapter: &adapter{}}
+	service := New("test")
+	service.Factory = f
+	p := config.NewProject()
+	p.Source.Region = "eu-west-1"
+	p.FixtureProfiles = map[string]config.FixtureProfile{"safe": {}}
+	p.Resources.S3 = []config.S3Resource{{Name: "assets"}}
+
+	plan, err := service.PlanWithOptions(context.Background(), p, PlanOptions{FixtureProfile: "safe"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.calls != 1 {
+		t.Fatalf("source opens = %d, want 1", f.calls)
+	}
+	if plan.Governance == nil || plan.Governance.Profile != "safe" || plan.Governance.PolicyIdentity == "" {
+		t.Fatalf("governance = %#v, want resolved safe profile", plan.Governance)
+	}
+	if f.adapter.lastOptions.Governance == nil || f.adapter.lastOptions.Governance.Identity != plan.Governance.PolicyIdentity {
+		t.Fatalf("adapter governance = %#v, want plan identity %q", f.adapter.lastOptions.Governance, plan.Governance.PolicyIdentity)
+	}
+}
+
+func TestPlanRejectsUnknownFixtureProfileBeforeOpeningSource(t *testing.T) {
+	f := &factory{adapter: &adapter{}}
+	service := New("test")
+	service.Factory = f
+	p := config.NewProject()
+	p.Source.Region = "eu-west-1"
+
+	_, err := service.PlanWithOptions(context.Background(), p, PlanOptions{FixtureProfile: "missing"})
+	if err == nil || !strings.Contains(err.Error(), "unknown fixture profile") {
+		t.Fatalf("PlanWithOptions() error = %v", err)
+	}
+	if f.calls != 0 {
+		t.Fatalf("source opened %d times before profile validation", f.calls)
+	}
+}
+
+func TestPullRejectsUnknownFixtureProfileBeforeSourceOrCheckpointCreation(t *testing.T) {
+	f := &factory{adapter: &adapter{}}
+	service := New("test")
+	service.Factory = f
+	p := config.NewProject()
+	p.Source.Region = "eu-west-1"
+	workDir := filepath.Join(t.TempDir(), "captures")
+
+	_, err := service.PullWithOptions(context.Background(), p, t.TempDir(), "", "", PullOptions{WorkDir: workDir, FixtureProfile: "missing"})
+	if err == nil || !strings.Contains(err.Error(), "unknown fixture profile") {
+		t.Fatalf("PullWithOptions() error = %v", err)
+	}
+	if f.calls != 0 {
+		t.Fatalf("source opened %d times before fixture validation", f.calls)
+	}
+	if _, statErr := os.Stat(workDir); !os.IsNotExist(statErr) {
+		t.Fatalf("checkpoint root exists before fixture validation: %v", statErr)
+	}
+}
+
+func TestManifestCarriesDisclosureBoundedGovernanceAudit(t *testing.T) {
+	service := New("test")
+	planned := Plan{Governance: &model.GovernanceAudit{Profile: "safe", PolicyIdentity: "opaque-policy", Rules: []model.GovernanceRuleAudit{{RuleID: "rule-001", Action: "omit", Count: model.CountBucket1To9}}}}
+	manifest := service.manifest(config.Project{}, planned, nil)
+	if manifest.Governance == nil || !reflect.DeepEqual(manifest.Governance, planned.Governance) {
+		t.Fatalf("manifest governance = %#v, want %#v", manifest.Governance, planned.Governance)
+	}
+}
+
+func TestCaptureFingerprintChangesWithGovernancePolicy(t *testing.T) {
+	project := config.NewProject()
+	project.Source.Region = "eu-west-1"
+	project.FixtureProfiles = map[string]config.FixtureProfile{
+		"one": {Rules: []config.GovernanceRule{{ID: "rule-001", Service: "s3", Resource: "assets", Target: config.GovernanceTarget{Kind: "s3_text_body"}, Action: "replace", Replacement: "one"}}},
+		"two": {Rules: []config.GovernanceRule{{ID: "rule-001", Service: "s3", Resource: "assets", Target: config.GovernanceTarget{Kind: "s3_text_body"}, Action: "replace", Replacement: "two"}}},
+	}
+	one, err := project.ResolveFixtureProfile("one", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	two, err := project.ResolveFixtureProfile("two", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	left := captureFingerprint(project, "/project", "aws", "eu-west-1", "123456789012", one)
+	right := captureFingerprint(project, "/project", "aws", "eu-west-1", "123456789012", two)
+	if left == right {
+		t.Fatal("capture fingerprint did not change with governance policy")
+	}
+}
+
+func TestCaptureFingerprintChangesWhenGovernanceSecretRotates(t *testing.T) {
+	project := config.NewProject()
+	project.Source.Region = "eu-west-1"
+	project.FixtureProfiles = map[string]config.FixtureProfile{"safe": {Rules: []config.GovernanceRule{{ID: "rule-001", Service: "s3", Resource: "assets", Target: config.GovernanceTarget{Kind: "s3_text_body"}, Action: "pseudonymize", KeyID: "fixture-key", Scope: "project", Algorithm: "pseudonym/v1", ContentTypes: []string{"text/plain"}}}}}
+	secretOne := "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
+	secretTwo := "ZmVkY2JhOTg3NjU0MzIxMGZlZGNiYTk4NzY1NDMyMTA="
+	one, err := project.ResolveFixtureProfile("safe", func(string) string { return secretOne })
+	if err != nil {
+		t.Fatal(err)
+	}
+	two, err := project.ResolveFixtureProfile("safe", func(string) string { return secretTwo })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if captureFingerprint(project, "/project", "aws", "eu-west-1", "123456789012", one) == captureFingerprint(project, "/project", "aws", "eu-west-1", "123456789012", two) {
+		t.Fatal("capture fingerprint did not change after governance secret rotation")
+	}
 }
 
 func TestPlanCapturesInMemoryAndReportsIAM(t *testing.T) {

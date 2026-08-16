@@ -5,6 +5,10 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -16,7 +20,9 @@ import (
 	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/nkootstra/floceed/internal/config"
+	"github.com/nkootstra/floceed/internal/governance"
 	"github.com/nkootstra/floceed/internal/model"
+	"github.com/nkootstra/floceed/internal/storage"
 )
 
 type packedDataClient struct {
@@ -81,6 +87,444 @@ func TestFullS3CaptureUsesPackedDatasetInsteadOfOneFilePerObject(t *testing.T) {
 	}
 	if client.gets != 2 || resumed.Dataset == nil || !resumed.Dataset.Resumed {
 		t.Fatalf("resume redownloaded objects or omitted state: gets=%d dataset=%#v", client.gets, resumed.Dataset)
+	}
+}
+
+type governedDataClient struct {
+	Client
+	body        string
+	contentType string
+	metadata    map[string]string
+}
+
+type governedLargeDataClient struct {
+	Client
+	size int64
+	body []byte
+	gets int
+}
+
+func (c *governedLargeDataClient) ListObjectsV2(context.Context, *awss3.ListObjectsV2Input, ...func(*awss3.Options)) (*awss3.ListObjectsV2Output, error) {
+	return &awss3.ListObjectsV2Output{Contents: []types.Object{{Key: aws.String("large.txt"), ETag: aws.String("etag"), Size: aws.Int64(c.size)}}}, nil
+}
+
+func (c *governedLargeDataClient) GetObject(context.Context, *awss3.GetObjectInput, ...func(*awss3.Options)) (*awss3.GetObjectOutput, error) {
+	c.gets++
+	if c.body != nil {
+		return &awss3.GetObjectOutput{Body: io.NopCloser(bytes.NewReader(c.body)), ContentType: aws.String("text/plain")}, nil
+	}
+	return &awss3.GetObjectOutput{Body: struct {
+		io.Reader
+		io.Closer
+	}{Reader: &boundedZeroReader{remaining: c.size, maxRead: 32 << 10}, Closer: io.NopCloser(nilReader{})}, ContentType: aws.String("text/plain")}, nil
+}
+
+func (*governedLargeDataClient) GetObjectTagging(context.Context, *awss3.GetObjectTaggingInput, ...func(*awss3.Options)) (*awss3.GetObjectTaggingOutput, error) {
+	return &awss3.GetObjectTaggingOutput{}, nil
+}
+
+type nilReader struct{}
+
+func (nilReader) Read([]byte) (int, error) { return 0, io.EOF }
+
+type boundedZeroReader struct {
+	remaining int64
+	maxRead   int
+}
+
+func (r *boundedZeroReader) Read(p []byte) (int, error) {
+	if len(p) > r.maxRead {
+		return 0, errors.New("unbounded source read")
+	}
+	if r.remaining == 0 {
+		return 0, io.EOF
+	}
+	if int64(len(p)) > r.remaining {
+		p = p[:r.remaining]
+	}
+	clear(p)
+	r.remaining -= int64(len(p))
+	return len(p), nil
+}
+
+func (c governedDataClient) ListObjectsV2(context.Context, *awss3.ListObjectsV2Input, ...func(*awss3.Options)) (*awss3.ListObjectsV2Output, error) {
+	return &awss3.ListObjectsV2Output{Contents: []types.Object{{Key: aws.String("customer.txt"), ETag: aws.String("etag"), Size: aws.Int64(int64(len(c.body)))}}}, nil
+}
+
+func (c governedDataClient) GetObject(context.Context, *awss3.GetObjectInput, ...func(*awss3.Options)) (*awss3.GetObjectOutput, error) {
+	return &awss3.GetObjectOutput{Body: io.NopCloser(strings.NewReader(c.body)), ContentType: aws.String(c.contentType), Metadata: c.metadata}, nil
+}
+
+func (governedDataClient) GetObjectTagging(context.Context, *awss3.GetObjectTaggingInput, ...func(*awss3.Options)) (*awss3.GetObjectTaggingOutput, error) {
+	return &awss3.GetObjectTaggingOutput{}, nil
+}
+
+func TestGovernedS3CaptureTransformsMetadataAndTextBodyBeforePersistence(t *testing.T) {
+	root := t.TempDir()
+	policy, err := governance.NewEffectivePolicy("share-safe", []governance.Rule{
+		{ID: "body-001", Service: governance.ServiceS3, Resource: "assets", Target: governance.Target{Kind: governance.TargetS3TextBody}, Action: governance.ActionReplace, Replacement: "safe body", ContentTypes: []string{"text/plain"}},
+		{ID: "meta-001", Service: governance.ServiceS3, Resource: "assets", Target: governance.Target{Kind: governance.TargetS3Metadata, Path: "owner"}, Action: governance.ActionReplace, Replacement: "safe owner"},
+	}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, _ := model.NewSnapshot(model.ResourceRef{Service: "s3", ID: "assets"}, "s3", Bucket{Name: "assets", Region: "eu-west-1"})
+	bucket := Bucket{Name: "assets", Region: "eu-west-1"}
+	opts := model.CaptureOptions{Mode: "full", ArtifactDirectory: filepath.Join(root, "artifacts"), CheckpointDirectory: filepath.Join(root, "checkpoint"), Governance: policy}
+	client := governedDataClient{body: "protected body", contentType: "text/plain; charset=utf-8", metadata: map[string]string{"owner": "protected owner", "purpose": "testing"}}
+	if err := New(client).captureObjects(context.Background(), "assets", &bucket, snapshot, opts); err != nil {
+		t.Fatal(err)
+	}
+
+	body, object := readOnlyPackedObject(t, opts.ArtifactDirectory, snapshot.Dataset.Chunks[0])
+	if string(body) != "safe body" {
+		t.Fatalf("body = %q", body)
+	}
+	if object.Key != "customer.txt" || object.Metadata["owner"] != "safe owner" || object.Metadata["purpose"] != "testing" {
+		t.Fatalf("object metadata = %#v", object)
+	}
+	if object.Size != int64(len(body)) || object.SHA256 != sha256Hex(body) {
+		t.Fatalf("object digest/size describes source rather than transformed body: %#v", object)
+	}
+	for _, protected := range []string{"protected body", "protected owner"} {
+		assertAbsentFromFiles(t, root, protected)
+	}
+}
+
+func TestGovernedS3ResumeRestoresAuditForSkippedCompletedPacks(t *testing.T) {
+	policy, err := governance.NewEffectivePolicy("share-safe", []governance.Rule{
+		{ID: "body-001", Service: governance.ServiceS3, Resource: "assets", Target: governance.Target{Kind: governance.TargetS3TextBody}, Action: governance.ActionReplace, Replacement: "safe body", ContentTypes: []string{"text/plain"}},
+		{ID: "meta-001", Service: governance.ServiceS3, Resource: "assets", Target: governance.Target{Kind: governance.TargetS3Metadata, Path: "owner"}, Action: governance.ActionReplace, Replacement: "safe owner"},
+	}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	client := governedDataClient{body: "protected body", contentType: "text/plain", metadata: map[string]string{"owner": "protected owner"}}
+	opts := model.CaptureOptions{Mode: "full", ArtifactDirectory: filepath.Join(root, "artifacts"), CheckpointDirectory: filepath.Join(root, "checkpoint"), Governance: policy, GovernanceAudit: governance.NewAudit()}
+	snapshot, _ := model.NewSnapshot(model.ResourceRef{Service: "s3", ID: "assets"}, "s3", Bucket{Name: "assets", Region: "eu-west-1"})
+	bucket := Bucket{Name: "assets", Region: "eu-west-1"}
+	if err := New(client).captureObjects(context.Background(), "assets", &bucket, snapshot, opts); err != nil {
+		t.Fatal(err)
+	}
+	opts.GovernanceAudit = governance.NewAudit()
+	resumed, _ := model.NewSnapshot(model.ResourceRef{Service: "s3", ID: "assets"}, "s3", Bucket{Name: "assets", Region: "eu-west-1"})
+	if err := New(client).captureObjects(context.Background(), "assets", &bucket, resumed, opts); err != nil {
+		t.Fatal(err)
+	}
+	counts := opts.GovernanceAudit.RuleCounts()
+	if counts["body-001"] != 1 || counts["meta-001"] != 1 {
+		t.Fatalf("resumed exact internal counts = %#v, want completed pack audit", counts)
+	}
+	checkpoint, err := os.ReadFile(filepath.Join(opts.CheckpointDirectory, "checkpoint.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(checkpoint, []byte("protected body")) || bytes.Contains(checkpoint, []byte("protected owner")) {
+		t.Fatalf("checkpoint leaked protected source: %s", checkpoint)
+	}
+}
+
+func TestGovernedS3CaptureRejectsUnlistedContentTypeBeforeChunkCommit(t *testing.T) {
+	root := t.TempDir()
+	policy, err := governance.NewEffectivePolicy("share-safe", []governance.Rule{{
+		ID: "body-001", Service: governance.ServiceS3, Resource: "assets", Target: governance.Target{Kind: governance.TargetS3TextBody}, Action: governance.ActionReplace, Replacement: "safe", ContentTypes: []string{"text/plain"},
+	}}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, _ := model.NewSnapshot(model.ResourceRef{Service: "s3", ID: "assets"}, "s3", Bucket{Name: "assets"})
+	opts := model.CaptureOptions{Mode: "full", ArtifactDirectory: filepath.Join(root, "artifacts"), CheckpointDirectory: filepath.Join(root, "checkpoint"), Governance: policy}
+	client := governedDataClient{body: "protected body", contentType: "application/octet-stream"}
+	err = New(client).captureObjects(context.Background(), "assets", &Bucket{Name: "assets"}, snapshot, opts)
+	if err == nil || !strings.Contains(err.Error(), "not allowed") || !strings.Contains(err.Error(), "body-001") {
+		t.Fatalf("error = %v", err)
+	}
+	var chunks []string
+	err = filepath.Walk(opts.ArtifactDirectory, func(path string, info os.FileInfo, err error) error {
+		if err == nil && !info.IsDir() {
+			chunks = append(chunks, path)
+		}
+		return err
+	})
+	if err != nil || len(chunks) != 0 {
+		t.Fatalf("durable chunks after rejection = %v, err = %v", chunks, err)
+	}
+	assertAbsentFromFiles(t, root, "protected body")
+}
+
+func TestGovernedS3CaptureCheckpointIncludesPolicyIdentity(t *testing.T) {
+	root := t.TempDir()
+	newPolicy := func(replacement string) *governance.EffectivePolicy {
+		policy, err := governance.NewEffectivePolicy("share-safe", []governance.Rule{{
+			ID: "body-001", Service: governance.ServiceS3, Resource: "assets", Target: governance.Target{Kind: governance.TargetS3TextBody}, Action: governance.ActionReplace, Replacement: replacement, ContentTypes: []string{"text/plain"},
+		}}, nil, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return policy
+	}
+	newSnapshot := func() *model.Snapshot {
+		snapshot, _ := model.NewSnapshot(model.ResourceRef{Service: "s3", ID: "assets"}, "s3", Bucket{Name: "assets"})
+		return snapshot
+	}
+	client := governedDataClient{body: "protected", contentType: "text/plain"}
+	opts := model.CaptureOptions{Mode: "full", ArtifactDirectory: filepath.Join(root, "artifacts"), CheckpointDirectory: filepath.Join(root, "checkpoint"), Governance: newPolicy("safe")}
+	if err := New(client).captureObjects(context.Background(), "assets", &Bucket{Name: "assets"}, newSnapshot(), opts); err != nil {
+		t.Fatal(err)
+	}
+	equivalent := opts
+	equivalent.Governance = newPolicy("safe")
+	resumed := newSnapshot()
+	if err := New(client).captureObjects(context.Background(), "assets", &Bucket{Name: "assets"}, resumed, equivalent); err != nil || resumed.Dataset == nil || !resumed.Dataset.Resumed {
+		t.Fatalf("equivalent policy did not resume: dataset=%#v err=%v", resumed.Dataset, err)
+	}
+	changed := opts
+	changed.Governance = newPolicy("different safe value")
+	err := New(client).captureObjects(context.Background(), "assets", &Bucket{Name: "assets"}, newSnapshot(), changed)
+	if err == nil || !strings.Contains(err.Error(), "incompatible S3 capture checkpoint") {
+		t.Fatalf("changed-policy error = %v", err)
+	}
+}
+
+func TestGovernedS3CaptureScansCredentialsAfterBodyTransformation(t *testing.T) {
+	const credential = "AKIAIOSFODNN7EXAMPLE"
+	newPolicy := func(replacement string) *governance.EffectivePolicy {
+		policy, err := governance.NewEffectivePolicy("share-safe", []governance.Rule{{
+			ID: "body-001", Service: governance.ServiceS3, Resource: "assets", Target: governance.Target{Kind: governance.TargetS3TextBody}, Action: governance.ActionReplace, Replacement: replacement, ContentTypes: []string{"text/plain"},
+		}}, nil, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return policy
+	}
+	run := func(body, replacement string) error {
+		root := t.TempDir()
+		snapshot, _ := model.NewSnapshot(model.ResourceRef{Service: "s3", ID: "assets"}, "s3", Bucket{Name: "assets"})
+		opts := model.CaptureOptions{Mode: "full", ArtifactDirectory: filepath.Join(root, "artifacts"), CheckpointDirectory: filepath.Join(root, "checkpoint"), Governance: newPolicy(replacement)}
+		return New(governedDataClient{body: body, contentType: "text/plain"}).captureObjects(context.Background(), "assets", &Bucket{Name: "assets"}, snapshot, opts)
+	}
+	if err := run(credential, "safe"); err != nil {
+		t.Fatalf("source credential was scanned before replacement: %v", err)
+	}
+	if err := run("protected", credential); err == nil || !strings.Contains(err.Error(), "credential") {
+		t.Fatalf("replacement credential error = %v", err)
+	}
+}
+
+func TestGovernedS3CaptureSupportsEveryWholeBodyAction(t *testing.T) {
+	secret := bytes.Repeat([]byte("s"), 32)
+	for _, action := range []governance.Action{governance.ActionOmit, governance.ActionHash, governance.ActionPseudonymize} {
+		t.Run(string(action), func(t *testing.T) {
+			rule := governance.Rule{ID: "body-001", Service: governance.ServiceS3, Resource: "assets", Target: governance.Target{Kind: governance.TargetS3TextBody}, Action: action, ContentTypes: []string{"text/plain"}}
+			if action == governance.ActionPseudonymize {
+				rule.KeyID = "key-001"
+				rule.Algorithm = governance.PseudonymAlgorithm
+			}
+			policy, err := governance.NewEffectivePolicy("share-safe", []governance.Rule{rule}, nil, secret)
+			if err != nil {
+				t.Fatal(err)
+			}
+			root := t.TempDir()
+			snapshot, _ := model.NewSnapshot(model.ResourceRef{Service: "s3", ID: "assets"}, "s3", Bucket{Name: "assets"})
+			opts := model.CaptureOptions{Mode: "full", ArtifactDirectory: filepath.Join(root, "artifacts"), CheckpointDirectory: filepath.Join(root, "checkpoint"), Governance: policy}
+			if err := New(governedDataClient{body: "protected", contentType: "text/plain"}).captureObjects(context.Background(), "assets", &Bucket{Name: "assets"}, snapshot, opts); err != nil {
+				t.Fatal(err)
+			}
+			body, object := readOnlyPackedObject(t, opts.ArtifactDirectory, snapshot.Dataset.Chunks[0])
+			want, err := governance.NewEngine(policy.Profile, policy.Secret()).Apply(policy.Rules[0], []byte("protected"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if want.Omit {
+				want.Value = []byte{}
+			}
+			if !bytes.Equal(body, want.Value) || object.Size != int64(len(want.Value)) || object.SHA256 != sha256Hex(want.Value) {
+				t.Fatalf("body/object = %q/%#v, want %q", body, object, want.Value)
+			}
+		})
+	}
+}
+
+func TestGovernedS3CaptureStreamsLargeBodyWithBoundedReads(t *testing.T) {
+	const sourceSize = int64(32 << 20)
+	policy, err := governance.NewEffectivePolicy("share-safe", []governance.Rule{{
+		ID: "body-001", Service: governance.ServiceS3, Resource: "assets", Target: governance.Target{Kind: governance.TargetS3TextBody}, Action: governance.ActionHash, ContentTypes: []string{"text/plain"},
+	}}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	snapshot, _ := model.NewSnapshot(model.ResourceRef{Service: "s3", ID: "assets"}, "s3", Bucket{Name: "assets"})
+	opts := model.CaptureOptions{Mode: "full", ArtifactDirectory: filepath.Join(root, "artifacts"), CheckpointDirectory: filepath.Join(root, "checkpoint"), Governance: policy}
+	if err := New(&governedLargeDataClient{size: sourceSize}).captureObjects(context.Background(), "assets", &Bucket{Name: "assets"}, snapshot, opts); err != nil {
+		t.Fatal(err)
+	}
+	body, object := readOnlyPackedObject(t, opts.ArtifactDirectory, snapshot.Dataset.Chunks[0])
+	if !bytes.HasPrefix(body, []byte(governance.HashAlgorithm+":")) || object.Size != int64(len(body)) || snapshot.Dataset.SourceBytes != sourceSize {
+		t.Fatalf("body=%q object=%#v dataset=%#v", body, object, snapshot.Dataset)
+	}
+}
+
+func TestGovernedS3DiskPreflightUsesTransformedOutputWithoutReadingBodies(t *testing.T) {
+	const sourceSize = int64(8 << 20)
+	const available = int64(6 << 20)
+	secret := bytes.Repeat([]byte("s"), 32)
+	for _, tc := range []struct {
+		name        string
+		action      governance.Action
+		replacement string
+	}{
+		{name: "omit", action: governance.ActionOmit},
+		{name: "hash", action: governance.ActionHash},
+		{name: "pseudonymize", action: governance.ActionPseudonymize},
+		{name: "replace", action: governance.ActionReplace, replacement: "safe"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rule := governance.Rule{ID: "body-001", Service: governance.ServiceS3, Resource: "assets", Target: governance.Target{Kind: governance.TargetS3TextBody}, Action: tc.action, Replacement: tc.replacement, ContentTypes: []string{"text/plain"}}
+			if tc.action == governance.ActionPseudonymize {
+				rule.KeyID, rule.Algorithm = "key-001", governance.PseudonymAlgorithm
+			}
+			policy, err := governance.NewEffectivePolicy("share-safe", []governance.Rule{rule}, nil, secret)
+			if err != nil {
+				t.Fatal(err)
+			}
+			client := &governedLargeDataClient{size: sourceSize, body: make([]byte, sourceSize)}
+			root := t.TempDir()
+			snapshot, _ := model.NewSnapshot(model.ResourceRef{Service: "s3", ID: "assets"}, "s3", Bucket{Name: "assets"})
+			opts := model.CaptureOptions{Mode: "full", ArtifactDirectory: filepath.Join(root, "artifacts"), CheckpointDirectory: filepath.Join(root, "checkpoint"), Governance: policy}
+			original := requireS3Available
+			requireS3Available = func(_ string, payload, copies int64) error {
+				if copies != 1 || payload > available {
+					return &storage.InsufficientSpaceError{Required: payload, Available: available}
+				}
+				return nil
+			}
+			t.Cleanup(func() { requireS3Available = original })
+			if err := New(client).captureObjects(context.Background(), "assets", &Bucket{Name: "assets"}, snapshot, opts); err != nil {
+				t.Fatalf("capture rejected transformed output: %v", err)
+			}
+			if client.gets != 1 {
+				t.Fatalf("GetObject calls = %d, want one after preflight", client.gets)
+			}
+		})
+	}
+}
+
+func TestUngovernedS3DiskPreflightRejectsSourceSizeBeforeReadingBodies(t *testing.T) {
+	const sourceSize = int64(8 << 20)
+	const available = int64(6 << 20)
+	client := &governedLargeDataClient{size: sourceSize, body: make([]byte, sourceSize)}
+	root := t.TempDir()
+	snapshot, _ := model.NewSnapshot(model.ResourceRef{Service: "s3", ID: "assets"}, "s3", Bucket{Name: "assets"})
+	opts := model.CaptureOptions{Mode: "full", ArtifactDirectory: filepath.Join(root, "artifacts"), CheckpointDirectory: filepath.Join(root, "checkpoint")}
+	original := requireS3Available
+	requireS3Available = func(_ string, payload, _ int64) error {
+		if payload > available {
+			return &storage.InsufficientSpaceError{Required: payload, Available: available}
+		}
+		return nil
+	}
+	t.Cleanup(func() { requireS3Available = original })
+	err := New(client).captureObjects(context.Background(), "assets", &Bucket{Name: "assets"}, snapshot, opts)
+	if err == nil || !strings.Contains(err.Error(), "insufficient disk space") {
+		t.Fatalf("error = %v, want insufficient disk space", err)
+	}
+	if client.gets != 0 {
+		t.Fatalf("preflight read %d object bodies", client.gets)
+	}
+}
+
+func TestS3DiskPreflightExcludesCompletedPacks(t *testing.T) {
+	first, err := json.Marshal(inventoryEntry{Key: "complete", Size: 8 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := json.Marshal(inventoryEntry{Key: "remaining", Size: 1 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inventory := append(append(append([]byte{}, first...), '\n'), second...)
+	inventory = append(inventory, '\n')
+	path := filepath.Join(t.TempDir(), "inventory.ndjson")
+	if err := os.WriteFile(path, inventory, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	remaining, err := estimateS3RemainingArtifactBytes(path, int64(len(first)+1), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	all, err := estimateS3RemainingArtifactBytes(path, 0, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	complete, err := estimateS3RemainingArtifactBytes(path, int64(len(inventory)), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if remaining >= all || complete != 0 {
+		t.Fatalf("remaining/all/complete estimates = %d/%d/%d", remaining, all, complete)
+	}
+}
+
+func readOnlyPackedObject(t *testing.T, artifactRoot string, chunk model.DataChunk) ([]byte, Object) {
+	t.Helper()
+	pack, err := os.Open(filepath.Join(artifactRoot, filepath.FromSlash(chunk.Data.Path)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pack.Close()
+	packGzip, err := gzip.NewReader(pack)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tarReader := tar.NewReader(packGzip)
+	if _, err = tarReader.Next(); err != nil {
+		t.Fatal(err)
+	}
+	body, err := io.ReadAll(tarReader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	index, err := os.Open(filepath.Join(artifactRoot, filepath.FromSlash(chunk.Index.Path)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer index.Close()
+	indexGzip, err := gzip.NewReader(index)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var object Object
+	if err = json.NewDecoder(indexGzip).Decode(&object); err != nil {
+		t.Fatal(err)
+	}
+	return body, object
+}
+
+func sha256Hex(value []byte) string {
+	digest := sha256.Sum256(value)
+	return hex.EncodeToString(digest[:])
+}
+
+func assertAbsentFromFiles(t *testing.T, root, protected string) {
+	t.Helper()
+	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return err
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		if bytes.Contains(data, []byte(protected)) {
+			t.Errorf("protected value persisted in %s", path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
 }
 

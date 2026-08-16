@@ -16,7 +16,39 @@ import (
 )
 
 type fakePuller struct {
-	called bool
+	called         bool
+	fixtureProfile string
+}
+
+func (f *fakePuller) PlanWithOptions(_ context.Context, _ config.Project, options app.PlanOptions) (app.Plan, error) {
+	f.fixtureProfile = options.FixtureProfile
+	return app.Plan{}, nil
+}
+
+func (f *fakePuller) PullWithOptions(_ context.Context, _ config.Project, _ string, _ string, _ string, options app.PullOptions) (model.Manifest, error) {
+	f.called = true
+	f.fixtureProfile = options.FixtureProfile
+	return model.Manifest{SchemaVersion: model.CurrentManifestSchemaVersion}, nil
+}
+
+func TestApplicationBackendForwardsFixtureProfileToPlanAndPull(t *testing.T) {
+	project := config.NewProject()
+	project.Source.Region = "eu-west-1"
+	puller := &fakePuller{}
+	backend := ApplicationBackend{App: puller}
+	req := ProjectRequest{Project: project, ProjectFile: filepath.Join(t.TempDir(), "floceed.yaml"), FixtureProfile: "share-safe"}
+	if _, err := backend.Plan(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+	if puller.fixtureProfile != "share-safe" {
+		t.Fatalf("plan fixture profile = %q", puller.fixtureProfile)
+	}
+	if _, err := backend.SaveAndPull(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+	if puller.fixtureProfile != "share-safe" {
+		t.Fatalf("pull fixture profile = %q", puller.fixtureProfile)
+	}
 }
 
 func (*fakePuller) Identity(context.Context, string, string) (awsconfig.Identity, error) {

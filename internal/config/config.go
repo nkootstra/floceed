@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -8,6 +9,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/nkootstra/floceed/internal/governance"
 	"go.yaml.in/yaml/v3"
 )
 
@@ -41,12 +43,52 @@ const (
 )
 
 type Project struct {
-	SchemaVersion int       `yaml:"schema_version" json:"schema_version"`
-	Source        Source    `yaml:"source" json:"source"`
-	Target        Target    `yaml:"target,omitempty" json:"target"`
-	Resources     Resources `yaml:"resources,omitempty" json:"resources"`
-	Capture       Capture   `yaml:"capture,omitempty" json:"capture"`
-	Output        Output    `yaml:"output,omitempty" json:"output"`
+	SchemaVersion   int                       `yaml:"schema_version" json:"schema_version"`
+	Source          Source                    `yaml:"source" json:"source"`
+	Target          Target                    `yaml:"target,omitempty" json:"target"`
+	Resources       Resources                 `yaml:"resources,omitempty" json:"resources"`
+	Capture         Capture                   `yaml:"capture,omitempty" json:"capture"`
+	Output          Output                    `yaml:"output,omitempty" json:"output"`
+	FixtureProfiles map[string]FixtureProfile `yaml:"fixture_profiles,omitempty" json:"fixture_profiles,omitempty"`
+}
+
+type FixtureProfile struct {
+	Rules   []GovernanceRule `yaml:"rules,omitempty" json:"rules,omitempty"`
+	Cohorts []CohortPolicy   `yaml:"cohorts,omitempty" json:"cohorts,omitempty"`
+}
+
+type GovernanceTarget struct {
+	Kind governance.TargetKind `yaml:"kind" json:"kind"`
+	Path string                `yaml:"path,omitempty" json:"path,omitempty"`
+}
+
+type GovernanceRule struct {
+	ID           string             `yaml:"id" json:"id"`
+	Service      governance.Service `yaml:"service" json:"service"`
+	Resource     string             `yaml:"resource" json:"resource"`
+	Target       GovernanceTarget   `yaml:"target" json:"target"`
+	Action       governance.Action  `yaml:"action" json:"action"`
+	Replacement  string             `yaml:"replacement,omitempty" json:"replacement,omitempty"`
+	KeyID        string             `yaml:"key_id,omitempty" json:"key_id,omitempty"`
+	Scope        string             `yaml:"scope,omitempty" json:"scope,omitempty"`
+	Algorithm    string             `yaml:"algorithm,omitempty" json:"algorithm,omitempty"`
+	ContentTypes []string           `yaml:"content_types,omitempty" json:"content_types,omitempty"`
+}
+
+type CohortPredicate struct {
+	Attribute string `yaml:"attribute" json:"attribute"`
+	Value     any    `yaml:"value" json:"value"`
+}
+
+type CohortPolicy struct {
+	Resource         string            `yaml:"resource" json:"resource"`
+	KeyID            string            `yaml:"key_id" json:"key_id"`
+	Scope            string            `yaml:"scope,omitempty" json:"scope,omitempty"`
+	Algorithm        string            `yaml:"algorithm,omitempty" json:"algorithm,omitempty"`
+	KeyPaths         []string          `yaml:"key_paths" json:"key_paths"`
+	Limit            int               `yaml:"limit" json:"limit"`
+	MaxRetainedBytes int64             `yaml:"max_retained_bytes,omitempty" json:"max_retained_bytes,omitempty"`
+	Predicates       []CohortPredicate `yaml:"predicates,omitempty" json:"predicates,omitempty"`
 }
 type Source struct {
 	Profile           string `yaml:"profile,omitempty" json:"profile,omitempty"`
@@ -125,6 +167,7 @@ func NewDynamoDBDataPolicy() *DynamoDBDataPolicy {
 }
 
 var accountID = regexp.MustCompile(`^[0-9]{12}$`)
+var opaqueName = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]{0,63}$`)
 
 func Decode(r io.Reader) (Project, error) {
 	p := NewProject()
@@ -152,6 +195,53 @@ func NewProject() Project {
 		Capture: Capture{ResourceWorkers: DefaultCaptureResourceWorkers},
 		Output:  Output{Directory: ".floceed"},
 	}
+}
+
+// ResolveFixtureProfile compiles a named project profile into an immutable,
+// normalized runtime policy. An empty name preserves legacy capture behavior.
+func (p Project) ResolveFixtureProfile(name string, getenv func(string) string) (*governance.EffectivePolicy, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		if len(p.FixtureProfiles) != 0 {
+			return nil, fmt.Errorf("fixture profile must be selected when fixture_profiles are configured: %w", ErrValidation)
+		}
+		return nil, nil
+	}
+	profile, ok := p.FixtureProfiles[name]
+	if !ok {
+		return nil, fmt.Errorf("unknown fixture profile %q: %w", name, ErrValidation)
+	}
+	rules := make([]governance.Rule, len(profile.Rules))
+	keyed := len(profile.Cohorts) != 0
+	for i, rule := range profile.Rules {
+		rules[i] = governance.Rule{
+			ID: rule.ID, Service: rule.Service, Resource: rule.Resource,
+			Target: governance.Target{Kind: rule.Target.Kind, Path: rule.Target.Path},
+			Action: rule.Action, Replacement: rule.Replacement, KeyID: rule.KeyID,
+			Scope: rule.Scope, Algorithm: rule.Algorithm, ContentTypes: append([]string(nil), rule.ContentTypes...),
+		}
+		keyed = keyed || rule.Action == governance.ActionPseudonymize
+	}
+	cohorts := make([]governance.Cohort, len(profile.Cohorts))
+	for i, cohort := range profile.Cohorts {
+		predicates := make([]governance.Predicate, len(cohort.Predicates))
+		for j, predicate := range cohort.Predicates {
+			predicates[j] = governance.Predicate{Attribute: predicate.Attribute, Value: predicate.Value}
+		}
+		cohorts[i] = governance.Cohort{Resource: cohort.Resource, KeyID: cohort.KeyID, Scope: cohort.Scope, Algorithm: cohort.Algorithm, KeyPaths: append([]string(nil), cohort.KeyPaths...), Limit: cohort.Limit, MaxRetainedBytes: cohort.MaxRetainedBytes, Predicates: predicates}
+	}
+	var secret []byte
+	if keyed {
+		if getenv == nil {
+			getenv = func(string) string { return "" }
+		}
+		decoded, err := base64.StdEncoding.DecodeString(strings.TrimSpace(getenv("FLOCEED_GOVERNANCE_SECRET")))
+		if err != nil || len(decoded) < 32 {
+			return nil, fmt.Errorf("FLOCEED_GOVERNANCE_SECRET must be base64 for at least 32 bytes: %w", ErrValidation)
+		}
+		secret = decoded
+	}
+	return governance.NewEffectivePolicy(name, rules, cohorts, secret)
 }
 
 func (p *Project) applyDefaults() {
@@ -185,6 +275,14 @@ func (p *Project) applyDefaults() {
 		if p.Resources.DynamoDB[i].Data != nil && p.Resources.DynamoDB[i].Data.Mode == "" {
 			p.Resources.DynamoDB[i].Data.Mode = DataModeBounded
 		}
+	}
+	for name, profile := range p.FixtureProfiles {
+		for i := range profile.Cohorts {
+			if profile.Cohorts[i].MaxRetainedBytes == 0 {
+				profile.Cohorts[i].MaxRetainedBytes = governance.DefaultCohortMaxRetainedBytes
+			}
+		}
+		p.FixtureProfiles[name] = profile
 	}
 }
 func (p Project) Validate() error {
@@ -269,7 +367,134 @@ func (p Project) Validate() error {
 	if hasFullData(p) && p.Target.HookTimeoutSeconds <= DefaultHookTimeoutSeconds {
 		return fmt.Errorf("full data mode requires target.hook_timeout_seconds greater than %d: %w", DefaultHookTimeoutSeconds, ErrValidation)
 	}
+	if err := p.validateFixtureProfiles(); err != nil {
+		return err
+	}
 	return nil
+}
+
+func (p Project) validateFixtureProfiles() error {
+	resources := map[governance.Service]map[string]bool{
+		governance.ServiceS3: {}, governance.ServiceDynamoDB: {},
+	}
+	dynamoFull := make(map[string]bool)
+	for _, resource := range p.Resources.S3 {
+		resources[governance.ServiceS3][resource.Name] = true
+	}
+	for _, resource := range p.Resources.DynamoDB {
+		resources[governance.ServiceDynamoDB][resource.Name] = true
+		dynamoFull[resource.Name] = resource.Data != nil && resource.Data.Enabled && resource.Data.Mode == DataModeFull
+	}
+	for name, profile := range p.FixtureProfiles {
+		if !opaqueName.MatchString(name) {
+			return fmt.Errorf("fixture profile name %q must be an opaque identifier: %w", name, ErrValidation)
+		}
+		ids := make(map[string]bool)
+		targets := make(map[string]bool)
+		for _, rule := range profile.Rules {
+			if !opaqueName.MatchString(rule.ID) {
+				return fmt.Errorf("fixture profile %q rule ID %q must be an opaque identifier: %w", name, rule.ID, ErrValidation)
+			}
+			if ids[rule.ID] {
+				return fmt.Errorf("fixture profile %q has duplicate rule ID %q: %w", name, rule.ID, ErrValidation)
+			}
+			ids[rule.ID] = true
+			if !resources[rule.Service][rule.Resource] {
+				return fmt.Errorf("fixture profile %q rule %q names unconfigured %s resource %q: %w", name, rule.ID, rule.Service, rule.Resource, ErrValidation)
+			}
+			if err := validateGovernanceRule(rule); err != nil {
+				return fmt.Errorf("fixture profile %q rule %q: %w", name, rule.ID, err)
+			}
+			path := strings.TrimSpace(rule.Target.Path)
+			if rule.Target.Kind == governance.TargetS3Metadata {
+				path = strings.ToLower(path)
+			}
+			targetKey := string(rule.Service) + "\x00" + rule.Resource + "\x00" + string(rule.Target.Kind) + "\x00" + path
+			if targets[targetKey] {
+				return fmt.Errorf("fixture profile %q has overlapping rules for one target: %w", name, ErrValidation)
+			}
+			targets[targetKey] = true
+		}
+		cohortResources := make(map[string]bool)
+		for _, cohort := range profile.Cohorts {
+			if !resources[governance.ServiceDynamoDB][cohort.Resource] {
+				return fmt.Errorf("fixture profile %q cohort names unconfigured DynamoDB resource %q: %w", name, cohort.Resource, ErrValidation)
+			}
+			if !dynamoFull[cohort.Resource] {
+				return fmt.Errorf("fixture profile %q cohort %q requires explicit DynamoDB full data mode: %w", name, cohort.Resource, ErrValidation)
+			}
+			if cohortResources[cohort.Resource] {
+				return fmt.Errorf("fixture profile %q has duplicate cohort for %q: %w", name, cohort.Resource, ErrValidation)
+			}
+			cohortResources[cohort.Resource] = true
+			if strings.TrimSpace(cohort.KeyID) == "" || cohort.Limit <= 0 || len(cohort.KeyPaths) == 0 {
+				return fmt.Errorf("fixture profile %q cohort %q requires key_id, key_paths, and a positive limit: %w", name, cohort.Resource, ErrValidation)
+			}
+			if cohort.MaxRetainedBytes < 0 {
+				return fmt.Errorf("fixture profile %q cohort %q requires a positive max_retained_bytes: %w", name, cohort.Resource, ErrValidation)
+			}
+			if algorithm := strings.TrimSpace(cohort.Algorithm); algorithm != "" && algorithm != governance.CohortRankAlgorithm {
+				return fmt.Errorf("fixture profile %q cohort %q requires algorithm %q: %w", name, cohort.Resource, governance.CohortRankAlgorithm, ErrValidation)
+			}
+			for _, path := range cohort.KeyPaths {
+				if strings.TrimSpace(path) == "" {
+					return fmt.Errorf("fixture profile %q cohort %q has an empty key path: %w", name, cohort.Resource, ErrValidation)
+				}
+			}
+			for _, predicate := range cohort.Predicates {
+				if strings.TrimSpace(predicate.Attribute) == "" || !supportedPredicateValue(predicate.Value) {
+					return fmt.Errorf("fixture profile %q cohort %q has an unsupported predicate: %w", name, cohort.Resource, ErrValidation)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func validateGovernanceRule(rule GovernanceRule) error {
+	validAction := rule.Action == governance.ActionOmit || rule.Action == governance.ActionReplace || rule.Action == governance.ActionHash || rule.Action == governance.ActionPseudonymize
+	if !validAction {
+		return fmt.Errorf("unsupported action %q: %w", rule.Action, ErrValidation)
+	}
+	path := strings.TrimSpace(rule.Target.Path)
+	switch {
+	case rule.Service == governance.ServiceDynamoDB && rule.Target.Kind == governance.TargetDynamoDBAttribute && path != "":
+	case rule.Service == governance.ServiceS3 && rule.Target.Kind == governance.TargetS3Metadata && path != "":
+	case rule.Service == governance.ServiceS3 && rule.Target.Kind == governance.TargetS3TextBody && path == "" && len(rule.ContentTypes) != 0:
+	default:
+		return fmt.Errorf("unsupported target %q for service %q: %w", rule.Target.Kind, rule.Service, ErrValidation)
+	}
+	if rule.Action == governance.ActionReplace && rule.Replacement == "" {
+		return fmt.Errorf("replace requires a non-empty replacement: %w", ErrValidation)
+	}
+	if rule.Action == governance.ActionPseudonymize && strings.TrimSpace(rule.KeyID) == "" {
+		return fmt.Errorf("pseudonymize requires key_id: %w", ErrValidation)
+	}
+	algorithm := strings.TrimSpace(rule.Algorithm)
+	switch rule.Action {
+	case governance.ActionHash:
+		if algorithm != "" && algorithm != governance.HashAlgorithm {
+			return fmt.Errorf("hash requires algorithm %q: %w", governance.HashAlgorithm, ErrValidation)
+		}
+	case governance.ActionPseudonymize:
+		if algorithm != "" && algorithm != governance.PseudonymAlgorithm {
+			return fmt.Errorf("pseudonymize requires algorithm %q: %w", governance.PseudonymAlgorithm, ErrValidation)
+		}
+	default:
+		if algorithm != "" {
+			return fmt.Errorf("%s does not accept an algorithm: %w", rule.Action, ErrValidation)
+		}
+	}
+	return nil
+}
+
+func supportedPredicateValue(value any) bool {
+	switch value.(type) {
+	case string, bool, int, int64, uint64, float64:
+		return true
+	default:
+		return false
+	}
 }
 
 func hasFullData(p Project) bool {

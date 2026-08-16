@@ -15,6 +15,7 @@ import (
 
 type captureTestAdapter struct {
 	capture func(context.Context, model.ResourceRef) (*model.Snapshot, error)
+	audit   func(model.ResourceRef, model.CaptureOptions)
 
 	validateMu    sync.Mutex
 	validated     []string
@@ -37,7 +38,10 @@ func (*captureTestAdapter) FinalizePlanning(*model.Snapshot, []model.Dependency)
 func (*captureTestAdapter) Discover(context.Context, model.SourceScope) (model.DiscoveryResult, error) {
 	return model.DiscoveryResult{}, nil
 }
-func (a *captureTestAdapter) Capture(ctx context.Context, _ model.SourceScope, ref model.ResourceRef, _ model.CaptureOptions) (*model.Snapshot, error) {
+func (a *captureTestAdapter) Capture(ctx context.Context, _ model.SourceScope, ref model.ResourceRef, options model.CaptureOptions) (*model.Snapshot, error) {
+	if a.audit != nil {
+		a.audit(ref, options)
+	}
 	return a.capture(ctx, ref)
 }
 func (*captureTestAdapter) Dependencies(*model.Snapshot) []model.Dependency { return nil }
@@ -153,6 +157,45 @@ func TestCaptureFoldsCompletedWorkInSelectionOrder(t *testing.T) {
 		if got.snapshots[i].Resource.ID != want || got.plan.Selected[i].ID != want || adapter.validated[i] != want {
 			t.Fatalf("index %d: snapshot=%q selected=%q validated=%q, want %q", i, got.snapshots[i].Resource.ID, got.plan.Selected[i].ID, adapter.validated[i], want)
 		}
+	}
+}
+
+func TestCaptureAggregatesGovernanceAuditDeterministicallyAfterConcurrentCaptures(t *testing.T) {
+	gates := map[string]chan struct{}{"a": make(chan struct{}), "b": make(chan struct{})}
+	adapter := &captureTestAdapter{
+		audit: func(ref model.ResourceRef, options model.CaptureOptions) {
+			for range map[string]int{"a": 1, "b": 10}[ref.ID] {
+				options.GovernanceAudit.Record("rule-" + ref.ID)
+			}
+		},
+		capture: func(_ context.Context, ref model.ResourceRef) (*model.Snapshot, error) {
+			<-gates[ref.ID]
+			return model.NewSnapshot(ref, "s3", map[string]string{"name": ref.ID})
+		},
+	}
+	service := captureTestApplication(t, adapter)
+	project := captureTestProject("b", "a")
+	project.FixtureProfiles = map[string]config.FixtureProfile{"safe": {Rules: []config.GovernanceRule{
+		{ID: "rule-b", Service: "s3", Resource: "b", Target: config.GovernanceTarget{Kind: "s3_text_body"}, Action: "replace", Replacement: "safe"},
+		{ID: "rule-a", Service: "s3", Resource: "a", Target: config.GovernanceTarget{Kind: "s3_text_body"}, Action: "omit"},
+	}}}
+	done := make(chan Plan, 1)
+	policy, err := project.ResolveFixtureProfile("safe", func(string) string { return "" })
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		plan, _, _ := service.capture(context.Background(), captureRequest{Project: project, Governance: policy})
+		done <- plan
+	}()
+	close(gates["b"])
+	close(gates["a"])
+	plan := <-done
+	if plan.Governance == nil || len(plan.Governance.Rules) != 2 {
+		t.Fatalf("governance audit = %#v", plan.Governance)
+	}
+	if got := plan.Governance.Rules; got[0].RuleID != "rule-a" || got[0].Count != model.CountBucket1To9 || got[1].RuleID != "rule-b" || got[1].Count != model.CountBucket10To99 {
+		t.Fatalf("rule audit = %#v, want stable rule order and disclosure buckets", got)
 	}
 }
 

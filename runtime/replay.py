@@ -19,7 +19,7 @@ import boto3
 from botocore.config import Config
 from botocore.exceptions import ClientError
 
-SUPPORTED_SCHEMAS = {1, 2}
+SUPPORTED_SCHEMAS = {1, 2, 3}
 SUPPORTED_STRUCTURE_VERSION = 1
 ROOT = Path(os.environ.get("FLOCEED_ROOT", "/floceed"))
 ENDPOINT = os.environ.get("FLOCEED_ENDPOINT", "http://127.0.0.1:4566")
@@ -60,6 +60,7 @@ def validate_bundle() -> dict:
     if len(account) != 12 or not account.isdigit():
         fail("source account ID must be exactly 12 digits")
     validate_snapshots(manifest.get("snapshots", []), version)
+    validate_governance(manifest.get("governance"), version)
     parsed = urlparse(ENDPOINT)
     if parsed.scheme != "http" or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}:
         fail("endpoint must be an HTTP loopback address")
@@ -76,6 +77,39 @@ def validate_bundle() -> dict:
         if size != entry["size"] or digest.hexdigest() != entry["sha256"]:
             fail(f"checksum mismatch for {entry['path']}")
     return manifest
+
+
+def validate_governance(governance: object, manifest_version: int) -> None:
+    if governance is None:
+        return
+    if manifest_version < 3 or not isinstance(governance, dict):
+        fail("governance requires manifest schema 3")
+    allowed = {"profile", "policy_identity", "cohort_identity", "key_ids", "algorithms", "rules", "cohorts"}
+    if set(governance) - allowed:
+        fail("governance contains unapproved fields")
+    if not isinstance(governance.get("profile"), str) or not governance["profile"] or not isinstance(governance.get("policy_identity"), str) or not governance["policy_identity"]:
+        fail("governance profile and policy identity are required")
+    rules = governance.get("rules", [])
+    cohorts = governance.get("cohorts", [])
+    key_ids = governance.get("key_ids", [])
+    algorithms = governance.get("algorithms", [])
+    if not isinstance(rules, list) or not isinstance(cohorts, list) or not isinstance(key_ids, list) or not isinstance(algorithms, list):
+        fail("governance collections must be arrays")
+    if not all(isinstance(value, str) and value for value in key_ids + algorithms):
+        fail("governance identities must be non-empty strings")
+    if len(set(key_ids)) != len(key_ids) or len(set(algorithms)) != len(algorithms):
+        fail("governance identities must be unique")
+    buckets = {"0", "1-9", "10-99", "100-999", "1000+"}
+    rule_ids = set()
+    for rule in rules:
+        if not isinstance(rule, dict) or set(rule) - {"rule_id", "action", "count"} or not isinstance(rule.get("rule_id"), str) or not rule.get("rule_id") or rule.get("action") not in {"omit", "replace", "hash", "pseudonymize"} or rule.get("count") not in buckets or rule["rule_id"] in rule_ids:
+            fail("governance rule audit is invalid")
+        rule_ids.add(rule["rule_id"])
+    cohort_ids = set()
+    for cohort in cohorts:
+        if not isinstance(cohort, dict) or set(cohort) - {"resource_identity", "eligible", "retained", "truncated"} or not isinstance(cohort.get("resource_identity"), str) or not cohort.get("resource_identity") or cohort.get("eligible") not in buckets or cohort.get("retained") not in buckets or not isinstance(cohort.get("truncated", False), bool) or cohort["resource_identity"] in cohort_ids:
+            fail("governance cohort audit is invalid")
+        cohort_ids.add(cohort["resource_identity"])
 
 
 def validate_snapshots(snapshots: list, manifest_version: int = 1) -> None:
@@ -112,7 +146,7 @@ def validate_snapshots(snapshots: list, manifest_version: int = 1) -> None:
                 fail(f"snapshot {index} DynamoDB structure requires billing_mode")
         else:
             fail(f"snapshot {index} service {service!r} is unsupported")
-        if manifest_version == 2:
+        if manifest_version >= 2:
             if snapshot.get("data"):
                 fail(f"snapshot {index} uses legacy data in manifest schema 2")
             dataset = snapshot.get("dataset")
