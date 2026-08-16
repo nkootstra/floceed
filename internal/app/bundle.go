@@ -1,6 +1,7 @@
 package app
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -9,10 +10,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 
 	"github.com/nkootstra/floceed/internal/bundle"
+	"github.com/nkootstra/floceed/internal/captureledger"
 	"github.com/nkootstra/floceed/internal/compose"
 	"github.com/nkootstra/floceed/internal/config"
 	"github.com/nkootstra/floceed/internal/governance"
@@ -129,6 +132,10 @@ func (a *Application) PullWithOptions(ctx context.Context, p config.Project, pro
 	if err := os.MkdirAll(workBase, 0o700); err != nil {
 		return PullResult{}, filesystemError(err)
 	}
+	ledger, err := captureledger.OpenStore(filepath.Join(workBase, "ledger"))
+	if err != nil {
+		return PullResult{}, filesystemError(err)
+	}
 	lockPath := tmp + ".lock"
 	release, err := acquireCaptureLock(lockPath)
 	if err != nil {
@@ -161,7 +168,7 @@ func (a *Application) PullWithOptions(ctx context.Context, p config.Project, pro
 		options.Progress(event)
 	}
 	report(model.ProgressEvent{Operation: "pull", Phase: "prepare", Message: "preparing capture"})
-	planned, snapshots, err := a.capture(ctx, captureRequest{
+	captured, err := a.capture(ctx, captureRequest{
 		Project:        p,
 		Profile:        profile,
 		Governance:     policy,
@@ -171,14 +178,36 @@ func (a *Application) PullWithOptions(ctx context.Context, p config.Project, pro
 		CheckpointRoot: filepath.Join(tmp, "checkpoints"),
 		Progress:       report,
 		Source:         &source,
+		Ledger:         ledger,
+		LedgerSource:   captureledger.SourceIdentity{AccountID: source.Identity.AccountID, Region: effectiveRegion},
 	})
 	if err != nil {
 		return PullResult{}, err
 	}
+	planned, snapshots := captured.Plan, captured.Snapshots
 	manifest := a.manifest(p, planned, snapshots)
 	currentProjection, err := inspection.ProjectManifest(manifest)
 	if err != nil {
 		return PullResult{}, &Error{Kind: ErrorPlan, Code: "MANIFEST_INVALID", Message: err.Error(), Err: err}
+	}
+	var ledgerGeneration *captureledger.Generation
+	if len(captured.LedgerResources) != 0 {
+		completedAt := time.Now().UTC()
+		if a.Now != nil {
+			completedAt = a.Now().UTC()
+		}
+		generation := captureledger.Generation{
+			SchemaVersion: captureledger.CurrentSchemaVersion,
+			Source:        captureledger.SourceIdentity{AccountID: source.Identity.AccountID, Region: effectiveRegion},
+			CreatedAt:     completedAt,
+			CompletedAt:   completedAt,
+			Resources:     captured.LedgerResources,
+		}
+		generation.ID = ledgerGenerationID(generation)
+		if _, err := generation.CanonicalJSON(); err != nil {
+			return PullResult{}, &Error{Kind: ErrorPlan, Code: "CAPTURE_LEDGER_INVALID", Message: err.Error(), Err: err}
+		}
+		ledgerGeneration = &generation
 	}
 	report(model.ProgressEvent{Operation: "pull", Phase: "install", Message: "validating and installing bundle"})
 	beforeInstall := func() error {
@@ -206,6 +235,11 @@ func (a *Application) PullWithOptions(ctx context.Context, p config.Project, pro
 		}
 		return PullResult{}, filesystemError(err)
 	}
+	if ledgerGeneration != nil {
+		if err := a.publishLedger(ledger, *ledgerGeneration, filepath.Join(tmp, "artifacts")); err != nil {
+			report(model.ProgressEvent{Operation: "pull", Phase: "ledger", Message: "bundle installed; capture reuse cache was not updated"})
+		}
+	}
 	if err := os.RemoveAll(tmp); err != nil {
 		return PullResult{}, filesystemError(err)
 	}
@@ -213,9 +247,50 @@ func (a *Application) PullWithOptions(ctx context.Context, p config.Project, pro
 	result := PullResult{Manifest: manifest, Baseline: baselineState}
 	if baselineState == BaselinePresent {
 		receipt := inspection.Compare(baselineProjection, currentProjection)
+		if ledgerGeneration != nil {
+			attachLedgerDecisions(&receipt, *ledgerGeneration, captured.LedgerGenerations)
+		}
 		result.Receipt = &receipt
 	}
 	return result, nil
+}
+
+func attachLedgerDecisions(receipt *inspection.Receipt, generation captureledger.Generation, previous map[string]string) {
+	changes := make(map[string]*inspection.ResourceChange, len(receipt.Resources))
+	for index := range receipt.Resources {
+		identity := receipt.Resources[index].Resource
+		changes[resourceIdentityKey(identity.Service, identity.Type, identity.ID)] = &receipt.Resources[index]
+	}
+	for _, resource := range generation.Resources {
+		key := resourceIdentityKey(resource.Descriptor.Service, resource.Descriptor.Type, resource.Descriptor.ID)
+		change := changes[key]
+		if change == nil { // Defensive: ledger resources are selected manifest resources.
+			continue
+		}
+		for _, unit := range resource.Units {
+			decision := inspection.UnitDecision{
+				ID: unit.ID, Outcome: string(unit.Outcome), Reason: string(unit.Reason),
+				FreshnessDigest: unit.Freshness.Digest, ArtifactCount: len(unit.Artifacts), Generation: generation.ID, PreviousGeneration: previous[key],
+			}
+			for _, artifact := range unit.Artifacts {
+				decision.ArtifactBytes += artifact.Size
+			}
+			change.Units = append(change.Units, decision)
+		}
+		sort.Slice(change.Units, func(i, j int) bool {
+			return cmp.Or(cmp.Compare(change.Units[i].ID, change.Units[j].ID), cmp.Compare(change.Units[i].Outcome, change.Units[j].Outcome), cmp.Compare(change.Units[i].Reason, change.Units[j].Reason)) < 0
+		})
+	}
+}
+
+func ledgerGenerationID(generation captureledger.Generation) string {
+	payload, _ := json.Marshal(struct {
+		Source      captureledger.SourceIdentity
+		CompletedAt time.Time
+		Resources   []captureledger.Resource
+	}{generation.Source, generation.CompletedAt, generation.Resources})
+	sum := sha256.Sum256(payload)
+	return hex.EncodeToString(sum[:])
 }
 
 func invalidBaselineError(err error) error {

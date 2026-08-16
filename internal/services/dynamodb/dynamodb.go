@@ -12,6 +12,7 @@ import (
 	awsddb "github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/nkootstra/floceed/internal/awsconfig"
+	"github.com/nkootstra/floceed/internal/captureledger"
 	"github.com/nkootstra/floceed/internal/catalog"
 	"github.com/nkootstra/floceed/internal/config"
 	"github.com/nkootstra/floceed/internal/model"
@@ -211,6 +212,74 @@ func (a *Adapter) Capture(ctx context.Context, scope model.SourceScope, ref mode
 		}
 	}
 	return snapshot, nil
+}
+
+// CaptureReusable deliberately never reuses completed DynamoDB datasets. A
+// scan cursor proves only interrupted-run progress, not that a prior completed
+// scan still reflects the table's current contents.
+func (a *Adapter) CaptureReusable(ctx context.Context, scope model.SourceScope, ref model.ResourceRef, opts model.CaptureOptions, request catalog.ReuseRequest) (catalog.ReuseResult, error) {
+	structureOptions := opts
+	structureOptions.IncludeData = false
+	snapshot, err := a.Capture(ctx, scope, ref, structureOptions)
+	if err != nil || !opts.IncludeData {
+		return catalog.ReuseResult{Snapshot: snapshot}, err
+	}
+	definition, err := dynamoCaptureDefinition(scope, ref, opts)
+	if err != nil {
+		return catalog.ReuseResult{}, err
+	}
+	reason := dynamoRefreshReason(definition, request)
+	result, err := a.captureData(ctx, ref.ID, opts, directoryWriter{root: opts.ArtifactDirectory})
+	if err != nil {
+		if !opts.AllowPartialData || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return catalog.ReuseResult{}, err
+		}
+		snapshot.Findings = append(snapshot.Findings, model.Finding{Code: "DATA_CAPTURE_PARTIAL", Severity: model.SeverityWarning, Support: model.SupportPartial, Resource: ref.ID, Property: "data", Message: "Fixture capture was incomplete: " + err.Error(), Remediation: "Rerun the capture after restoring read access, or disable allow_partial_data."})
+		return catalog.ReuseResult{Snapshot: snapshot}, nil
+	}
+	snapshot.Dataset = &result.Dataset
+	if result.Truncated {
+		snapshot.Findings = append(snapshot.Findings, model.Finding{Code: "DYNAMODB_DATA_LIMIT_REACHED", Severity: model.SeverityInfo, Support: model.SupportPartial, Resource: ref.ID, Message: "The configured fixture boundary was reached."})
+	}
+	return catalog.ReuseResult{Snapshot: snapshot, Resource: dynamoLedgerResource(ref, definition, result.Dataset, reason)}, nil
+}
+
+func dynamoRefreshReason(definition string, request catalog.ReuseRequest) captureledger.Reason {
+	if request.InvalidationReason == captureledger.ReasonFormatChanged {
+		return captureledger.ReasonFormatChanged
+	}
+	matching := request.Candidate
+	if matching != nil && matching.CaptureDefinition != definition {
+		matching = nil
+	}
+	if matching == nil {
+		if request.Candidate != nil {
+			return captureledger.ReasonCaptureDefinitionChanged
+		}
+		if request.InvalidationReason != "" {
+			return request.InvalidationReason
+		}
+		return captureledger.ReasonNoCandidate
+	}
+	for _, unit := range matching.Units {
+		if unit.Outcome == captureledger.UnitOutcomeInvalidated && unit.Reason != "" && unit.Reason != captureledger.ReasonReused {
+			return unit.Reason
+		}
+		if request.Validate != nil {
+			for _, artifact := range unit.Artifacts {
+				if err := request.Validate(artifact); err != nil {
+					if reason, ok := captureledger.InvalidationReason(err); ok {
+						return reason
+					}
+					return captureledger.ReasonArtifactCorrupt
+				}
+			}
+		}
+	}
+	if request.InvalidationReason != "" {
+		return request.InvalidationReason
+	}
+	return captureledger.ReasonFreshnessUnproven
 }
 func (a *Adapter) Dependencies(*model.Snapshot) []model.Dependency { return nil }
 func (a *Adapter) Validate(s *model.Snapshot, _ model.Capabilities) []model.Finding {

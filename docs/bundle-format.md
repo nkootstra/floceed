@@ -80,5 +80,26 @@ produce the same inspection read model without governance fields.
 reached, runtime state is `unavailable` and the artifact remains valid. Default
 inspection and all comparisons are offline and read-only. Inspection does not
 compare artifacts with running resources, reconcile drift, or delete anything.
-Potential v0.4 `reused` and `invalidated` capture-ledger outcomes are deferred
-and are not part of the v0.3 receipt vocabulary.
+
+## Capture reuse does not change the bundle
+
+The v0.4 completed-capture ledger is an input-side, runner-local optimization.
+Reused artifacts are verified and materialized beside freshly captured
+artifacts before rendering. The renderer still stages, validates, and atomically
+installs one complete flat directory. Moving or deleting the work directory and
+ledger after a successful pull does not affect validation, `floceed up`, or
+replay.
+
+Reuse does not change `bundle/manifest.json`, dataset paths or formats,
+`checksums.json`, the generated replay hook, or replay ordering. None of those
+files contains a ledger path or requires a base bundle. Schemas 1, 2, and 3
+retain their existing meanings. Capture-unit outcomes (`reused`, `refreshed`,
+and `invalidated`) are receipt metadata beneath the existing resource outcomes;
+they are not manifest fields.
+
+Floceed does not produce layered/delta bundles or replay tombstones, and it does
+not destructively synchronize source deletions into Floci. A missing source unit
+can be reported as `source_unit_missing` and omitted from the newly assembled
+standalone bundle; replay continues to use the same non-destructive application
+contract described above. Failed capture or rendering preserves the previously
+installed, replayable directory.

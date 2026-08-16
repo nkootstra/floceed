@@ -287,6 +287,7 @@ func pullReceiptResult() app.PullResult {
 				Resource:   inspection.ResourceIdentity{Service: "dynamodb", Type: "table", ID: "orders"},
 				Outcome:    inspection.OutcomeChanged,
 				Categories: []inspection.ChangeCategory{inspection.CategoryDataset, inspection.CategoryGovernance},
+				Units:      []inspection.UnitDecision{{ID: "chunk-000001", Outcome: "refreshed", Reason: "freshness_unproven", ArtifactCount: 1, ArtifactBytes: 42}},
 			}},
 		},
 	}
@@ -324,6 +325,11 @@ func TestPullJSONProgressUsesStderrWithoutCorruptingFinalEnvelope(t *testing.T) 
 	if !reflect.DeepEqual(change["categories"], []any{"dataset", "governance"}) {
 		t.Fatalf("pull receipt categories = %#v", change["categories"])
 	}
+	units := change["units"].([]any)
+	unit := units[0].(map[string]any)
+	if unit["id"] != "chunk-000001" || unit["outcome"] != "refreshed" || unit["reason"] != "freshness_unproven" || unit["artifact_count"] != float64(1) || unit["artifact_bytes"] != float64(42) {
+		t.Fatalf("pull unit decision = %#v", unit)
+	}
 	if strings.Contains(stdout.String(), "secret-canary") {
 		t.Fatalf("pull output disclosed privacy canary: %s", stdout.String())
 	}
@@ -344,13 +350,29 @@ func TestPullTextIncludesExactReceiptWithoutPrivacyCanary(t *testing.T) {
 	if err := cmd.ExecuteContext(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	for _, expected := range []string{`"baseline": "present"`, `"baseline": "sha256:baseline"`, `"current": "sha256:current"`, `"added": 1`, `"removed": 2`, `"changed": 3`, `"unchanged": 4`, `"service": "dynamodb"`, `"id": "orders"`, `"dataset"`, `"governance"`} {
+	for _, expected := range []string{`"baseline": "present"`, `"baseline": "sha256:baseline"`, `"current": "sha256:current"`, `"added": 1`, `"removed": 2`, `"changed": 3`, `"unchanged": 4`, `"service": "dynamodb"`, `"id": "orders"`, `"dataset"`, `"governance"`, `"outcome": "refreshed"`, `"reason": "freshness_unproven"`} {
 		if !strings.Contains(stdout.String(), expected) {
 			t.Fatalf("text output missing %s:\n%s", expected, stdout.String())
 		}
 	}
+	if !strings.Contains(stdout.String(), "capture dynamodb/table/orders reused=0 refreshed=1 invalidated=0 reasons=freshness_unproven") {
+		t.Fatalf("text output missing concise capture summary:\n%s", stdout.String())
+	}
 	if strings.Contains(stdout.String(), "secret-canary") || stderr.Len() != 0 {
 		t.Fatalf("text output disclosed canary or emitted progress: stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+}
+
+func TestPullRestartHelpOnlyDiscardsMatchingCheckpoint(t *testing.T) {
+	var stdout bytes.Buffer
+	cmd := New(Options{Stdin: strings.NewReader(""), Stdout: &stdout, Stderr: &stdout, App: &fakeService{}})
+	cmd.SetArgs([]string{"pull", "--help"})
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	text := strings.ToLower(stdout.String())
+	if !strings.Contains(text, "discard the matching capture checkpoint") || strings.Contains(text, "ledger cleared") || strings.Contains(text, "clear the ledger") {
+		t.Fatalf("restart help misstates retention semantics:\n%s", stdout.String())
 	}
 }
 

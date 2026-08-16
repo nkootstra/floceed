@@ -2,6 +2,7 @@ package bundle
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -10,6 +11,23 @@ import (
 	"github.com/nkootstra/floceed/internal/config"
 	"github.com/nkootstra/floceed/internal/model"
 )
+
+func TestLinkOrCopyFileFallsBackToCopyWhenLinkFails(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "source")
+	destination := filepath.Join(root, "nested", "destination")
+	payload := []byte("artifact")
+	if err := os.WriteFile(source, payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := linkOrCopyFileWith(destination, source, func(string, string) error { return errors.New("cross-device link") }); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(destination)
+	if err != nil || string(got) != string(payload) {
+		t.Fatalf("copied artifact = %q, %v", got, err)
+	}
+}
 
 func TestRenderIsDeterministicAndComplete(t *testing.T) {
 	root := t.TempDir()

@@ -28,8 +28,19 @@ floceed inspect --project floceed.yaml --runtime
 The first two forms are offline. `--runtime` adds a bounded Floci initialization
 readiness check; an unavailable runtime does not invalidate the artifact.
 Receipts classify resources as added, removed, changed, or unchanged and report
-safe semantic categories without fixture values. They explain differences but
-never reconcile or delete local state.
+safe semantic categories without fixture values. A successful pull may also
+explain individual capture units as reused, refreshed, or invalidated. These
+decisions describe capture work only; they never reconcile or delete local
+state.
+
+Repeated pulls keep a runner-local completed-capture ledger under Floceed's
+resolved work directory (or the root selected with `--work-dir`). Unchanged S3
+units can be reused after a current inventory and local integrity verification;
+DynamoDB is conservatively rescanned with reason `freshness_unproven`.
+`--restart` clears only the matching interrupted-run checkpoint, not completed
+reuse entries. The ledger contains sensitive fixture bytes, can grow without
+implicit pruning, and must not be copied between runners. The installed
+`.floceed/` directory remains complete and replayable without that ledger.
 
 The example also defines a fictional `share-safe` fixture profile. Inject its
 key material at runtime and select it explicitly:

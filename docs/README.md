@@ -107,9 +107,12 @@ A successful first `pull` reports `baseline: absent`. Later successful pulls
 include a receipt comparing the prior valid bundle with the installed bundle.
 A failed replacement emits no success receipt and leaves the prior bundle in
 place. Floceed does not reconcile, delete, or otherwise correct differences.
-The possible receipt outcomes remain the four listed above; `reused` and
-`invalidated` are deferred until a future v0.4 capture-reuse ledger and are not
-inferred from equality in v0.3.
+The resource outcome remains one of the four listed above. Each selected
+resource can also carry capture-unit outcomes: `reused`, `refreshed`, or
+`invalidated`, with a stable reason such as `source_content_changed`,
+`freshness_unproven`, or `artifact_corrupt`. These subordinate outcomes explain
+how the new bundle was captured; they do not add resource classifications or
+infer reuse from semantic equality.
 
 Governed schema-3 bundles expose only the audit fields already safe for the
 manifest: opaque policy, cohort, rule, and resource identities; non-secret key
@@ -174,11 +177,41 @@ capture:
   resource_workers: 2
 ```
 
-`pull` checkpoints verified work in the OS user cache and resumes it
-automatically. Use `--work-dir` to place working data on another volume or
-`--restart` to discard the matching checkpoint. Full capture checks available
-disk before bulk transfer and never replaces the previous valid bundle after a
-failure or cancellation.
+`pull` stores both in-progress checkpoints and a completed-capture reuse ledger
+under the resolved work directory. By default that is Floceed's OS user-cache
+location (`<user-cache>/floceed/captures`); `--work-dir` selects a different
+root. Completed generations and immutable blobs live below
+`<resolved-work-dir>/ledger`. An interrupted pull resumes
+from its matching checkpoint. A later completed pull separately evaluates the
+ledger and may reuse verified S3 capture units. `--restart` discards only the
+matching in-progress checkpoint: it does not erase completed ledger entries or
+disable their evaluation.
+
+The ledger and its content-addressed blobs are a runner-local optimization, not
+part of the bundle and not a portable cache. Do not copy them between machines,
+users, or CI runners. They contain captured fixture bytes, use restrictive
+permissions, and can grow with successive captures. Floceed v0.4 performs no
+implicit pruning; protect and size the work volume as carefully as the generated
+bundle. Before reuse, Floceed validates ledger metadata and rechecks every blob's
+regular-file status, size, and SHA-256. Missing or corrupt candidates fall back
+to a source refresh. A failed refresh, cancellation, or render leaves the prior
+installed bundle and prior valid ledger generation intact.
+
+S3 completed-run reuse first performs a current `ListObjectsV2` inventory.
+Matching object ETags and sizes are conditional freshness evidence: unchanged
+materialization units can be reused without `GetObject`, while added, changed,
+missing, or policy-incompatible objects refresh or invalidate their affected
+units. ETags are not presented as universal content hashes; captured artifact
+SHA-256 checks still protect local byte integrity. DynamoDB has no safe
+completed-scan freshness proof in v0.4, so every selected table reports
+`freshness_unproven` and is scanned again. This is distinct from resuming an
+interrupted scan checkpoint.
+
+Every pull still materializes one complete bundle and installs it atomically.
+Reuse does not create layered or delta bundles, replay-time ledger lookups,
+tombstones, or destructive source-to-local synchronization. Full capture checks
+available disk before bulk transfer and never replaces the previous valid
+bundle after a failure or cancellation.
 
 TTY progress shows the current inventory, capture, finalization, installation,
 and replay phase. For automation, `--progress json` writes NDJSON progress

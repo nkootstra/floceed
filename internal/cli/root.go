@@ -8,6 +8,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
+	"sort"
 	"strings"
 	"time"
 
@@ -186,6 +188,11 @@ func pullCommand(service Service) *cobra.Command {
 		if err != nil {
 			return convert(err)
 		}
+		if format == "text" {
+			if err := writePullReuseSummary(cmd.OutOrStdout(), result); err != nil {
+				return err
+			}
+		}
 		return emit(cmd, "pull", format, result, result.Manifest.Findings)
 	}}
 	project.bind(cmd)
@@ -196,6 +203,31 @@ func pullCommand(service Service) *cobra.Command {
 	cmd.Flags().StringVar(&workDir, "work-dir", "", "capture checkpoint directory (defaults to the user cache)")
 	cmd.Flags().BoolVar(&restart, "restart", false, "discard the matching capture checkpoint and start again")
 	return cmd
+}
+
+func writePullReuseSummary(w io.Writer, result app.PullResult) error {
+	if result.Receipt == nil {
+		return nil
+	}
+	for _, resource := range result.Receipt.Resources {
+		if len(resource.Units) == 0 {
+			continue
+		}
+		counts := map[string]int{"reused": 0, "refreshed": 0, "invalidated": 0}
+		reasons := make([]string, 0, len(resource.Units))
+		for _, unit := range resource.Units {
+			counts[unit.Outcome]++
+			reasons = append(reasons, unit.Reason)
+		}
+		sort.Strings(reasons)
+		reasons = slices.Compact(reasons)
+		if _, err := fmt.Fprintf(w, "capture %s/%s/%s reused=%d refreshed=%d invalidated=%d reasons=%s\n",
+			terminalSafe(resource.Resource.Service), terminalSafe(resource.Resource.Type), terminalSafe(resource.Resource.ID),
+			counts["reused"], counts["refreshed"], counts["invalidated"], terminalSafe(strings.Join(reasons, ","))); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func validateProgress(value string) (string, error) {

@@ -171,10 +171,14 @@ func copyFile(dst, src string) error {
 }
 
 func linkOrCopyFile(dst, src string) error {
+	return linkOrCopyFileWith(dst, src, os.Link)
+}
+
+func linkOrCopyFileWith(dst, src string, link func(string, string) error) error {
 	if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
 		return err
 	}
-	if err := os.Link(src, dst); err == nil {
+	if err := link(src, dst); err == nil {
 		return nil
 	}
 	return copyFile(dst, src)

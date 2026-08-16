@@ -94,7 +94,7 @@ func TestCaptureBoundsConcurrentAdapterCalls(t *testing.T) {
 	service := captureTestApplication(t, adapter)
 	done := make(chan error, 1)
 	go func() {
-		_, _, err := service.capture(context.Background(), captureRequest{Project: captureTestProject("09", "08", "07", "06", "05", "04", "03", "02", "01")})
+		_, err := service.capture(context.Background(), captureRequest{Project: captureTestProject("09", "08", "07", "06", "05", "04", "03", "02", "01")})
 		done <- err
 	}()
 
@@ -137,8 +137,8 @@ func TestCaptureFoldsCompletedWorkInSelectionOrder(t *testing.T) {
 	}
 	done := make(chan result, 1)
 	go func() {
-		plan, snapshots, err := service.capture(context.Background(), captureRequest{Project: captureTestProject("c", "a", "b")})
-		done <- result{plan: plan, snapshots: snapshots, err: err}
+		captured, err := service.capture(context.Background(), captureRequest{Project: captureTestProject("c", "a", "b")})
+		done <- result{plan: captured.Plan, snapshots: captured.Snapshots, err: err}
 	}()
 	for range gates {
 		<-started
@@ -185,8 +185,8 @@ func TestCaptureAggregatesGovernanceAuditDeterministicallyAfterConcurrentCapture
 		t.Fatal(err)
 	}
 	go func() {
-		plan, _, _ := service.capture(context.Background(), captureRequest{Project: project, Governance: policy})
-		done <- plan
+		captured, _ := service.capture(context.Background(), captureRequest{Project: project, Governance: policy})
+		done <- captured.Plan
 	}()
 	close(gates["b"])
 	close(gates["a"])
@@ -210,7 +210,7 @@ func TestCaptureReturnsLowestSelectionFailure(t *testing.T) {
 	service := captureTestApplication(t, adapter)
 	done := make(chan error, 1)
 	go func() {
-		_, _, err := service.capture(context.Background(), captureRequest{Project: captureTestProject("b", "a")})
+		_, err := service.capture(context.Background(), captureRequest{Project: captureTestProject("b", "a")})
 		done <- err
 	}()
 	<-started
