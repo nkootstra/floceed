@@ -53,10 +53,10 @@ func TestApplicationBackendPlanRejectsInvalidCohortBeforePlanning(t *testing.T) 
 	}
 }
 
-func (f *fakePuller) PullWithOptions(_ context.Context, _ config.Project, _ string, _ string, _ string, options app.PullOptions) (model.Manifest, error) {
+func (f *fakePuller) PullWithOptions(_ context.Context, _ config.Project, _ string, _ string, _ string, options app.PullOptions) (app.PullResult, error) {
 	f.called = true
 	f.fixtureProfile = options.FixtureProfile
-	return model.Manifest{SchemaVersion: model.CurrentManifestSchemaVersion}, nil
+	return app.PullResult{Manifest: model.Manifest{SchemaVersion: model.CurrentManifestSchemaVersion}, Baseline: app.BaselinePresent}, nil
 }
 
 func TestApplicationBackendForwardsFixtureProfileToPlanAndPull(t *testing.T) {

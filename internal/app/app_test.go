@@ -449,10 +449,14 @@ func TestPullWritesDeterministicBundleWithoutDataArtifacts(t *testing.T) {
 		return nil
 	}
 
-	manifest, err := service.Pull(context.Background(), p, projectDir, "dev", "")
+	result, err := service.Pull(context.Background(), p, projectDir, "dev", "")
 	if err != nil {
 		t.Fatal(err)
 	}
+	if result.Baseline != BaselineAbsent || result.Receipt != nil {
+		t.Fatalf("first pull baseline = %q, receipt = %#v", result.Baseline, result.Receipt)
+	}
+	manifest := result.Manifest
 	if captureAdapter.captures != 1 {
 		t.Fatalf("captures = %d, want 1", captureAdapter.captures)
 	}
@@ -482,6 +486,135 @@ func TestPullWritesDeterministicBundleWithoutDataArtifacts(t *testing.T) {
 	}
 	if matches, err := filepath.Glob(filepath.Join(target, "bundle", "data", "*")); err != nil || len(matches) != 0 {
 		t.Fatalf("data artifacts = %v, error = %v", matches, err)
+	}
+}
+
+func TestPullReturnsReceiptWhenReplacingEquivalentBundle(t *testing.T) {
+	projectDir := t.TempDir()
+	p := testProject()
+	service := New("test")
+	service.Factory = &factory{adapter: &adapter{}}
+	service.ComposeValidator = func(context.Context, string) error { return nil }
+
+	first, err := service.Pull(context.Background(), p, projectDir, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := service.Pull(context.Background(), p, projectDir, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Baseline != BaselineAbsent || second.Baseline != BaselinePresent || second.Receipt == nil {
+		t.Fatalf("pull results = first %#v, second %#v", first, second)
+	}
+	if second.Receipt.Counts.Changed != 0 || second.Receipt.Counts.Added != 0 || second.Receipt.Counts.Removed != 0 {
+		t.Fatalf("equivalent receipt = %#v", second.Receipt)
+	}
+}
+
+func TestPullRejectsInvalidBaselineBeforeOpeningSource(t *testing.T) {
+	projectDir := t.TempDir()
+	p := testProject()
+	target := filepath.Join(projectDir, p.Output.Directory)
+	if err := os.MkdirAll(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(target, "corrupt"), []byte("secret-canary"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f := &factory{adapter: &adapter{}}
+	service := New("test")
+	service.Factory = f
+
+	_, err := service.Pull(context.Background(), p, projectDir, "", "")
+	requireAppError(t, err, ErrorFilesystem, "BUNDLE_INTEGRITY_INVALID")
+	if f.calls != 0 {
+		t.Fatalf("source opened %d times for invalid baseline", f.calls)
+	}
+	contents, readErr := os.ReadFile(filepath.Join(target, "corrupt"))
+	if readErr != nil || string(contents) != "secret-canary" {
+		t.Fatalf("invalid baseline changed: %q, %v", contents, readErr)
+	}
+}
+
+func TestPullReturnsChangedReceiptAfterSuccessfulReplacement(t *testing.T) {
+	projectDir := t.TempDir()
+	p := testProject()
+	service := New("test")
+	service.Factory = &factory{adapter: &adapter{}}
+	service.ComposeValidator = func(context.Context, string) error { return nil }
+	if _, err := service.Pull(context.Background(), p, projectDir, "", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := service.Pull(context.Background(), p, projectDir, "", "us-east-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Baseline != BaselinePresent || result.Receipt == nil || result.Receipt.Counts.Changed != 1 {
+		t.Fatalf("changed pull result = %#v", result)
+	}
+	serialized, err := json.Marshal(result.Receipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"secret-canary", `"structure":{`, "replacement-value", "governance-salt"} {
+		if bytes.Contains(serialized, []byte(forbidden)) {
+			t.Fatalf("pull receipt disclosed %q: %s", forbidden, serialized)
+		}
+	}
+}
+
+func TestPullRenderFailurePreservesInstalledBundleAndReturnsNoResult(t *testing.T) {
+	projectDir := t.TempDir()
+	p := testProject()
+	service := New("test")
+	service.Factory = &factory{adapter: &adapter{}}
+	service.ComposeValidator = func(context.Context, string) error { return nil }
+	first, err := service.Pull(context.Background(), p, projectDir, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(projectDir, p.Output.Directory)
+	before, err := bundle.LoadGenerated(context.Background(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.ComposeValidator = func(context.Context, string) error { return errors.New("render rejected") }
+
+	failed, err := service.Pull(context.Background(), p, projectDir, "", "us-east-1")
+	if err == nil {
+		t.Fatal("Pull() succeeded despite render failure")
+	}
+	if !reflect.DeepEqual(failed, PullResult{}) {
+		t.Fatalf("failed pull returned success data: %#v", failed)
+	}
+	after, loadErr := bundle.LoadGenerated(context.Background(), root)
+	if loadErr != nil {
+		t.Fatalf("prior bundle unreadable after failure: %v", loadErr)
+	}
+	if !equalJSON(t, before.Manifest, after.Manifest) || !equalJSON(t, first.Manifest, after.Manifest) {
+		t.Fatal("failed replacement changed installed manifest")
+	}
+}
+
+func TestPullCanceledBeforeCaptureReturnsNoResult(t *testing.T) {
+	p := testProject()
+	f := &factory{adapter: &adapter{}}
+	service := New("test")
+	service.Factory = f
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	result, err := service.Pull(ctx, p, t.TempDir(), "", "")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Pull() error = %v, want context canceled", err)
+	}
+	if !reflect.DeepEqual(result, PullResult{}) {
+		t.Fatalf("canceled pull returned success data: %#v", result)
+	}
+	if f.calls != 0 {
+		t.Fatalf("source opened %d times after cancellation", f.calls)
 	}
 }
 
@@ -519,10 +652,11 @@ func TestRenderRebuildsExistingLocalBundle(t *testing.T) {
 		validated++
 		return nil
 	}
-	want, err := service.Pull(context.Background(), p, projectDir, "", "")
+	pull, err := service.Pull(context.Background(), p, projectDir, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
+	want := pull.Manifest
 	got, err := service.Render(context.Background(), p, projectDir)
 	if err != nil {
 		t.Fatal(err)

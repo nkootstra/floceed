@@ -21,7 +21,7 @@ import (
 type Service interface {
 	Scan(context.Context, app.ScanRequest) (app.ScanResult, error)
 	PlanWithOptions(context.Context, config.Project, app.PlanOptions) (app.Plan, error)
-	PullWithOptions(context.Context, config.Project, string, string, string, app.PullOptions) (model.Manifest, error)
+	PullWithOptions(context.Context, config.Project, string, string, string, app.PullOptions) (app.PullResult, error)
 	Render(context.Context, config.Project, string) (model.Manifest, error)
 	Doctor(context.Context, config.Project, string, string, string) (app.DoctorResult, error)
 	Up(context.Context, config.Project, string, time.Duration) error
@@ -184,7 +184,7 @@ func pullCommand(service Service) *cobra.Command {
 		if err != nil {
 			return convert(err)
 		}
-		return emit(cmd, "pull", format, result, result.Findings)
+		return emit(cmd, "pull", format, result, result.Manifest.Findings)
 	}}
 	project.bind(cmd)
 	source.bind(cmd)

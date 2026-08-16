@@ -39,7 +39,7 @@ type application interface {
 	Identity(context.Context, string, string) (awsconfig.Identity, error)
 	Scan(context.Context, app.ScanRequest) (app.ScanResult, error)
 	PlanWithOptions(context.Context, config.Project, app.PlanOptions) (app.Plan, error)
-	PullWithOptions(context.Context, config.Project, string, string, string, app.PullOptions) (model.Manifest, error)
+	PullWithOptions(context.Context, config.Project, string, string, string, app.PullOptions) (app.PullResult, error)
 }
 
 // ApplicationBackend adapts *app.Application to the TUI Backend interface.
@@ -105,7 +105,11 @@ func (b ApplicationBackend) SaveAndPull(ctx context.Context, req ProjectRequest)
 	if err := os.Rename(tmpName, abs); err != nil {
 		return model.Manifest{}, err
 	}
-	return b.App.PullWithOptions(ctx, req.Project, dir, req.Project.Source.Profile, req.Project.Source.Region, app.PullOptions{Progress: req.Progress, FixtureProfile: req.FixtureProfile})
+	result, err := b.App.PullWithOptions(ctx, req.Project, dir, req.Project.Source.Profile, req.Project.Source.Region, app.PullOptions{Progress: req.Progress, FixtureProfile: req.FixtureProfile})
+	if err != nil {
+		return model.Manifest{}, err
+	}
+	return result.Manifest, nil
 }
 
 // writeAndSync applies restrictive permissions, writes the payload, and

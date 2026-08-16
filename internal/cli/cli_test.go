@@ -60,17 +60,17 @@ func (f *fakeService) PlanWithOptions(_ context.Context, _ config.Project, optio
 	return app.Plan{}, nil
 }
 
-func (f *fakeService) PullWithOptions(_ context.Context, _ config.Project, _ string, _ string, _ string, options app.PullOptions) (model.Manifest, error) {
+func (f *fakeService) PullWithOptions(_ context.Context, _ config.Project, _ string, _ string, _ string, options app.PullOptions) (app.PullResult, error) {
 	f.pulled = true
 	f.fixtureProfile = options.FixtureProfile
-	return model.Manifest{SchemaVersion: model.CurrentManifestSchemaVersion}, nil
+	return app.PullResult{Manifest: model.Manifest{SchemaVersion: model.CurrentManifestSchemaVersion}, Baseline: app.BaselineAbsent}, nil
 }
 
 type progressService struct{ fakeService }
 
-func (f *progressService) PullWithOptions(_ context.Context, _ config.Project, _ string, _ string, _ string, options app.PullOptions) (model.Manifest, error) {
+func (f *progressService) PullWithOptions(_ context.Context, _ config.Project, _ string, _ string, _ string, options app.PullOptions) (app.PullResult, error) {
 	options.Progress(model.ProgressEvent{Operation: "pull", Phase: "capture", Service: "dynamodb", Resource: "orders", CompletedRecords: 5, TotalRecords: 10, TotalPrecision: "estimated"})
-	return model.Manifest{SchemaVersion: model.CurrentManifestSchemaVersion}, nil
+	return app.PullResult{Manifest: model.Manifest{SchemaVersion: model.CurrentManifestSchemaVersion}, Baseline: app.BaselineAbsent}, nil
 }
 
 func TestPullJSONProgressUsesStderrWithoutCorruptingFinalEnvelope(t *testing.T) {
@@ -84,6 +84,16 @@ func TestPullJSONProgressUsesStderrWithoutCorruptingFinalEnvelope(t *testing.T) 
 	var envelope Envelope
 	if err := json.Unmarshal(stdout.Bytes(), &envelope); err != nil {
 		t.Fatalf("stdout is not one JSON envelope: %q: %v", stdout.String(), err)
+	}
+	if envelope.Command != "pull" || envelope.Status != StatusSuccess {
+		t.Fatalf("pull envelope = %#v", envelope)
+	}
+	payload, ok := envelope.Data.(map[string]any)
+	if !ok || payload["baseline"] != string(app.BaselineAbsent) || payload["manifest"] == nil {
+		t.Fatalf("pull payload = %#v", envelope.Data)
+	}
+	if strings.Contains(stdout.String(), "secret-canary") {
+		t.Fatalf("pull output disclosed privacy canary: %s", stdout.String())
 	}
 	var event model.ProgressEvent
 	if err := json.Unmarshal(stderr.Bytes(), &event); err != nil {
