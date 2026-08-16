@@ -128,6 +128,78 @@ func TestInspectHonorsCanceledContextBeforeExternalCapabilities(t *testing.T) {
 	}
 }
 
+func TestInspectComparisonAcceptsGeneratedDirectoryAndProjectFile(t *testing.T) {
+	currentDir := t.TempDir()
+	currentProject := config.NewProject()
+	currentProject.Source.Region = "eu-west-1"
+	currentManifest := comparableManifest(t, "current")
+	writeInspectableBundle(t, filepath.Join(currentDir, currentProject.Output.Directory), currentManifest)
+
+	baselineDir := t.TempDir()
+	baselineRoot := filepath.Join(baselineDir, "generated")
+	baselineManifest := comparableManifest(t, "baseline")
+	writeInspectableBundle(t, baselineRoot, baselineManifest)
+	projectPath := filepath.Join(baselineDir, "floceed.yaml")
+	projectYAML := "schema_version: 1\nsource:\n  region: eu-west-1\noutput:\n  directory: generated\n"
+	if err := os.WriteFile(projectPath, []byte(projectYAML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	service := New("test")
+	service.Factory = panicSourceFactory{}
+	service.localRuntime = panicInspectRuntime{}
+	for name, comparePath := range map[string]string{"generated directory": baselineRoot, "project file": projectPath} {
+		t.Run(name, func(t *testing.T) {
+			got, err := service.InspectWithOptions(context.Background(), currentProject, currentDir, InspectOptions{ComparePath: comparePath})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Receipt == nil || got.Receipt.Baseline == "" || got.Receipt.Current != got.BundleIdentity {
+				t.Fatalf("comparison inspection = %#v", got)
+			}
+			if got.Receipt.Counts.Changed != 1 || got.Receipt.Resources[0].Categories[0] != "structure" {
+				t.Fatalf("receipt = %#v", got.Receipt)
+			}
+		})
+	}
+}
+
+func TestInspectComparisonRejectsInvalidTargetWithoutPartialResult(t *testing.T) {
+	currentDir := t.TempDir()
+	project := config.NewProject()
+	project.Source.Region = "eu-west-1"
+	writeInspectableBundle(t, filepath.Join(currentDir, project.Output.Directory), comparableManifest(t, "current"))
+
+	tests := []struct{ name, path, code string }{
+		{"missing", filepath.Join(t.TempDir(), "missing"), "COMPARE_TARGET_NOT_FOUND"},
+		{"ambiguous file", filepath.Join(t.TempDir(), "target.txt"), "COMPARE_TARGET_AMBIGUOUS"},
+	}
+	if err := os.WriteFile(tests[1].path, []byte("not a project"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := New("test").InspectWithOptions(context.Background(), project, currentDir, InspectOptions{ComparePath: test.path})
+			var appErr *Error
+			if !errors.As(err, &appErr) || appErr.Code != test.code {
+				t.Fatalf("error = %#v, want %s", err, test.code)
+			}
+			if got.Valid || got.Receipt != nil || got.BundleIdentity != "" {
+				t.Fatalf("partial comparison result = %#v", got)
+			}
+		})
+	}
+}
+
+func comparableManifest(t *testing.T, marker string) model.Manifest {
+	t.Helper()
+	snapshot, err := model.NewSnapshot(model.ResourceRef{Service: "s3", Type: "bucket", ID: "assets"}, "s3", map[string]any{"name": "assets", "region": "eu-west-1", "marker": marker})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return model.Manifest{SchemaVersion: 3, Source: model.SourceMetadata{AccountID: "123456789012", Region: "eu-west-1"}, Selected: []model.ResourceRef{snapshot.Resource}, Snapshots: []model.Snapshot{*snapshot}, Operations: []model.Operation{{ID: "create", Stage: model.StageBase, Service: "s3", ResourceID: "assets", Action: "create"}}}
+}
+
 func writeInspectableBundle(t *testing.T, root string, manifest model.Manifest) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Join(root, "bundle"), 0o700); err != nil {

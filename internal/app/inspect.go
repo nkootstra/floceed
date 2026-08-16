@@ -18,6 +18,17 @@ import (
 // Inspect validates and summarizes the installed artifact without consulting
 // AWS, Docker, or any runtime endpoint.
 func (a *Application) Inspect(ctx context.Context, project config.Project, projectDir string) (inspection.Inspection, error) {
+	return a.InspectWithOptions(ctx, project, projectDir, InspectOptions{})
+}
+
+// InspectOptions controls optional, offline inspection enrichments.
+type InspectOptions struct {
+	ComparePath string
+}
+
+// InspectWithOptions validates both comparison sides independently and only
+// returns an inspection after every requested artifact has proved valid.
+func (a *Application) InspectWithOptions(ctx context.Context, project config.Project, projectDir string, options InspectOptions) (inspection.Inspection, error) {
 	if err := ctx.Err(); err != nil {
 		return inspection.Inspection{}, inspectError(err)
 	}
@@ -25,16 +36,66 @@ func (a *Application) Inspect(ctx context.Context, project config.Project, proje
 		return inspection.Inspection{}, &Error{Kind: ErrorPlan, Code: "PROJECT_INVALID", Message: err.Error(), Remediation: "Fix the project configuration and retry inspection.", Err: err}
 	}
 	root := filepath.Join(projectDir, filepath.FromSlash(project.Output.Directory))
-	generated, err := bundle.LoadGenerated(ctx, root)
+	result, projection, err := inspectGenerated(ctx, root)
 	if err != nil {
 		return inspection.Inspection{}, inspectError(err)
+	}
+	if options.ComparePath != "" {
+		baseline, err := loadComparisonProjection(ctx, options.ComparePath)
+		if err != nil {
+			return inspection.Inspection{}, err
+		}
+		receipt := inspection.Compare(baseline, projection)
+		result.Receipt = &receipt
+	}
+	return result, nil
+}
+
+func inspectGenerated(ctx context.Context, root string) (inspection.Inspection, inspection.Projection, error) {
+	generated, err := bundle.LoadGenerated(ctx, root)
+	if err != nil {
+		return inspection.Inspection{}, inspection.Projection{}, err
 	}
 	projection, err := inspection.ProjectManifest(generated.Manifest)
 	if err != nil {
-		return inspection.Inspection{}, inspectError(err)
+		return inspection.Inspection{}, inspection.Projection{}, err
 	}
-	result := summarizeInspection(generated, projection)
-	return result, nil
+	return summarizeInspection(generated, projection), projection, nil
+}
+
+func loadComparisonProjection(ctx context.Context, target string) (inspection.Projection, error) {
+	info, err := os.Stat(target)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return inspection.Projection{}, &Error{Kind: ErrorFilesystem, Code: "COMPARE_TARGET_NOT_FOUND", Message: "comparison target does not exist", Remediation: "Provide a generated bundle directory or a floceed project YAML file.", Err: err}
+		}
+		return inspection.Projection{}, inspectError(err)
+	}
+	root := target
+	if !info.IsDir() {
+		ext := strings.ToLower(filepath.Ext(target))
+		if !info.Mode().IsRegular() || (ext != ".yaml" && ext != ".yml") {
+			return inspection.Projection{}, &Error{Kind: ErrorUsage, Code: "COMPARE_TARGET_AMBIGUOUS", Message: "comparison target is neither a generated directory nor a project YAML file", Remediation: "Pass the generated directory or its .yaml/.yml project file."}
+		}
+		file, openErr := os.Open(target)
+		if openErr != nil {
+			return inspection.Projection{}, inspectError(openErr)
+		}
+		project, decodeErr := config.Decode(file)
+		closeErr := file.Close()
+		if decodeErr != nil {
+			return inspection.Projection{}, &Error{Kind: ErrorPlan, Code: "COMPARE_PROJECT_INVALID", Message: decodeErr.Error(), Remediation: "Fix the comparison project configuration and retry.", Err: decodeErr}
+		}
+		if closeErr != nil {
+			return inspection.Projection{}, inspectError(closeErr)
+		}
+		root = filepath.Join(filepath.Dir(target), filepath.FromSlash(project.Output.Directory))
+	}
+	_, projection, err := inspectGenerated(ctx, root)
+	if err != nil {
+		return inspection.Projection{}, inspectError(err)
+	}
+	return projection, nil
 }
 
 func summarizeInspection(generated bundle.Generated, projection inspection.Projection) inspection.Inspection {
