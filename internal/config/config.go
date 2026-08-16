@@ -15,6 +15,8 @@ const CurrentSchemaVersion = 1
 const DefaultFlociVersion = "1.6.0"
 const DefaultPort = 4566
 const DefaultHookTimeoutSeconds = 300
+const DefaultCaptureResourceWorkers = 2
+const DefaultReplayWorkers = 4
 
 const (
 	DefaultS3MaxObjects     = 100
@@ -25,6 +27,12 @@ const (
 )
 
 type OverwritePolicy string
+type DataMode string
+
+const (
+	DataModeBounded DataMode = "bounded"
+	DataModeFull    DataMode = "full"
+)
 
 const (
 	OverwriteIfDifferent OverwritePolicy = "if-different"
@@ -49,6 +57,7 @@ type Target struct {
 	FlociVersion       string      `yaml:"floci_version,omitempty" json:"floci_version"`
 	Port               int         `yaml:"port,omitempty" json:"port"`
 	HookTimeoutSeconds int         `yaml:"hook_timeout_seconds,omitempty" json:"hook_timeout_seconds"`
+	ReplayWorkers      int         `yaml:"replay_workers,omitempty" json:"replay_workers"`
 	Persistence        Persistence `yaml:"persistence,omitempty" json:"persistence"`
 }
 type Persistence struct {
@@ -58,6 +67,7 @@ type Persistence struct {
 }
 type Capture struct {
 	AllowPartialData bool `yaml:"allow_partial_data,omitempty" json:"allow_partial_data"`
+	ResourceWorkers  int  `yaml:"resource_workers,omitempty" json:"resource_workers"`
 }
 type Output struct {
 	Directory string `yaml:"directory,omitempty" json:"directory"`
@@ -72,6 +82,7 @@ type S3Resource struct {
 }
 type S3DataPolicy struct {
 	Enabled        bool            `yaml:"enabled" json:"enabled"`
+	Mode           DataMode        `yaml:"mode,omitempty" json:"mode"`
 	Prefixes       []string        `yaml:"prefixes,omitempty" json:"prefixes,omitempty"`
 	MaxObjects     int             `yaml:"max_objects,omitempty" json:"max_objects,omitempty"`
 	MaxObjectBytes int64           `yaml:"max_object_bytes,omitempty" json:"max_object_bytes,omitempty"`
@@ -84,15 +95,17 @@ type DynamoDBResource struct {
 	Data                *DynamoDBDataPolicy `yaml:"data,omitempty" json:"data,omitempty"`
 }
 type DynamoDBDataPolicy struct {
-	Enabled  bool  `yaml:"enabled" json:"enabled"`
-	MaxItems int   `yaml:"max_items,omitempty" json:"max_items,omitempty"`
-	MaxPages int   `yaml:"max_pages,omitempty" json:"max_pages,omitempty"`
-	Gzip     *bool `yaml:"gzip,omitempty" json:"gzip,omitempty"`
+	Enabled  bool     `yaml:"enabled" json:"enabled"`
+	Mode     DataMode `yaml:"mode,omitempty" json:"mode"`
+	MaxItems int      `yaml:"max_items,omitempty" json:"max_items,omitempty"`
+	MaxPages int      `yaml:"max_pages,omitempty" json:"max_pages,omitempty"`
+	Gzip     *bool    `yaml:"gzip,omitempty" json:"gzip,omitempty"`
 }
 
 func NewS3DataPolicy() *S3DataPolicy {
 	return &S3DataPolicy{
 		Enabled:        true,
+		Mode:           DataModeBounded,
 		MaxObjects:     DefaultS3MaxObjects,
 		MaxObjectBytes: DefaultS3MaxObjectBytes,
 		MaxTotalBytes:  DefaultS3MaxTotalBytes,
@@ -104,6 +117,7 @@ func NewDynamoDBDataPolicy() *DynamoDBDataPolicy {
 	gzipEnabled := true
 	return &DynamoDBDataPolicy{
 		Enabled:  true,
+		Mode:     DataModeBounded,
 		MaxItems: DefaultDynamoDBMaxItems,
 		MaxPages: DefaultDynamoDBMaxPages,
 		Gzip:     &gzipEnabled,
@@ -133,8 +147,10 @@ func NewProject() Project {
 			FlociVersion:       DefaultFlociVersion,
 			Port:               DefaultPort,
 			HookTimeoutSeconds: DefaultHookTimeoutSeconds,
+			ReplayWorkers:      DefaultReplayWorkers,
 		},
-		Output: Output{Directory: ".floceed"},
+		Capture: Capture{ResourceWorkers: DefaultCaptureResourceWorkers},
+		Output:  Output{Directory: ".floceed"},
 	}
 }
 
@@ -148,12 +164,26 @@ func (p *Project) applyDefaults() {
 	if p.Target.HookTimeoutSeconds == 0 {
 		p.Target.HookTimeoutSeconds = DefaultHookTimeoutSeconds
 	}
+	if p.Target.ReplayWorkers == 0 {
+		p.Target.ReplayWorkers = DefaultReplayWorkers
+	}
+	if p.Capture.ResourceWorkers == 0 {
+		p.Capture.ResourceWorkers = DefaultCaptureResourceWorkers
+	}
 	if p.Output.Directory == "" {
 		p.Output.Directory = ".floceed"
 	}
 	for i := range p.Resources.S3 {
+		if p.Resources.S3[i].Data != nil && p.Resources.S3[i].Data.Mode == "" {
+			p.Resources.S3[i].Data.Mode = DataModeBounded
+		}
 		if p.Resources.S3[i].Data != nil && p.Resources.S3[i].Data.Overwrite == "" {
 			p.Resources.S3[i].Data.Overwrite = OverwriteIfDifferent
+		}
+	}
+	for i := range p.Resources.DynamoDB {
+		if p.Resources.DynamoDB[i].Data != nil && p.Resources.DynamoDB[i].Data.Mode == "" {
+			p.Resources.DynamoDB[i].Data.Mode = DataModeBounded
 		}
 	}
 }
@@ -173,6 +203,12 @@ func (p Project) Validate() error {
 	if p.Target.Port < 0 || p.Target.Port > 65535 {
 		return fmt.Errorf("target.port is invalid: %w", ErrValidation)
 	}
+	if p.Target.ReplayWorkers < 0 || p.Target.ReplayWorkers > 32 {
+		return fmt.Errorf("target.replay_workers must be between 0 and 32 (0 uses the default of %d): %w", DefaultReplayWorkers, ErrValidation)
+	}
+	if p.Capture.ResourceWorkers < 0 || p.Capture.ResourceWorkers > 8 {
+		return fmt.Errorf("capture.resource_workers must be between 0 and 8 (0 uses the default of %d): %w", DefaultCaptureResourceWorkers, ErrValidation)
+	}
 	if p.Output.Directory != "" {
 		clean := filepath.ToSlash(filepath.Clean(p.Output.Directory))
 		if filepath.IsAbs(p.Output.Directory) || clean == "." || clean == ".." || strings.HasPrefix(clean, "../") || strings.Contains(p.Output.Directory, `\`) {
@@ -188,8 +224,18 @@ func (p Project) Validate() error {
 	}
 	for _, r := range p.Resources.S3 {
 		if d := r.Data; d != nil && d.Enabled {
-			if d.MaxObjects <= 0 || d.MaxObjectBytes <= 0 || d.MaxTotalBytes <= 0 {
+			mode := d.Mode
+			if mode == "" {
+				mode = DataModeBounded
+			}
+			if mode != DataModeBounded && mode != DataModeFull {
+				return fmt.Errorf("S3 %q has invalid data mode %q: %w", r.Name, d.Mode, ErrValidation)
+			}
+			if mode == DataModeBounded && (d.MaxObjects <= 0 || d.MaxObjectBytes <= 0 || d.MaxTotalBytes <= 0) {
 				return fmt.Errorf("S3 %q data requires positive object and byte limits: %w", r.Name, ErrValidation)
+			}
+			if mode == DataModeFull && (d.MaxObjects != 0 || d.MaxObjectBytes != 0 || d.MaxTotalBytes != 0) {
+				return fmt.Errorf("S3 %q full data mode cannot set bounded limits: %w", r.Name, ErrValidation)
 			}
 			if !d.Overwrite.valid() {
 				return fmt.Errorf("S3 %q has invalid overwrite policy: %w", r.Name, ErrValidation)
@@ -204,11 +250,40 @@ func (p Project) Validate() error {
 		return err
 	}
 	for _, r := range p.Resources.DynamoDB {
-		if d := r.Data; d != nil && d.Enabled && (d.MaxItems <= 0 || d.MaxPages <= 0) {
-			return fmt.Errorf("DynamoDB %q data requires positive item and page limits: %w", r.Name, ErrValidation)
+		if d := r.Data; d != nil && d.Enabled {
+			mode := d.Mode
+			if mode == "" {
+				mode = DataModeBounded
+			}
+			if mode != DataModeBounded && mode != DataModeFull {
+				return fmt.Errorf("DynamoDB %q has invalid data mode %q: %w", r.Name, d.Mode, ErrValidation)
+			}
+			if mode == DataModeBounded && (d.MaxItems <= 0 || d.MaxPages <= 0) {
+				return fmt.Errorf("DynamoDB %q data requires positive item and page limits: %w", r.Name, ErrValidation)
+			}
+			if mode == DataModeFull && (d.MaxItems != 0 || d.MaxPages != 0) {
+				return fmt.Errorf("DynamoDB %q full data mode cannot set bounded limits: %w", r.Name, ErrValidation)
+			}
 		}
 	}
+	if hasFullData(p) && p.Target.HookTimeoutSeconds <= DefaultHookTimeoutSeconds {
+		return fmt.Errorf("full data mode requires target.hook_timeout_seconds greater than %d: %w", DefaultHookTimeoutSeconds, ErrValidation)
+	}
 	return nil
+}
+
+func hasFullData(p Project) bool {
+	for _, r := range p.Resources.S3 {
+		if r.Data != nil && r.Data.Enabled && r.Data.Mode == DataModeFull {
+			return true
+		}
+	}
+	for _, r := range p.Resources.DynamoDB {
+		if r.Data != nil && r.Data.Enabled && r.Data.Mode == DataModeFull {
+			return true
+		}
+	}
+	return false
 }
 
 func (p OverwritePolicy) valid() bool {

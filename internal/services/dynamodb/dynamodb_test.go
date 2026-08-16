@@ -4,8 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -14,6 +18,91 @@ import (
 	"github.com/nkootstra/floceed/internal/config"
 	"github.com/nkootstra/floceed/internal/model"
 )
+
+type resumeClient struct {
+	failOnce   bool
+	firstCalls int
+}
+
+func (f *resumeClient) ListTables(context.Context, *dynamodb.ListTablesInput, ...func(*dynamodb.Options)) (*dynamodb.ListTablesOutput, error) {
+	return nil, nil
+}
+func (f *resumeClient) DescribeTable(context.Context, *dynamodb.DescribeTableInput, ...func(*dynamodb.Options)) (*dynamodb.DescribeTableOutput, error) {
+	return nil, nil
+}
+func (f *resumeClient) DescribeTimeToLive(context.Context, *dynamodb.DescribeTimeToLiveInput, ...func(*dynamodb.Options)) (*dynamodb.DescribeTimeToLiveOutput, error) {
+	return nil, nil
+}
+func (f *resumeClient) ListTagsOfResource(context.Context, *dynamodb.ListTagsOfResourceInput, ...func(*dynamodb.Options)) (*dynamodb.ListTagsOfResourceOutput, error) {
+	return nil, nil
+}
+func (f *resumeClient) Scan(_ context.Context, in *dynamodb.ScanInput, _ ...func(*dynamodb.Options)) (*dynamodb.ScanOutput, error) {
+	if len(in.ExclusiveStartKey) == 0 {
+		f.firstCalls++
+		return &dynamodb.ScanOutput{Items: []map[string]types.AttributeValue{{"pk": &types.AttributeValueMemberS{Value: "b"}}}, LastEvaluatedKey: map[string]types.AttributeValue{"pk": &types.AttributeValueMemberS{Value: "b"}}}, nil
+	}
+	if f.failOnce {
+		f.failOnce = false
+		return nil, context.Canceled
+	}
+	return &dynamodb.ScanOutput{Items: []map[string]types.AttributeValue{{"pk": &types.AttributeValueMemberS{Value: "a"}}}}, nil
+}
+
+func TestFullCaptureResumesWithoutRescanningDurablePages(t *testing.T) {
+	root := t.TempDir()
+	client := &resumeClient{failOnce: true}
+	adapter := New(client)
+	opts := model.CaptureOptions{Mode: "full", ArtifactDirectory: filepath.Join(root, "artifacts"), CheckpointDirectory: filepath.Join(root, "checkpoint")}
+	if _, err := adapter.captureData(context.Background(), "orders", opts, directoryWriter{root: opts.ArtifactDirectory}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("first capture error = %v", err)
+	}
+	result, err := adapter.captureData(context.Background(), "orders", opts, directoryWriter{root: opts.ArtifactDirectory})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.firstCalls != 1 {
+		t.Fatalf("durable first page was scanned %d times", client.firstCalls)
+	}
+	if !result.Dataset.Resumed || result.Dataset.Records != 2 || len(result.Dataset.Chunks) != 1 {
+		t.Fatalf("dataset = %#v", result.Dataset)
+	}
+	b, err := os.ReadFile(filepath.Join(root, "artifacts", filepath.FromSlash(result.Dataset.Chunks[0].Data.Path)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(b) != "{\"pk\":{\"S\":\"a\"}}\n{\"pk\":{\"S\":\"b\"}}\n" {
+		t.Fatalf("resumed data = %q", b)
+	}
+}
+
+func TestFullCaptureRejectsCorruptCheckpointRun(t *testing.T) {
+	root := t.TempDir()
+	client := &resumeClient{failOnce: true}
+	adapter := New(client)
+	opts := model.CaptureOptions{Mode: "full", ArtifactDirectory: filepath.Join(root, "artifacts"), CheckpointDirectory: filepath.Join(root, "checkpoint")}
+	_, _ = adapter.captureData(context.Background(), "orders", opts, directoryWriter{root: opts.ArtifactDirectory})
+	run := filepath.Join(opts.CheckpointDirectory, "page-000000001.run")
+	if err := os.WriteFile(run, []byte("changed\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := adapter.captureData(context.Background(), "orders", opts, directoryWriter{root: opts.ArtifactDirectory}); err == nil || !strings.Contains(err.Error(), "corrupt DynamoDB capture checkpoint") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestFullCaptureRejectsChangedMode(t *testing.T) {
+	root := t.TempDir()
+	client := &resumeClient{failOnce: true}
+	adapter := New(client)
+	fullOpts := model.CaptureOptions{Mode: "full", ArtifactDirectory: filepath.Join(root, "artifacts"), CheckpointDirectory: filepath.Join(root, "checkpoint")}
+	if _, err := adapter.captureData(context.Background(), "orders", fullOpts, directoryWriter{root: fullOpts.ArtifactDirectory}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("first capture error = %v", err)
+	}
+	boundedOpts := model.CaptureOptions{Mode: "bounded", Limits: model.DataLimits{MaxItems: 1, MaxPages: 1}, ArtifactDirectory: fullOpts.ArtifactDirectory, CheckpointDirectory: fullOpts.CheckpointDirectory}
+	if _, err := adapter.captureData(context.Background(), "orders", boundedOpts, directoryWriter{root: boundedOpts.ArtifactDirectory}); err == nil || !strings.Contains(err.Error(), "incompatible DynamoDB capture checkpoint") {
+		t.Fatalf("changed-options error = %v", err)
+	}
+}
 
 func TestPlanOwnsDynamoDBSelectionOptionsAndIAM(t *testing.T) {
 	gzipEnabled := false
@@ -47,6 +136,12 @@ type fakeClient struct {
 type memorySink struct {
 	path string
 	data []byte
+}
+
+type failingSink struct{ err error }
+
+func (s failingSink) WriteArtifact(context.Context, string, func(io.Writer) error) (model.ArtifactRef, error) {
+	return model.ArtifactRef{}, s.err
 }
 
 func (s *memorySink) WriteArtifact(_ context.Context, path string, write func(io.Writer) error) (model.ArtifactRef, error) {
@@ -135,5 +230,35 @@ func TestCaptureDataHonorsItemLimitAndIsDeterministic(t *testing.T) {
 	want := "{\"pk\":{\"S\":\"a\"}}\n{\"pk\":{\"S\":\"z\"}}\n"
 	if string(sink.data) != want {
 		t.Fatalf("got %q want %q", sink.data, want)
+	}
+}
+
+func TestBoundedCaptureResumePreservesTruncationAfterFinalizationFailure(t *testing.T) {
+	root := t.TempDir()
+	f := &fakeClient{scans: []*dynamodb.ScanOutput{{
+		Items:            []map[string]types.AttributeValue{{"pk": &types.AttributeValueMemberS{Value: "a"}}},
+		LastEvaluatedKey: map[string]types.AttributeValue{"pk": &types.AttributeValueMemberS{Value: "a"}},
+	}}}
+	adapter := New(f)
+	opts := model.CaptureOptions{
+		Mode:                "bounded",
+		Limits:              model.DataLimits{MaxItems: 1, MaxPages: 1},
+		ArtifactDirectory:   filepath.Join(root, "artifacts"),
+		CheckpointDirectory: filepath.Join(root, "checkpoint"),
+	}
+	finalizeErr := errors.New("finalization failed")
+	if _, err := adapter.captureData(context.Background(), "orders", opts, failingSink{err: finalizeErr}); !errors.Is(err, finalizeErr) {
+		t.Fatalf("first capture error = %v, want %v", err, finalizeErr)
+	}
+
+	result, err := adapter.captureData(context.Background(), "orders", opts, &memorySink{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Truncated {
+		t.Fatalf("resumed result = %#v, want truncated", result)
+	}
+	if len(f.scans) != 0 {
+		t.Fatalf("resume performed an unexpected scan")
 	}
 }

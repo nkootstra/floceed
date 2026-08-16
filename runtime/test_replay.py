@@ -69,10 +69,10 @@ class ReplayValidationTests(unittest.TestCase):
             replay.validate_bundle()
 
     def test_rejects_unsupported_manifest_schema(self):
-        self.manifest["schema_version"] = 2
+        self.manifest["schema_version"] = 3
         self.write_json("bundle/manifest.json", self.manifest)
 
-        self.assert_rejected("manifest schema 2 is unsupported")
+        self.assert_rejected("manifest schema 3 is unsupported")
 
     def test_rejects_invalid_source_account(self):
         for account_id in ("123", "12345678901x"):
@@ -89,6 +89,17 @@ class ReplayValidationTests(unittest.TestCase):
         manifest = replay.validate_bundle()
 
         self.assertEqual(["s3", "dynamodb"], [item["service"] for item in manifest["snapshots"]])
+
+    def test_accepts_manifest_v2_chunked_dataset(self):
+        snapshot = self.dynamodb_snapshot()
+        snapshot["dataset"] = {"format": "dynamodb-ndjson-gzip-v1", "records": 0, "source_bytes": 0, "consistency": "best_effort", "chunks": []}
+        self.manifest["schema_version"] = 2
+        self.manifest["snapshots"] = [snapshot]
+        self.write_json("bundle/manifest.json", self.manifest)
+
+        manifest = replay.validate_bundle()
+
+        self.assertEqual(2, manifest["schema_version"])
 
     def test_rejects_unsupported_structure_version(self):
         self.manifest["snapshots"] = [self.s3_snapshot()]

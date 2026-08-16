@@ -3,8 +3,11 @@ package app
 import (
 	"cmp"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"slices"
 	"sort"
 	"sync"
@@ -12,6 +15,7 @@ import (
 	"github.com/nkootstra/floceed/internal/catalog"
 	"github.com/nkootstra/floceed/internal/config"
 	"github.com/nkootstra/floceed/internal/model"
+	"github.com/nkootstra/floceed/internal/storage"
 )
 
 const captureConcurrency = 4
@@ -32,11 +36,14 @@ func (a *Application) Plan(ctx context.Context, p config.Project, profile, regio
 }
 
 type captureRequest struct {
-	Project      config.Project
-	Profile      string
-	Region       string
-	ArtifactRoot string
-	IncludeData  bool
+	Project        config.Project
+	Profile        string
+	Region         string
+	ArtifactRoot   string
+	IncludeData    bool
+	CheckpointRoot string
+	Progress       func(model.ProgressEvent)
+	Source         *Source
 }
 
 func (a *Application) capture(ctx context.Context, req captureRequest) (Plan, []model.Snapshot, error) {
@@ -47,14 +54,15 @@ func (a *Application) capture(ctx context.Context, req captureRequest) (Plan, []
 	if region == "" {
 		region = p.Source.Region
 	}
-	source, err := a.Factory.Open(ctx, SourceRequest{
-		Profile:       profile,
-		Region:        region,
-		S3Names:       s3Names(p),
-		DynamoDBNames: ddbNames(p),
-	})
-	if err != nil {
-		return Plan{}, nil, sourceError(err)
+	var source Source
+	if req.Source != nil {
+		source = *req.Source
+	} else {
+		var err error
+		source, err = a.Factory.Open(ctx, SourceRequest{Profile: profile, Region: region, S3Names: s3Names(p), DynamoDBNames: ddbNames(p)})
+		if err != nil {
+			return Plan{}, nil, sourceError(err)
+		}
 	}
 	if p.Source.ExpectedAccountID != "" && p.Source.ExpectedAccountID != source.Identity.AccountID {
 		return Plan{}, nil, &Error{Kind: ErrorSource, Code: "SOURCE_ACCOUNT_MISMATCH", Message: fmt.Sprintf("AWS profile resolved to account %s, expected %s", source.Identity.AccountID, p.Source.ExpectedAccountID)}
@@ -83,6 +91,11 @@ func (a *Application) capture(ctx context.Context, req captureRequest) (Plan, []
 		options.AllowPartialData = p.Capture.AllowPartialData
 		if req.IncludeData {
 			options.ArtifactDirectory = req.ArtifactRoot
+			if req.CheckpointRoot != "" {
+				sum := sha256.Sum256([]byte(selection.Resource.Service + "\x00" + selection.Resource.ID))
+				options.CheckpointDirectory = filepath.Join(req.CheckpointRoot, hex.EncodeToString(sum[:16]))
+			}
+			options.Progress = req.Progress
 		} else {
 			options.IncludeData = false
 		}
@@ -96,7 +109,11 @@ func (a *Application) capture(ctx context.Context, req captureRequest) (Plan, []
 	outcomes := make([]captureOutcome, len(jobs))
 	captureCtx, cancelCaptures := context.WithCancel(ctx)
 	defer cancelCaptures()
-	limit := make(chan struct{}, captureConcurrency)
+	concurrency := p.Capture.ResourceWorkers
+	if concurrency == 0 {
+		concurrency = captureConcurrency
+	}
+	limit := make(chan struct{}, concurrency)
 	var captures sync.WaitGroup
 	for i, job := range jobs {
 		captures.Add(1)
@@ -129,6 +146,10 @@ func (a *Application) capture(ctx context.Context, req captureRequest) (Plan, []
 		}
 	}
 	if captureErr != nil {
+		var diskErr *storage.InsufficientSpaceError
+		if errors.As(captureErr, &diskErr) {
+			return Plan{}, nil, &Error{Kind: ErrorFilesystem, Code: "DISK_SPACE_INSUFFICIENT", Message: diskErr.Error(), Remediation: "Free disk space, choose a larger --work-dir, or reduce the capture scope.", Err: captureErr}
+		}
 		return Plan{}, nil, sourceError(captureErr)
 	}
 
@@ -149,6 +170,14 @@ func (a *Application) capture(ctx context.Context, req captureRequest) (Plan, []
 		for _, art := range snapshot.Data {
 			result.EstimatedBytes += art.Size
 		}
+		if snapshot.Dataset != nil {
+			for _, chunk := range snapshot.Dataset.Chunks {
+				result.EstimatedBytes += chunk.Data.Size
+				if chunk.Index != nil {
+					result.EstimatedBytes += chunk.Index.Size
+				}
+			}
+		}
 		result.Operations = append(result.Operations, operations(snapshot, deps)...)
 		snapshots = append(snapshots, *snapshot)
 	}
@@ -162,7 +191,7 @@ func operations(s *model.Snapshot, deps []model.Dependency) []model.Operation {
 	if len(deps) > 0 {
 		ops = append(ops, model.Operation{ID: "links:" + base, Stage: model.StageLinks, Service: s.Service, ResourceID: s.Resource.ID, Action: "link", DependsOn: []string{"mutable:" + base}})
 	}
-	if len(s.Data) > 0 {
+	if len(s.Data) > 0 || (s.Dataset != nil && len(s.Dataset.Chunks) > 0) {
 		ops = append(ops, model.Operation{ID: "data:" + base, Stage: model.StageData, Service: s.Service, ResourceID: s.Resource.ID, Action: "upsert", DependsOn: []string{"mutable:" + base}})
 	}
 	return ops

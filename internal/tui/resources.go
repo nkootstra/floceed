@@ -31,6 +31,7 @@ func (m *Model) mergeResources(in []model.ResourceSummary) {
 		service, _, _ := strings.Cut(key, "/")
 		if !m.serviceSelected[service] {
 			delete(m.dataEnabled, key)
+			delete(m.dataMode, key)
 		}
 	}
 	m.resources = m.resources[:0]
@@ -79,12 +80,31 @@ func (m Model) Project() config.Project {
 			entry := config.S3Resource{Name: r.Ref.ID}
 			if data {
 				entry.Data = config.NewS3DataPolicy()
+				entry.Data.Mode = m.dataMode[resourceKey(r.Ref)]
+				if entry.Data.Mode == config.DataModeFull {
+					entry.Data.MaxObjects = 0
+					entry.Data.MaxObjectBytes = 0
+					entry.Data.MaxTotalBytes = 0
+					// Floor the replay timeout for full mode, but never downgrade an
+					// explicit larger value already present in the loaded project.
+					if p.Target.HookTimeoutSeconds <= config.DefaultHookTimeoutSeconds {
+						p.Target.HookTimeoutSeconds = 3600
+					}
+				}
 			}
 			p.Resources.S3 = append(p.Resources.S3, entry)
 		case "dynamodb":
 			entry := config.DynamoDBResource{Name: r.Ref.ID}
 			if data {
 				entry.Data = config.NewDynamoDBDataPolicy()
+				entry.Data.Mode = m.dataMode[resourceKey(r.Ref)]
+				if entry.Data.Mode == config.DataModeFull {
+					entry.Data.MaxItems = 0
+					entry.Data.MaxPages = 0
+					if p.Target.HookTimeoutSeconds <= config.DefaultHookTimeoutSeconds {
+						p.Target.HookTimeoutSeconds = 3600
+					}
+				}
 			}
 			p.Resources.DynamoDB = append(p.Resources.DynamoDB, entry)
 		}

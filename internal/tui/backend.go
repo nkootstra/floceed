@@ -21,6 +21,7 @@ type Profile struct {
 type ProjectRequest struct {
 	Project     config.Project
 	ProjectFile string
+	Progress    func(model.ProgressEvent)
 }
 
 type Backend interface {
@@ -99,6 +100,11 @@ func (b ApplicationBackend) SaveAndPull(ctx context.Context, req ProjectRequest)
 	}
 	if err := os.Rename(tmpName, abs); err != nil {
 		return model.Manifest{}, err
+	}
+	if advanced, ok := b.App.(interface {
+		PullWithOptions(context.Context, config.Project, string, string, string, app.PullOptions) (model.Manifest, error)
+	}); ok {
+		return advanced.PullWithOptions(ctx, req.Project, dir, req.Project.Source.Profile, req.Project.Source.Region, app.PullOptions{Progress: req.Progress})
 	}
 	return b.App.Pull(ctx, req.Project, dir, req.Project.Source.Profile, req.Project.Source.Region)
 }

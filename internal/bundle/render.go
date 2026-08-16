@@ -3,6 +3,8 @@ package bundle
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -71,9 +73,7 @@ func renderStage(stage string, project config.Project, manifest model.Manifest, 
 		data []byte
 		mode os.FileMode
 	}{replayruntime.ReplayPython, 0o500}
-	files["init/ready.d/10-base-resources.py"] = wrapper("base")
-	files["init/ready.d/30-resource-links.py"] = wrapper("links")
-	files["init/ready.d/60-seed-data.py"] = wrapper("data")
+	files["init/ready.d/10-replay.py"] = wrapper("all")
 	files[".gitignore"] = struct {
 		data []byte
 		mode os.FileMode
@@ -84,7 +84,7 @@ func renderStage(stage string, project config.Project, manifest model.Manifest, 
 		}
 	}
 	for _, snap := range manifest.Snapshots {
-		for _, artifact := range snap.Data {
+		for _, artifact := range snapshotArtifacts(snap) {
 			if err := ValidateRelativePath(artifact.Path); err != nil {
 				return err
 			}
@@ -94,7 +94,7 @@ func renderStage(stage string, project config.Project, manifest model.Manifest, 
 			if artifactRoot == "" {
 				return fmt.Errorf("artifact root is required for %s", artifact.Path)
 			}
-			if err := copyFile(filepath.Join(stage, filepath.FromSlash(artifact.Path)), filepath.Join(artifactRoot, filepath.FromSlash(artifact.Path))); err != nil {
+			if err := linkOrCopyFile(filepath.Join(stage, filepath.FromSlash(artifact.Path)), filepath.Join(artifactRoot, filepath.FromSlash(artifact.Path))); err != nil {
 				return err
 			}
 			copied, err := SumFile(filepath.Join(stage, filepath.FromSlash(artifact.Path)))
@@ -169,11 +169,39 @@ func copyFile(dst, src string) error {
 	return closeErr
 }
 
+func linkOrCopyFile(dst, src string) error {
+	if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
+		return err
+	}
+	if err := os.Link(src, dst); err == nil {
+		return nil
+	}
+	return copyFile(dst, src)
+}
+
+func snapshotArtifacts(snapshot model.Snapshot) []model.ArtifactRef {
+	out := append([]model.ArtifactRef(nil), snapshot.Data...)
+	if snapshot.Dataset != nil {
+		for _, chunk := range snapshot.Dataset.Chunks {
+			out = append(out, chunk.Data)
+			if chunk.Index != nil {
+				out = append(out, *chunk.Index)
+			}
+		}
+	}
+	return out
+}
+
 func sortManifest(m *model.Manifest) {
 	sort.Slice(m.Selected, func(i, j int) bool { return refKey(m.Selected[i]) < refKey(m.Selected[j]) })
 	sort.Slice(m.Snapshots, func(i, j int) bool { return refKey(m.Snapshots[i].Resource) < refKey(m.Snapshots[j].Resource) })
 	for i := range m.Snapshots {
 		sort.Slice(m.Snapshots[i].Data, func(a, b int) bool { return m.Snapshots[i].Data[a].Path < m.Snapshots[i].Data[b].Path })
+		if m.Snapshots[i].Dataset != nil {
+			sort.Slice(m.Snapshots[i].Dataset.Chunks, func(a, b int) bool {
+				return m.Snapshots[i].Dataset.Chunks[a].Data.Path < m.Snapshots[i].Dataset.Chunks[b].Data.Path
+			})
+		}
 		sortFindings(m.Snapshots[i].Findings)
 	}
 	sort.Slice(m.Operations, func(i, j int) bool { return m.Operations[i].ID < m.Operations[j].ID })
@@ -192,7 +220,7 @@ func sortFindings(v []model.Finding) {
 
 var credentialPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?:AKIA|ASIA)[0-9A-Z]{16}`),
-	regexp.MustCompile(`(?i)[\"']?(aws_secret_access_key|aws_session_token|x-amz-security-token|accesskeyid|secretaccesskey|sessiontoken)[\"']?\s*[:=]\s*[\"']?[^\s\"']{16,}`),
+	regexp.MustCompile(`(?i)[\"']?(aws_secret_access_key|aws_session_token|x-amz-security-token|accesskeyid|secretaccesskey|sessiontoken)[\"']?\s*[:=]\s*[\"']?[^\s\"']{16}`),
 }
 
 func ValidateGenerated(root string) error {
@@ -204,22 +232,74 @@ func ValidateGenerated(root string) error {
 	if err := json.Unmarshal(b, &sums); err != nil {
 		return fmt.Errorf("decode checksums: %w", err)
 	}
-	if err := VerifyChecksums(root, sums); err != nil {
-		return err
-	}
 	for _, entry := range sums.Files {
-		data, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(entry.Path)))
-		if err != nil {
-			return err
-		}
-		for _, pattern := range credentialPatterns {
-			if pattern.Match(data) {
-				return fmt.Errorf("potential source credential found in %s", entry.Path)
-			}
+		if err := verifyAndScan(filepath.Join(root, filepath.FromSlash(entry.Path)), entry); err != nil {
+			return fmt.Errorf("%w in %s", err, entry.Path)
 		}
 	}
 	return nil
 }
+
+func verifyAndScan(filename string, expected Checksum) error {
+	f, err := os.Open(filename)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	h := sha256.New()
+	detector := NewCredentialDetector()
+	n, err := io.Copy(io.MultiWriter(h, detector), f)
+	if err != nil {
+		return err
+	}
+	if n != expected.Size || hex.EncodeToString(h.Sum(nil)) != expected.SHA256 {
+		return fmt.Errorf("checksum mismatch")
+	}
+	return detector.Err()
+}
+
+func scanCredentials(filename string) error {
+	f, err := os.Open(filename)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	detector := NewCredentialDetector()
+	if _, err = io.Copy(detector, f); err != nil {
+		return err
+	}
+	return detector.Err()
+}
+
+// credentialWindow is the overlap kept between Write calls so a credential
+// pattern spanning two writes is still detected.
+const credentialWindow = 256
+
+type CredentialDetector struct {
+	tail []byte
+	err  error
+}
+
+func NewCredentialDetector() *CredentialDetector { return &CredentialDetector{} }
+func (d *CredentialDetector) Write(p []byte) (int, error) {
+	if d.err != nil {
+		return len(p), nil
+	}
+	// Reuse d.tail across calls instead of allocating a fresh window per write:
+	// streaming S3 packs invoke this once per 32 KiB copy buffer.
+	d.tail = append(d.tail, p...)
+	for _, pattern := range credentialPatterns {
+		if pattern.Match(d.tail) {
+			d.err = fmt.Errorf("potential source credential found")
+			break
+		}
+	}
+	if len(d.tail) > credentialWindow {
+		d.tail = append(d.tail[:0], d.tail[len(d.tail)-credentialWindow:]...)
+	}
+	return len(p), nil
+}
+func (d *CredentialDetector) Err() error { return d.err }
 
 func ValidateCompose(ctx context.Context, filename string) error {
 	cmd := exec.CommandContext(ctx, "docker", "compose", "-f", filename, "config", "-q")

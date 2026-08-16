@@ -38,6 +38,47 @@ type fakeService struct {
 	doctor    app.DoctorResult
 	doctorErr error
 }
+type progressService struct{ fakeService }
+
+func (f *progressService) PullWithOptions(_ context.Context, _ config.Project, _ string, _ string, _ string, options app.PullOptions) (model.Manifest, error) {
+	options.Progress(model.ProgressEvent{Operation: "pull", Phase: "capture", Service: "dynamodb", Resource: "orders", CompletedRecords: 5, TotalRecords: 10, TotalPrecision: "estimated"})
+	return model.Manifest{SchemaVersion: model.CurrentManifestSchemaVersion}, nil
+}
+
+func TestPullJSONProgressUsesStderrWithoutCorruptingFinalEnvelope(t *testing.T) {
+	service := &progressService{}
+	var stdout, stderr bytes.Buffer
+	cmd := New(Options{Stdin: strings.NewReader(""), Stdout: &stdout, Stderr: &stderr, App: service})
+	cmd.SetArgs([]string{"pull", "--project", writeProject(t), "--yes", "--output", "json", "--progress", "json", "--work-dir", t.TempDir()})
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var envelope Envelope
+	if err := json.Unmarshal(stdout.Bytes(), &envelope); err != nil {
+		t.Fatalf("stdout is not one JSON envelope: %q: %v", stdout.String(), err)
+	}
+	var event model.ProgressEvent
+	if err := json.Unmarshal(stderr.Bytes(), &event); err != nil {
+		t.Fatalf("stderr progress is not JSON: %q: %v", stderr.String(), err)
+	}
+	if event.Resource != "orders" || event.TotalPrecision != "estimated" {
+		t.Fatalf("event = %#v", event)
+	}
+}
+
+func TestPullPlainProgressMarksEstimatesAndOmitsEmptyFields(t *testing.T) {
+	service := &progressService{}
+	var stdout, stderr bytes.Buffer
+	cmd := New(Options{Stdin: strings.NewReader(""), Stdout: &stdout, Stderr: &stderr, App: service})
+	cmd.SetArgs([]string{"pull", "--project", writeProject(t), "--yes", "--progress", "plain", "--work-dir", t.TempDir()})
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	line := strings.TrimSpace(stderr.String())
+	if line != "capture dynamodb orders 5/~10" {
+		t.Fatalf("plain progress = %q", line)
+	}
+}
 
 func (f *fakeService) Scan(context.Context, app.ScanRequest) (app.ScanResult, error) {
 	return app.ScanResult{}, nil

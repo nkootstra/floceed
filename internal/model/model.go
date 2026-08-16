@@ -9,7 +9,8 @@ import (
 	"time"
 )
 
-const CurrentManifestSchemaVersion = 1
+const CurrentManifestSchemaVersion = 2
+const MinimumManifestSchemaVersion = 1
 const CurrentSnapshotStructureVersion = 1
 
 type Severity string
@@ -68,14 +69,19 @@ type DiscoveryResult struct {
 	Findings  []Finding         `json:"findings,omitempty"`
 }
 type CaptureOptions struct {
-	IncludeData         bool       `json:"include_data"`
-	AllowPartialData    bool       `json:"allow_partial_data,omitempty"`
-	PreserveProvisioned bool       `json:"preserve_provisioned,omitempty"`
-	Gzip                bool       `json:"gzip,omitempty"`
-	Limits              DataLimits `json:"limits,omitempty"`
-	Prefixes            []string   `json:"prefixes,omitempty"`
-	Overwrite           string     `json:"overwrite,omitempty"`
-	ArtifactDirectory   string     `json:"-"`
+	IncludeData         bool                `json:"include_data"`
+	AllowPartialData    bool                `json:"allow_partial_data,omitempty"`
+	PreserveProvisioned bool                `json:"preserve_provisioned,omitempty"`
+	Gzip                bool                `json:"gzip,omitempty"`
+	Limits              DataLimits          `json:"limits,omitempty"`
+	Prefixes            []string            `json:"prefixes,omitempty"`
+	Overwrite           string              `json:"overwrite,omitempty"`
+	Mode                string              `json:"mode,omitempty"`
+	EstimatedRecords    int64               `json:"estimated_records,omitempty"`
+	EstimatedBytes      int64               `json:"estimated_bytes,omitempty"`
+	ArtifactDirectory   string              `json:"-"`
+	CheckpointDirectory string              `json:"-"`
+	Progress            func(ProgressEvent) `json:"-"`
 }
 type DataLimits struct {
 	MaxObjects     int   `json:"max_objects,omitempty"`
@@ -96,6 +102,7 @@ type Snapshot struct {
 	StructureVersion int             `json:"structure_version"`
 	Structure        json.RawMessage `json:"structure"`
 	Data             []ArtifactRef   `json:"data,omitempty"`
+	Dataset          *Dataset        `json:"dataset,omitempty"`
 	Findings         []Finding       `json:"findings,omitempty"`
 }
 
@@ -132,6 +139,41 @@ type ArtifactRef struct {
 	SHA256    string `json:"sha256"`
 	Size      int64  `json:"size"`
 	MediaType string `json:"media_type,omitempty"`
+}
+
+type Dataset struct {
+	Format      string      `json:"format"`
+	Records     int64       `json:"records"`
+	SourceBytes int64       `json:"source_bytes"`
+	Consistency string      `json:"consistency"`
+	Resumed     bool        `json:"resumed,omitempty"`
+	Chunks      []DataChunk `json:"chunks"`
+}
+
+type DataChunk struct {
+	Data        ArtifactRef  `json:"data"`
+	Index       *ArtifactRef `json:"index,omitempty"`
+	Records     int64        `json:"records"`
+	SourceBytes int64        `json:"source_bytes"`
+}
+
+type ProgressEvent struct {
+	SchemaVersion    int    `json:"schema_version"`
+	Event            string `json:"event"`
+	Operation        string `json:"operation"`
+	Phase            string `json:"phase"`
+	Service          string `json:"service,omitempty"`
+	Resource         string `json:"resource,omitempty"`
+	CompletedRecords int64  `json:"completed_records,omitempty"`
+	TotalRecords     int64  `json:"total_records,omitempty"`
+	CompletedBytes   int64  `json:"completed_bytes,omitempty"`
+	TotalBytes       int64  `json:"total_bytes,omitempty"`
+	CompletedChunks  int64  `json:"completed_chunks,omitempty"`
+	TotalChunks      int64  `json:"total_chunks,omitempty"`
+	TotalPrecision   string `json:"total_precision,omitempty"`
+	Resumed          bool   `json:"resumed,omitempty"`
+	Sequence         int64  `json:"sequence,omitempty"`
+	Message          string `json:"message,omitempty"`
 }
 type Capabilities struct {
 	FlociVersion string         `json:"floci_version"`
@@ -186,8 +228,8 @@ type Manifest struct {
 var accountPattern = regexp.MustCompile(`^[0-9]{12}$`)
 
 func (m Manifest) Validate() error {
-	if m.SchemaVersion != CurrentManifestSchemaVersion {
-		return fmt.Errorf("unsupported manifest schema %d (runtime supports %d): %w", m.SchemaVersion, CurrentManifestSchemaVersion, ErrSchema)
+	if m.SchemaVersion < MinimumManifestSchemaVersion || m.SchemaVersion > CurrentManifestSchemaVersion {
+		return fmt.Errorf("unsupported manifest schema %d (runtime supports %d-%d): %w", m.SchemaVersion, MinimumManifestSchemaVersion, CurrentManifestSchemaVersion, ErrSchema)
 	}
 	if m.Source.AccountID != "" && !accountPattern.MatchString(m.Source.AccountID) {
 		return fmt.Errorf("source account ID must be 12 digits: %w", ErrValidation)
@@ -195,6 +237,37 @@ func (m Manifest) Validate() error {
 	for index := range m.Snapshots {
 		if err := validateSnapshot(m.Snapshots[index]); err != nil {
 			return fmt.Errorf("snapshot %d: %w", index, err)
+		}
+	}
+	if m.SchemaVersion == 2 {
+		for index := range m.Snapshots {
+			s := &m.Snapshots[index]
+			if len(s.Data) != 0 {
+				return fmt.Errorf("snapshot %d uses legacy data in manifest schema 2: %w", index, ErrValidation)
+			}
+			if s.Dataset != nil {
+				if s.Dataset.Format == "" || s.Dataset.Records < 0 || s.Dataset.SourceBytes < 0 {
+					return fmt.Errorf("snapshot %d has invalid dataset: %w", index, ErrValidation)
+				}
+				validFormat := (s.Service == "s3" && s.Dataset.Format == "s3-tar-gzip-v1") || (s.Service == "dynamodb" && (s.Dataset.Format == "dynamodb-ndjson-v1" || s.Dataset.Format == "dynamodb-ndjson-gzip-v1"))
+				if !validFormat {
+					return fmt.Errorf("snapshot %d has unsupported dataset format %q: %w", index, s.Dataset.Format, ErrValidation)
+				}
+				var records, sourceBytes int64
+				for _, chunk := range s.Dataset.Chunks {
+					if chunk.Data.Path == "" || chunk.Records < 0 || chunk.SourceBytes < 0 {
+						return fmt.Errorf("snapshot %d has invalid dataset chunk: %w", index, ErrValidation)
+					}
+					if s.Service == "s3" && chunk.Index == nil {
+						return fmt.Errorf("snapshot %d S3 dataset chunk requires an index: %w", index, ErrValidation)
+					}
+					records += chunk.Records
+					sourceBytes += chunk.SourceBytes
+				}
+				if records != s.Dataset.Records || sourceBytes != s.Dataset.SourceBytes {
+					return fmt.Errorf("snapshot %d dataset totals do not match chunks: %w", index, ErrValidation)
+				}
+			}
 		}
 	}
 	return nil

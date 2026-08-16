@@ -31,9 +31,10 @@ type service struct {
 }
 
 type environment struct {
-	HookTimeout string `yaml:"FLOCI_INIT_HOOKS_TIMEOUT_SECONDS"`
-	StorageMode string `yaml:"FLOCI_STORAGE_MODE,omitempty"`
-	StoragePath string `yaml:"FLOCI_STORAGE_PERSISTENT_PATH,omitempty"`
+	HookTimeout   string `yaml:"FLOCI_INIT_HOOKS_TIMEOUT_SECONDS"`
+	ReplayWorkers string `yaml:"FLOCEED_REPLAY_WORKERS"`
+	StorageMode   string `yaml:"FLOCI_STORAGE_MODE,omitempty"`
+	StoragePath   string `yaml:"FLOCI_STORAGE_PERSISTENT_PATH,omitempty"`
 }
 
 type mount struct {
@@ -53,7 +54,11 @@ func Render(project config.Project) ([]byte, error) {
 	if project.Target.FlociVersion != config.DefaultFlociVersion {
 		return nil, fmt.Errorf("unsupported Floci version %q", project.Target.FlociVersion)
 	}
-	env := environment{HookTimeout: fmt.Sprint(project.Target.HookTimeoutSeconds)}
+	workers := project.Target.ReplayWorkers
+	if workers == 0 {
+		workers = config.DefaultReplayWorkers
+	}
+	env := environment{HookTimeout: fmt.Sprint(project.Target.HookTimeoutSeconds), ReplayWorkers: fmt.Sprint(workers)}
 	mounts := []mount{
 		{Type: "bind", Source: "./init/ready.d", Target: "/etc/floci/init/ready.d", ReadOnly: true, Bind: &bindOptions{CreateHostPath: false}},
 		{Type: "bind", Source: "./", Target: "/floceed", ReadOnly: true, Bind: &bindOptions{CreateHostPath: false}},

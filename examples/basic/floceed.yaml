@@ -9,6 +9,7 @@ target:
   floci_version: 1.6.0
   port: 4566
   hook_timeout_seconds: 300
+  replay_workers: 4
   persistence:
     enabled: true
     volume: floceed-basic-data
@@ -18,6 +19,7 @@ resources:
     - name: floceed-example-assets
       data:
         enabled: true
+        mode: bounded
         prefixes:
           - fixtures/
         max_objects: 100
@@ -29,13 +31,14 @@ resources:
       preserve_provisioned: false
       data:
         enabled: true
+        mode: bounded
         max_items: 1000
         max_pages: 100
         gzip: true
 
 capture:
   allow_partial_data: false
+  resource_workers: 2
 
 output:
   directory: .floceed
-

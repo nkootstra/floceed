@@ -237,6 +237,37 @@ func TestDockerProbeHasBoundedContext(t *testing.T) {
 	}
 }
 
+func TestDecodeReplayProgressFromComposeLog(t *testing.T) {
+	event, ok := decodeProgressLine(`floci | FLOCEED_PROGRESS {"schema_version":1,"event":"progress","operation":"replay","phase":"data","service":"s3","resource":"assets","completed_records":9,"total_records":10,"total_precision":"exact"}`)
+	if !ok {
+		t.Fatal("progress line was not decoded")
+	}
+	if event.Resource != "assets" || event.CompletedRecords != 9 || event.TotalRecords != 10 {
+		t.Fatalf("event = %#v", event)
+	}
+	if _, ok := decodeProgressLine("ordinary Floci log"); ok {
+		t.Fatal("ordinary log decoded as progress")
+	}
+}
+
+func TestCaptureLockExcludesConcurrentHolderAndReleases(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "capture.lock")
+	release, err := acquireCaptureLock(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := acquireCaptureLock(path); !errors.Is(err, errCaptureLocked) {
+		release()
+		t.Fatalf("second lock error = %v, want errCaptureLocked", err)
+	}
+	release()
+	release2, err := acquireCaptureLock(path)
+	if err != nil {
+		t.Fatalf("lock after release = %v", err)
+	}
+	release2()
+}
+
 func TestDockerProbePreservesCallerCancellation(t *testing.T) {
 	runtime := newDockerLocalRuntime()
 	runtime.probeTimeout = time.Minute
