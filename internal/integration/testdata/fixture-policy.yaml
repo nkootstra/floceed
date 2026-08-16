@@ -1,0 +1,6 @@
+schema_version: 1
+allowed_accounts:
+  - "123456789012"
+allow_truncated: true
+allowed_finding_codes:
+  - FIXTURE_METADATA_ONLY

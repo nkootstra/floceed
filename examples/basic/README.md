@@ -62,3 +62,9 @@ public `hash` for enumerable identifiers such as email addresses.
 Deterministic cohorts require `full` data mode because Floceed must inspect the
 complete table. `max_retained_bytes` limits the protected candidate state kept
 for resumable selection.
+
+For AWS-free CI checks, verify the generated bundle before inspection or replay:
+
+```bash
+floceed fixture verify --input .floceed --output json
+```

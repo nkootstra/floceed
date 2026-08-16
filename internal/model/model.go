@@ -219,6 +219,36 @@ type SourceMetadata struct {
 	Region    string `json:"region"`
 }
 
+// Provenance is self-asserted metadata carried by an offline fixture. It is
+// deliberately separate from Manifest: checksum verification proves only
+// that these values are internally consistent, not that they are authentic.
+type Provenance struct {
+	SchemaVersion  int       `json:"schema_version"`
+	AccountID      string    `json:"account_id"`
+	Region         string    `json:"region"`
+	CapturedAt     time.Time `json:"captured_at"`
+	ManifestSchema int       `json:"manifest_schema"`
+}
+
+const CurrentProvenanceSchemaVersion = 1
+
+type ProvenanceStatus string
+
+const (
+	ProvenanceSelfAsserted ProvenanceStatus = "self_asserted"
+)
+
+// VerificationResult is the stable, non-authenticating result of checking a
+// fixture's bytes and schema.
+type VerificationResult struct {
+	Identity         string           `json:"identity"`
+	ManifestSchema   int              `json:"manifest_schema"`
+	FileCount        int              `json:"file_count"`
+	TotalBytes       int64            `json:"total_bytes"`
+	Provenance       *Provenance      `json:"provenance,omitempty"`
+	ProvenanceStatus ProvenanceStatus `json:"provenance_status,omitempty"`
+}
+
 type CountBucket = governance.CountBucket
 
 const (
