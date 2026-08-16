@@ -66,6 +66,9 @@ func (b ApplicationBackend) Scan(ctx context.Context, req app.ScanRequest) (app.
 }
 
 func (b ApplicationBackend) Plan(ctx context.Context, req ProjectRequest) (app.Plan, error) {
+	if err := req.Project.Validate(); err != nil {
+		return app.Plan{}, err
+	}
 	return b.App.PlanWithOptions(ctx, req.Project, app.PlanOptions{AWSProfile: req.Project.Source.Profile, Region: req.Project.Source.Region, FixtureProfile: req.FixtureProfile})
 }
 
