@@ -19,22 +19,226 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/nkootstra/floceed/internal/captureledger"
+	"github.com/nkootstra/floceed/internal/catalog"
 	"github.com/nkootstra/floceed/internal/config"
 	"github.com/nkootstra/floceed/internal/governance"
 	"github.com/nkootstra/floceed/internal/model"
 	"github.com/nkootstra/floceed/internal/storage"
 )
 
-type packedDataClient struct {
-	Client
-	gets int
+func TestAdapterSupportsReusableCapture(t *testing.T) {
+	var _ catalog.ReusableAdapter = (*Adapter)(nil)
 }
 
-func (packedDataClient) ListObjectsV2(context.Context, *awss3.ListObjectsV2Input, ...func(*awss3.Options)) (*awss3.ListObjectsV2Output, error) {
-	return &awss3.ListObjectsV2Output{Contents: []types.Object{{Key: aws.String("a.txt"), ETag: aws.String("a"), Size: aws.Int64(1)}, {Key: aws.String("b.txt"), ETag: aws.String("b"), Size: aws.Int64(1)}}}, nil
+func TestReusableS3CaptureInventoriesButDoesNotDownloadUnchangedObjects(t *testing.T) {
+	client := &packedDataClient{}
+	adapter := New(client)
+	scope := model.SourceScope{AccountID: "123456789012", Region: "eu-west-1"}
+	ref := model.ResourceRef{Service: "s3", Type: "bucket", ID: "assets"}
+	firstRoot := t.TempDir()
+	firstSnapshot, _ := model.NewSnapshot(ref, "s3", Bucket{Name: ref.ID})
+	firstOptions := model.CaptureOptions{IncludeData: true, Mode: "full", ArtifactDirectory: filepath.Join(firstRoot, "artifacts"), CheckpointDirectory: filepath.Join(firstRoot, "checkpoint"), Overwrite: "if-different", GovernanceAudit: governance.NewAudit()}
+	first, err := adapter.captureObjectsReusable(context.Background(), scope, ref, &Bucket{Name: ref.ID}, firstSnapshot, firstOptions, catalog.ReuseRequest{Materialize: func(captureledger.Artifact) error { return nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.gets != 2 {
+		t.Fatalf("first GetObject calls = %d, want 2", client.gets)
+	}
+
+	secondRoot := t.TempDir()
+	secondSnapshot, _ := model.NewSnapshot(ref, "s3", Bucket{Name: ref.ID})
+	secondOptions := firstOptions
+	secondOptions.ArtifactDirectory, secondOptions.CheckpointDirectory = filepath.Join(secondRoot, "artifacts"), filepath.Join(secondRoot, "checkpoint")
+	second, err := adapter.captureObjectsReusable(context.Background(), scope, ref, &Bucket{Name: ref.ID}, secondSnapshot, secondOptions, catalog.ReuseRequest{Candidates: []captureledger.Resource{*first}, Materialize: copyLedgerArtifact(firstOptions.ArtifactDirectory, secondOptions.ArtifactDirectory)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.gets != 2 {
+		t.Fatalf("unchanged capture made %d total GetObject calls, want 2", client.gets)
+	}
+	if len(second.Units) != 1 || second.Units[0].Outcome != captureledger.UnitOutcomeReused || secondSnapshot.Dataset.Records != 2 || secondSnapshot.Dataset.SourceBytes != 2 {
+		t.Fatalf("reuse result = %#v, dataset = %#v", second, secondSnapshot.Dataset)
+	}
+	for identity := range second.Units[0].Freshness.Components {
+		if strings.Contains(identity, "a.txt") || strings.Contains(identity, "b.txt") {
+			t.Fatalf("raw key leaked in ledger identity %q", identity)
+		}
+	}
+}
+
+func TestReusableS3CaptureReconstructsCheckpointPacksForPublicationAndReuse(t *testing.T) {
+	client := &packedDataClient{}
+	adapter := New(client)
+	scope := model.SourceScope{AccountID: "123456789012", Region: "eu-west-1"}
+	ref := model.ResourceRef{Service: "s3", Type: "bucket", ID: "assets"}
+	root := t.TempDir()
+	options := model.CaptureOptions{IncludeData: true, Mode: "full", ArtifactDirectory: filepath.Join(root, "artifacts"), CheckpointDirectory: filepath.Join(root, "checkpoint"), Overwrite: "if-different", GovernanceAudit: governance.NewAudit()}
+	firstSnapshot, _ := model.NewSnapshot(ref, "s3", Bucket{Name: ref.ID})
+	if _, err := adapter.captureObjectsReusable(context.Background(), scope, ref, &Bucket{Name: ref.ID}, firstSnapshot, options, catalog.ReuseRequest{Materialize: func(captureledger.Artifact) error { return nil }}); err != nil {
+		t.Fatal(err)
+	}
+	resumedSnapshot, _ := model.NewSnapshot(ref, "s3", Bucket{Name: ref.ID})
+	resumed, err := adapter.captureObjectsReusable(context.Background(), scope, ref, &Bucket{Name: ref.ID}, resumedSnapshot, options, catalog.ReuseRequest{Materialize: func(captureledger.Artifact) error { return nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.gets != 2 {
+		t.Fatalf("checkpoint resume refetched bodies: GetObject calls = %d, want 2", client.gets)
+	}
+	if got, want := len(resumed.Units), len(resumedSnapshot.Dataset.Chunks); got != want || got != 1 {
+		t.Fatalf("resumed ledger units = %d, dataset chunks = %d; want one per completed chunk", got, want)
+	}
+	if resumed.Units[0].Freshness.Digest == "" || len(resumed.Units[0].Artifacts) != 2 {
+		t.Fatalf("resumed unit lacks durable inventory evidence/artifacts: %#v", resumed.Units[0])
+	}
+
+	reuseRoot := t.TempDir()
+	reuseOptions := options
+	reuseOptions.ArtifactDirectory, reuseOptions.CheckpointDirectory = filepath.Join(reuseRoot, "artifacts"), filepath.Join(reuseRoot, "checkpoint")
+	reusedSnapshot, _ := model.NewSnapshot(ref, "s3", Bucket{Name: ref.ID})
+	reused, err := adapter.captureObjectsReusable(context.Background(), scope, ref, &Bucket{Name: ref.ID}, reusedSnapshot, reuseOptions, catalog.ReuseRequest{Candidates: []captureledger.Resource{*resumed}, Materialize: copyLedgerArtifact(options.ArtifactDirectory, reuseOptions.ArtifactDirectory)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.gets != 2 || reused.Units[0].Outcome != captureledger.UnitOutcomeReused {
+		t.Fatalf("published resumed unit was not reusable: gets=%d units=%#v", client.gets, reused.Units)
+	}
+}
+
+func TestMissingS3UnitsUsesCompleteInventoryAcrossShiftedPackBoundaries(t *testing.T) {
+	entries := []inventoryEntry{{Key: "a", ETag: "a", Size: 1}, {Key: "b", ETag: "b", Size: 1}, {Key: "c", ETag: "c", Size: 1}}
+	first := s3PackFreshness(entries[:2])
+	second := s3PackFreshness(entries[2:])
+	candidate := captureledger.Resource{Units: []captureledger.Unit{{ID: "pack-000001", Freshness: first}, {ID: "pack-000002", Freshness: second}}}
+	// Inserting an earlier object can move b or c into another deterministic
+	// pack. Resource-wide membership still proves neither source identity is missing.
+	current := map[string]struct{}{}
+	for identity := range s3PackFreshness(entries).Components {
+		current[identity] = struct{}{}
+	}
+	if missing := missingS3Units(candidate, current); len(missing) != 0 {
+		t.Fatalf("boundary shift reported moved objects missing: %#v", missing)
+	}
+}
+
+func copyLedgerArtifact(sourceRoot, destinationRoot string) func(captureledger.Artifact) error {
+	return func(artifact captureledger.Artifact) error {
+		payload, err := os.ReadFile(filepath.Join(sourceRoot, filepath.FromSlash(artifact.Path)))
+		if err != nil {
+			return err
+		}
+		destination := filepath.Join(destinationRoot, filepath.FromSlash(artifact.Path))
+		if err := os.MkdirAll(filepath.Dir(destination), 0o700); err != nil {
+			return err
+		}
+		return os.WriteFile(destination, payload, 0o600)
+	}
+}
+
+func TestReusableS3CaptureRefreshReasonsAndMissingObjects(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		inventory   []types.Object
+		changeOpts  func(*model.CaptureOptions)
+		materialize func(string, string) func(captureledger.Artifact) error
+		wantReason  captureledger.Reason
+		wantRecords int64
+		wantMissing bool
+	}{
+		{name: "changed etag", inventory: []types.Object{{Key: aws.String("a.txt"), ETag: aws.String("changed"), Size: aws.Int64(1)}, {Key: aws.String("b.txt"), ETag: aws.String("b"), Size: aws.Int64(1)}}, wantReason: captureledger.ReasonSourceContentChanged, wantRecords: 2},
+		{name: "new object", inventory: []types.Object{{Key: aws.String("a.txt"), ETag: aws.String("a"), Size: aws.Int64(1)}, {Key: aws.String("b.txt"), ETag: aws.String("b"), Size: aws.Int64(1)}, {Key: aws.String("c.txt"), ETag: aws.String("c"), Size: aws.Int64(1)}}, wantReason: captureledger.ReasonSourceContentChanged, wantRecords: 3},
+		{name: "missing object", inventory: []types.Object{{Key: aws.String("a.txt"), ETag: aws.String("a"), Size: aws.Int64(1)}}, wantReason: captureledger.ReasonSourceContentChanged, wantRecords: 1, wantMissing: true},
+		{name: "definition changed", changeOpts: func(options *model.CaptureOptions) { options.Overwrite = "always" }, wantReason: captureledger.ReasonCaptureDefinitionChanged, wantRecords: 2},
+		{name: "corrupt artifact", materialize: func(_, _ string) func(captureledger.Artifact) error {
+			return func(captureledger.Artifact) error {
+				return &captureledger.InvalidationError{Reason: captureledger.ReasonArtifactCorrupt, Err: errors.New("corrupt")}
+			}
+		}, wantReason: captureledger.ReasonArtifactCorrupt, wantRecords: 2},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			client := &packedDataClient{}
+			adapter := New(client)
+			scope := model.SourceScope{AccountID: "123456789012", Region: "eu-west-1"}
+			ref := model.ResourceRef{Service: "s3", Type: "bucket", ID: "assets"}
+			firstRoot := t.TempDir()
+			firstOptions := model.CaptureOptions{IncludeData: true, Mode: "full", ArtifactDirectory: filepath.Join(firstRoot, "artifacts"), CheckpointDirectory: filepath.Join(firstRoot, "checkpoint"), Overwrite: "if-different", GovernanceAudit: governance.NewAudit()}
+			firstSnapshot, _ := model.NewSnapshot(ref, "s3", Bucket{Name: ref.ID})
+			first, err := adapter.captureObjectsReusable(context.Background(), scope, ref, &Bucket{Name: ref.ID}, firstSnapshot, firstOptions, catalog.ReuseRequest{Materialize: func(captureledger.Artifact) error { return nil }})
+			if err != nil {
+				t.Fatal(err)
+			}
+			client.inventory = test.inventory
+			secondRoot := t.TempDir()
+			secondOptions := firstOptions
+			secondOptions.ArtifactDirectory, secondOptions.CheckpointDirectory = filepath.Join(secondRoot, "artifacts"), filepath.Join(secondRoot, "checkpoint")
+			if test.changeOpts != nil {
+				test.changeOpts(&secondOptions)
+			}
+			materialize := copyLedgerArtifact(firstOptions.ArtifactDirectory, secondOptions.ArtifactDirectory)
+			if test.materialize != nil {
+				materialize = test.materialize(firstOptions.ArtifactDirectory, secondOptions.ArtifactDirectory)
+			}
+			secondSnapshot, _ := model.NewSnapshot(ref, "s3", Bucket{Name: ref.ID})
+			second, err := adapter.captureObjectsReusable(context.Background(), scope, ref, &Bucket{Name: ref.ID}, secondSnapshot, secondOptions, catalog.ReuseRequest{Candidates: []captureledger.Resource{*first}, Materialize: materialize})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if secondSnapshot.Dataset.Records != test.wantRecords || secondSnapshot.Dataset.SourceBytes != test.wantRecords {
+				t.Fatalf("dataset totals = %#v", secondSnapshot.Dataset)
+			}
+			var packReason captureledger.Reason
+			for _, unit := range second.Units {
+				if strings.HasPrefix(unit.ID, "pack-") {
+					packReason = unit.Reason
+				}
+			}
+			if packReason != test.wantReason {
+				t.Fatalf("reason = %q, want %q; units=%#v", packReason, test.wantReason, second.Units)
+			}
+			missing := false
+			for _, unit := range second.Units {
+				if unit.Reason == captureledger.ReasonSourceUnitMissing {
+					missing = true
+					if len(unit.Artifacts) != 0 {
+						t.Fatal("missing source unit emitted artifacts")
+					}
+				}
+			}
+			if missing != test.wantMissing {
+				t.Fatalf("missing outcome = %v, want %v", missing, test.wantMissing)
+			}
+			if test.name == "changed etag" {
+				matched := false
+				for _, etag := range client.ifMatches {
+					matched = matched || etag == "changed"
+				}
+				if !matched {
+					t.Fatalf("conditional reads = %#v, want changed inventory ETag", client.ifMatches)
+				}
+			}
+		})
+	}
+}
+
+type packedDataClient struct {
+	Client
+	gets      int
+	inventory []types.Object
+	ifMatches []string
+}
+
+func (c packedDataClient) ListObjectsV2(context.Context, *awss3.ListObjectsV2Input, ...func(*awss3.Options)) (*awss3.ListObjectsV2Output, error) {
+	contents := c.inventory
+	if contents == nil {
+		contents = []types.Object{{Key: aws.String("a.txt"), ETag: aws.String("a"), Size: aws.Int64(1)}, {Key: aws.String("b.txt"), ETag: aws.String("b"), Size: aws.Int64(1)}}
+	}
+	return &awss3.ListObjectsV2Output{Contents: contents}, nil
 }
 func (c *packedDataClient) GetObject(_ context.Context, in *awss3.GetObjectInput, _ ...func(*awss3.Options)) (*awss3.GetObjectOutput, error) {
 	c.gets++
+	c.ifMatches = append(c.ifMatches, aws.ToString(in.IfMatch))
 	return &awss3.GetObjectOutput{Body: io.NopCloser(strings.NewReader(aws.ToString(in.Key)[:1]))}, nil
 }
 func (packedDataClient) GetObjectTagging(context.Context, *awss3.GetObjectTaggingInput, ...func(*awss3.Options)) (*awss3.GetObjectTaggingOutput, error) {

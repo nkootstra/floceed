@@ -87,6 +87,55 @@ func (s *Store) Publish(generation Generation, artifactRoot string) error {
 }
 
 func (s *Store) Load(source SourceIdentity, resource ResourceDescriptor) (Generation, error) {
+	generation, err := s.loadGeneration(source, resource)
+	if err != nil {
+		return Generation{}, err
+	}
+	for _, candidate := range generation.Resources {
+		for _, unit := range candidate.Units {
+			for _, artifact := range unit.Artifacts {
+				f, err := s.OpenArtifact(artifact)
+				if err != nil {
+					return Generation{}, err
+				}
+				_ = f.Close()
+			}
+		}
+	}
+	return generation, nil
+}
+
+// LoadCandidates preserves valid units when another unit's immutable blob is
+// unusable. The damaged unit remains visible with a stable invalidation reason
+// so a reuse-aware adapter can refresh only that unit. Materialize verifies all
+// selected bytes again before use.
+func (s *Store) LoadCandidates(source SourceIdentity, resource ResourceDescriptor) (Generation, error) {
+	generation, err := s.loadGeneration(source, resource)
+	if err != nil {
+		return Generation{}, err
+	}
+	for resourceIndex := range generation.Resources {
+		for unitIndex := range generation.Resources[resourceIndex].Units {
+			unit := &generation.Resources[resourceIndex].Units[unitIndex]
+			for _, artifact := range unit.Artifacts {
+				f, openErr := s.OpenArtifact(artifact)
+				if openErr == nil {
+					_ = f.Close()
+					continue
+				}
+				reason, classified := InvalidationReason(openErr)
+				if !classified {
+					return Generation{}, openErr
+				}
+				unit.Outcome, unit.Reason = UnitOutcomeInvalidated, reason
+				break
+			}
+		}
+	}
+	return generation, nil
+}
+
+func (s *Store) loadGeneration(source SourceIdentity, resource ResourceDescriptor) (Generation, error) {
 	filename := s.indexPath(source, resource)
 	b, err := readRegular(filename, maxGenerationBytes)
 	if err != nil {
@@ -110,15 +159,6 @@ func (s *Store) Load(source SourceIdentity, resource ResourceDescriptor) (Genera
 	for _, candidate := range generation.Resources {
 		if candidate.Descriptor == resource {
 			found = true
-		}
-		for _, unit := range candidate.Units {
-			for _, artifact := range unit.Artifacts {
-				f, err := s.OpenArtifact(artifact)
-				if err != nil {
-					return Generation{}, err
-				}
-				_ = f.Close()
-			}
 		}
 	}
 	if !found {

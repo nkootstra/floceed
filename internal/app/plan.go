@@ -139,13 +139,18 @@ func (a *Application) capture(ctx context.Context, req captureRequest) (Plan, []
 		job := captureJob{adapter: adapter, options: options}
 		if req.IncludeData && req.Ledger != nil {
 			descriptor := captureledger.ResourceDescriptor{Service: selection.Resource.Service, Type: selection.Resource.Type, ID: selection.Resource.ID}
-			generation, loadErr := req.Ledger.Load(req.LedgerSource, descriptor)
+			generation, loadErr := req.Ledger.LoadCandidates(req.LedgerSource, descriptor)
 			if loadErr != nil {
 				job.invalidReason, _ = captureledger.InvalidationReason(loadErr)
 			} else {
 				for _, resource := range generation.Resources {
 					if resource.Descriptor == descriptor {
 						job.candidate = append(job.candidate, resource)
+						for _, unit := range resource.Units {
+							if unit.Outcome == captureledger.UnitOutcomeInvalidated && job.invalidReason == "" {
+								job.invalidReason = unit.Reason
+							}
+						}
 					}
 				}
 			}

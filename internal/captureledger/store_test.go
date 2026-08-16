@@ -94,6 +94,29 @@ func TestStoreRejectsUnusableBlobsWithStableReasons(t *testing.T) {
 	}
 }
 
+func TestLoadCandidatesPreservesCorruptUnitForTargetedRefresh(t *testing.T) {
+	root, artifacts, generation, _ := storeFixture(t)
+	store, err := OpenStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Publish(generation, artifacts); err != nil {
+		t.Fatal(err)
+	}
+	artifact := generation.Resources[0].Units[0].Artifacts[0]
+	if err := os.WriteFile(store.blobPath(artifact), []byte("corrupt"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := store.LoadCandidates(generation.Source, generation.Resources[0].Descriptor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unit := loaded.Resources[0].Units[0]
+	if unit.Outcome != UnitOutcomeInvalidated || unit.Reason != ReasonArtifactCorrupt {
+		t.Fatalf("candidate unit = %#v, want targeted artifact_corrupt invalidation", unit)
+	}
+}
+
 func TestStoreReusesMatchingBlobAndNeverOverwritesMismatch(t *testing.T) {
 	root, artifacts, generation, payload := storeFixture(t)
 	store, _ := OpenStore(root)

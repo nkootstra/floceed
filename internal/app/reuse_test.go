@@ -57,7 +57,8 @@ func (a *reusableTestAdapter) CaptureReusable(_ context.Context, scope model.Sou
 	if err != nil {
 		return catalog.ReuseResult{}, err
 	}
-	if len(request.Candidates) != 0 && !a.refresh[ref.ID] {
+	candidateInvalid := len(request.Candidates) != 0 && len(request.Candidates[0].Units) != 0 && request.Candidates[0].Units[0].Outcome == captureledger.UnitOutcomeInvalidated
+	if len(request.Candidates) != 0 && !candidateInvalid && !a.refresh[ref.ID] {
 		a.mu.Lock()
 		a.candidateCalls++
 		a.mu.Unlock()
@@ -75,7 +76,7 @@ func (a *reusableTestAdapter) CaptureReusable(_ context.Context, scope model.Sou
 		return catalog.ReuseResult{Snapshot: snapshot, Resource: &candidate}, nil
 	}
 	reason := request.InvalidationReason
-	if len(request.Candidates) != 0 {
+	if len(request.Candidates) != 0 && reason == "" {
 		reason = captureledger.ReasonSourceContentChanged
 	}
 	a.mu.Lock()

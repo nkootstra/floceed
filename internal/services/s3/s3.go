@@ -303,6 +303,27 @@ func (a *Adapter) Capture(ctx context.Context, scope model.SourceScope, ref mode
 	return s, nil
 }
 
+func (a *Adapter) CaptureReusable(ctx context.Context, scope model.SourceScope, ref model.ResourceRef, opts model.CaptureOptions, request catalog.ReuseRequest) (catalog.ReuseResult, error) {
+	structureOptions := opts
+	structureOptions.IncludeData = false
+	snapshot, err := a.Capture(ctx, scope, ref, structureOptions)
+	if err != nil || !opts.IncludeData {
+		return catalog.ReuseResult{Snapshot: snapshot}, err
+	}
+	bucket, err := model.DecodeStructure[Bucket](snapshot)
+	if err != nil {
+		return catalog.ReuseResult{}, err
+	}
+	resource, err := a.captureObjectsReusable(ctx, scope, ref, &bucket, snapshot, opts, request)
+	if err != nil {
+		return catalog.ReuseResult{}, err
+	}
+	if err := model.SetStructure(snapshot, bucket); err != nil {
+		return catalog.ReuseResult{}, err
+	}
+	return catalog.ReuseResult{Snapshot: snapshot, Resource: resource}, nil
+}
+
 func captureOptional[T any](resource, property, code string, absent map[string]bool, call func() (T, error), apply func(T)) (*model.Finding, error) {
 	value, err := call()
 	if err == nil {

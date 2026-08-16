@@ -11,12 +11,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"math"
 	"mime"
 	"os"
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -25,6 +27,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/nkootstra/floceed/internal/awsconfig"
 	"github.com/nkootstra/floceed/internal/bundle"
+	"github.com/nkootstra/floceed/internal/captureledger"
+	"github.com/nkootstra/floceed/internal/catalog"
 	"github.com/nkootstra/floceed/internal/governance"
 	"github.com/nkootstra/floceed/internal/model"
 	"github.com/nkootstra/floceed/internal/storage"
@@ -103,9 +107,15 @@ type s3Checkpoint struct {
 }
 
 func (a *Adapter) captureObjects(ctx context.Context, bucket string, b *Bucket, snap *model.Snapshot, opts model.CaptureOptions) error {
+	_, err := a.captureObjectsReusable(ctx, model.SourceScope{}, model.ResourceRef{Service: "s3", Type: "bucket", ID: bucket}, b, snap, opts, catalog.ReuseRequest{})
+	return err
+}
+
+func (a *Adapter) captureObjectsReusable(ctx context.Context, scope model.SourceScope, ref model.ResourceRef, b *Bucket, snap *model.Snapshot, opts model.CaptureOptions, reuse catalog.ReuseRequest) (*captureledger.Resource, error) {
+	bucket := ref.ID
 	full := opts.Mode == "full"
 	if !full && (opts.Limits.MaxObjects <= 0 || opts.Limits.MaxObjectBytes <= 0 || opts.Limits.MaxTotalBytes <= 0) {
-		return fmt.Errorf("S3 data limits must all be positive")
+		return nil, fmt.Errorf("S3 data limits must all be positive")
 	}
 	prefixes := append([]string(nil), opts.Prefixes...)
 	if len(prefixes) == 0 {
@@ -122,7 +132,7 @@ func (a *Adapter) captureObjects(ctx context.Context, bucket string, b *Bucket, 
 		var err error
 		work, err = os.MkdirTemp("", "floceed-s3-")
 		if err != nil {
-			return err
+			return nil, err
 		}
 		removeWork = true
 	}
@@ -130,16 +140,16 @@ func (a *Adapter) captureObjects(ctx context.Context, bucket string, b *Bucket, 
 		defer os.RemoveAll(work)
 	}
 	if err := os.MkdirAll(work, 0o700); err != nil {
-		return err
+		return nil, err
 	}
 	if err := os.MkdirAll(opts.ArtifactDirectory, 0o700); err != nil {
-		return err
+		return nil, err
 	}
 	cpPath := filepath.Join(work, "checkpoint.json")
 	invPath := filepath.Join(work, "inventory.ndjson")
 	cp, resumed, err := loadS3Checkpoint(cpPath, bucket, opts, prefixes)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	opts.GovernanceAudit.RestoreRuleCounts(cp.GovernanceCounts)
 	compiledGovernance := newCaptureGovernance(bucket, opts.Governance)
@@ -154,29 +164,29 @@ func (a *Adapter) captureObjects(ctx context.Context, bucket string, b *Bucket, 
 		for _, ref := range refs {
 			sum, e := bundle.SumFile(filepath.Join(opts.ArtifactDirectory, filepath.FromSlash(ref.Path)))
 			if e != nil || sum.SHA256 != ref.SHA256 || sum.Size != ref.Size {
-				return fmt.Errorf("corrupt S3 capture checkpoint; restart the capture")
+				return nil, fmt.Errorf("corrupt S3 capture checkpoint; restart the capture")
 			}
 		}
 	}
 	if !cp.InventoryComplete {
 		truncatedCapture, err := a.buildInventory(ctx, bucket, prefixes, full, opts, invPath, cpPath, &cp, snap)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if truncatedCapture {
 			cp.InventoryComplete = true
 			if err := saveS3Checkpoint(cpPath, cp); err != nil {
-				return err
+				return nil, err
 			}
 		}
 	}
 	if full {
 		remaining, err := estimateS3RemainingArtifactBytes(invPath, cp.ProcessedOffset, compiledGovernance)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if err := requireS3Available(opts.ArtifactDirectory, remaining, 1); err != nil {
-			return err
+			return nil, err
 		}
 	}
 	if opts.Progress != nil {
@@ -185,11 +195,44 @@ func (a *Adapter) captureObjects(ctx context.Context, bucket string, b *Bucket, 
 	dataset := model.Dataset{Format: "s3-tar-gzip-v1", Records: cp.ProcessedRecords, SourceBytes: cp.SourceBytes, Consistency: "best_effort", Resumed: resumed, Chunks: append([]model.DataChunk(nil), cp.Chunks...)}
 	inv, err := os.Open(invPath)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer inv.Close()
+	definition, definitionErr := s3CaptureDefinition(scope, ref, opts)
+	if definitionErr != nil && reuse.Materialize != nil {
+		return nil, definitionErr
+	}
+	var candidate *captureledger.Resource
+	for i := range reuse.Candidates {
+		if reuse.Candidates[i].CaptureDefinition == definition {
+			candidate = &reuse.Candidates[i]
+			break
+		}
+	}
+	candidateUnits := map[string]captureledger.Unit{}
+	if candidate != nil {
+		for _, unit := range candidate.Units {
+			if strings.HasPrefix(unit.ID, "pack-") {
+				candidateUnits[unit.ID] = unit
+			}
+		}
+	}
+	resource := &captureledger.Resource{Descriptor: captureledger.ResourceDescriptor{Service: ref.Service, Type: ref.Type, ID: ref.ID}, CaptureDefinition: definition}
+	currentIdentities := map[string]struct{}{}
+	if err := scanS3InventoryPacks(invPath, func(number int, entries []inventoryEntry) error {
+		freshness := s3PackFreshness(entries)
+		for identity := range freshness.Components {
+			currentIdentities[identity] = struct{}{}
+		}
+		if number <= len(cp.Chunks) {
+			resource.Units = append(resource.Units, captureledger.Unit{ID: fmt.Sprintf("pack-%06d", number), Freshness: freshness, Artifacts: chunkArtifacts(cp.Chunks[number-1]), Outcome: captureledger.UnitOutcomeRefreshed, Reason: captureledger.ReasonNoCandidate, CapturedAt: time.Now().UTC()})
+		}
+		return nil
+	}); err != nil {
+		return nil, err
+	}
 	if _, err = inv.Seek(cp.ProcessedOffset, io.SeekStart); err != nil {
-		return err
+		return nil, err
 	}
 	reader := bufio.NewReaderSize(inv, 1<<20)
 	for cp.ProcessedRecords < cp.Records {
@@ -198,18 +241,18 @@ func (a *Adapter) captureObjects(ctx context.Context, bucket string, b *Bucket, 
 		for len(entries) < s3PackObjects {
 			line, e := reader.ReadBytes('\n')
 			if e != nil && e != io.EOF {
-				return e
+				return nil, e
 			}
 			if len(line) == 0 {
 				break
 			}
 			var entry inventoryEntry
 			if err := json.Unmarshal(line, &entry); err != nil {
-				return err
+				return nil, err
 			}
 			if len(entries) > 0 && packBytes+entry.Size > s3PackBytes {
 				if _, err := inv.Seek(cp.ProcessedOffset+linesBytes, io.SeekStart); err != nil {
-					return err
+					return nil, err
 				}
 				reader.Reset(inv)
 				break
@@ -224,16 +267,54 @@ func (a *Adapter) captureObjects(ctx context.Context, bucket string, b *Bucket, 
 		if len(entries) == 0 {
 			break
 		}
-		chunk, err := a.capturePack(ctx, bucket, len(cp.Chunks)+1, entries, opts, compiledGovernance, snap)
-		if err != nil {
-			return err
+		number := len(dataset.Chunks) + 1
+		unitID := fmt.Sprintf("pack-%06d", number)
+		freshness := s3PackFreshness(entries)
+		unit, found := candidateUnits[unitID]
+		reason := captureledger.ReasonNoCandidate
+		if candidate == nil && len(reuse.Candidates) != 0 {
+			reason = captureledger.ReasonCaptureDefinitionChanged
+		} else if reuse.InvalidationReason != "" {
+			reason = reuse.InvalidationReason
+		} else if found && unit.Outcome == captureledger.UnitOutcomeInvalidated {
+			reason = unit.Reason
+		} else if found {
+			reason = captureledger.ReasonSourceContentChanged
 		}
+		var chunk model.DataChunk
+		reused := found && unit.Outcome != captureledger.UnitOutcomeInvalidated && unit.Freshness.Kind == freshness.Kind && unit.Freshness.Digest == freshness.Digest && maps.Equal(unit.Freshness.Components, freshness.Components) && len(unit.Artifacts) == 2 && reuse.Materialize != nil
+		if reused {
+			for _, artifact := range unit.Artifacts {
+				if err := reuse.Materialize(artifact); err != nil {
+					reused = false
+					if classified, ok := captureledger.InvalidationReason(err); ok {
+						reason = classified
+					} else {
+						reason = captureledger.ReasonArtifactCorrupt
+					}
+					break
+				}
+			}
+		}
+		if reused {
+			data, index := ledgerArtifactRef(unit.Artifacts[0]), ledgerArtifactRef(unit.Artifacts[1])
+			chunk = model.DataChunk{Data: data, Index: &index, Records: int64(len(entries)), SourceBytes: inventorySize(entries)}
+			unit.Outcome, unit.Reason, unit.Freshness = captureledger.UnitOutcomeReused, captureledger.ReasonReused, freshness
+		} else {
+			chunk, err = a.capturePack(ctx, bucket, number, entries, opts, compiledGovernance, snap)
+			if err != nil {
+				return nil, err
+			}
+			unit = captureledger.Unit{ID: unitID, Freshness: freshness, Artifacts: chunkArtifacts(chunk), Outcome: captureledger.UnitOutcomeRefreshed, Reason: reason, CapturedAt: time.Now().UTC()}
+		}
+		delete(candidateUnits, unitID)
+		resource.Units = append(resource.Units, unit)
 		cp.Chunks = append(cp.Chunks, chunk)
 		cp.ProcessedRecords += int64(len(entries))
 		cp.ProcessedOffset += linesBytes
 		cp.GovernanceCounts = opts.GovernanceAudit.RuleCounts()
 		if err := saveS3Checkpoint(cpPath, cp); err != nil {
-			return err
+			return nil, err
 		}
 		dataset.Chunks = append(dataset.Chunks, chunk)
 		dataset.Records = cp.ProcessedRecords
@@ -241,9 +322,112 @@ func (a *Adapter) captureObjects(ctx context.Context, bucket string, b *Bucket, 
 			opts.Progress(model.ProgressEvent{Operation: "pull", Phase: "capture", Service: "s3", Resource: bucket, CompletedRecords: cp.ProcessedRecords, TotalRecords: cp.Records, CompletedBytes: chunkBytes(cp.Chunks), TotalBytes: cp.SourceBytes, CompletedChunks: int64(len(cp.Chunks)), TotalPrecision: "exact", Resumed: resumed})
 		}
 	}
+	if candidate != nil {
+		resource.Units = append(resource.Units, missingS3Units(*candidate, currentIdentities)...)
+	}
+	sort.Slice(resource.Units, func(i, j int) bool { return resource.Units[i].ID < resource.Units[j].ID })
 	b.Objects = nil
 	snap.Dataset = &dataset
-	return nil
+	return resource, nil
+}
+
+func missingS3Units(candidate captureledger.Resource, current map[string]struct{}) []captureledger.Unit {
+	missing := map[string]captureledger.Unit{}
+	for _, unit := range candidate.Units {
+		if !strings.HasPrefix(unit.ID, "pack-") {
+			continue
+		}
+		for identity, digest := range unit.Freshness.Components {
+			if _, exists := current[identity]; exists {
+				continue
+			}
+			missing[identity] = captureledger.Unit{ID: "object-" + identity, Freshness: captureledger.FreshnessEvidence{Kind: "s3_inventory_object_v1", Digest: digest}, Outcome: captureledger.UnitOutcomeInvalidated, Reason: captureledger.ReasonSourceUnitMissing, CapturedAt: unit.CapturedAt}
+		}
+	}
+	result := make([]captureledger.Unit, 0, len(missing))
+	for _, unit := range missing {
+		result = append(result, unit)
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].ID < result[j].ID })
+	return result
+}
+
+func scanS3InventoryPacks(path string, visit func(int, []inventoryEntry) error) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	reader := bufio.NewReaderSize(f, 1<<20)
+	var entries []inventoryEntry
+	var packBytes int64
+	number := 1
+	flush := func() error {
+		if len(entries) == 0 {
+			return nil
+		}
+		if err := visit(number, entries); err != nil {
+			return err
+		}
+		number++
+		entries, packBytes = nil, 0
+		return nil
+	}
+	for {
+		line, readErr := reader.ReadBytes('\n')
+		if readErr != nil && readErr != io.EOF {
+			return readErr
+		}
+		if len(line) != 0 {
+			var entry inventoryEntry
+			if err := json.Unmarshal(line, &entry); err != nil {
+				return err
+			}
+			if len(entries) >= s3PackObjects || (len(entries) > 0 && packBytes+entry.Size > s3PackBytes) {
+				if err := flush(); err != nil {
+					return err
+				}
+			}
+			entries = append(entries, entry)
+			packBytes += entry.Size
+		}
+		if readErr == io.EOF {
+			return flush()
+		}
+	}
+}
+
+func s3CaptureDefinition(scope model.SourceScope, ref model.ResourceRef, opts model.CaptureOptions) (string, error) {
+	return captureledger.DigestCaptureDefinition(captureledger.CaptureDefinition{
+		Source: captureledger.SourceIdentity{AccountID: scope.AccountID, Region: scope.Region}, Resource: captureledger.ResourceDescriptor{Service: ref.Service, Type: ref.Type, ID: ref.ID}, Mode: opts.Mode, Prefixes: opts.Prefixes,
+		Limits: captureledger.Limits{MaxObjects: opts.Limits.MaxObjects, MaxItems: opts.Limits.MaxItems, MaxPages: opts.Limits.MaxPages, MaxObjectBytes: opts.Limits.MaxObjectBytes, MaxTotalBytes: opts.Limits.MaxTotalBytes}, Overwrite: opts.Overwrite, Gzip: opts.Gzip, PreserveProvisioned: opts.PreserveProvisioned, AllowPartialData: opts.AllowPartialData,
+		PolicyIdentity: governance.IdentityOf(opts.Governance), DatasetFormat: "s3-tar-gzip-v1", DatasetVersion: 1, StructureVersion: model.CurrentSnapshotStructureVersion,
+	})
+}
+
+func s3PackFreshness(entries []inventoryEntry) captureledger.FreshnessEvidence {
+	components := make(map[string]string, len(entries))
+	h := sha256.New()
+	for _, entry := range entries {
+		identity := sha256.Sum256([]byte(entry.Key))
+		value := sha256.Sum256([]byte(entry.ETag + "\x00" + strconv.FormatInt(entry.Size, 10)))
+		id, digest := hex.EncodeToString(identity[:]), hex.EncodeToString(value[:])
+		components[id] = digest
+		_, _ = io.WriteString(h, id+"\x00"+digest+"\n")
+	}
+	return captureledger.FreshnessEvidence{Kind: "s3_inventory_v1", Digest: hex.EncodeToString(h.Sum(nil)), Components: components}
+}
+
+func chunkArtifacts(chunk model.DataChunk) []captureledger.Artifact {
+	result := []captureledger.Artifact{{Path: chunk.Data.Path, SHA256: chunk.Data.SHA256, Size: chunk.Data.Size, MediaType: chunk.Data.MediaType}}
+	if chunk.Index != nil {
+		result = append(result, captureledger.Artifact{Path: chunk.Index.Path, SHA256: chunk.Index.SHA256, Size: chunk.Index.Size, MediaType: chunk.Index.MediaType})
+	}
+	return result
+}
+
+func ledgerArtifactRef(artifact captureledger.Artifact) model.ArtifactRef {
+	return model.ArtifactRef{Path: artifact.Path, SHA256: artifact.SHA256, Size: artifact.Size, MediaType: artifact.MediaType}
 }
 
 // estimateS3RemainingArtifactBytes uses only the durable inventory. Completed
