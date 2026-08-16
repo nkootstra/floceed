@@ -392,3 +392,49 @@ func TestPullPublishesLedgerOnlyAfterSuccessfulInstall(t *testing.T) {
 		t.Fatalf("prior bundle is not replayable after failed mixed render: %v", err)
 	}
 }
+
+func TestPullSucceedsWhenReuseCachePublicationFailsAfterInstall(t *testing.T) {
+	projectDir := t.TempDir()
+	workDir := filepath.Join(projectDir, "work")
+	project := config.NewProject()
+	project.Source.Region = "eu-west-1"
+	project.Resources.S3 = []config.S3Resource{{Name: "assets"}}
+	adapter := &reusableTestAdapter{}
+	service := New("test")
+	service.Factory = adapterFactory{adapter: adapter}
+	service.ComposeValidator = func(context.Context, string) error { return nil }
+	if _, err := service.PullWithOptions(context.Background(), project, projectDir, "", "", PullOptions{WorkDir: workDir}); err != nil {
+		t.Fatal(err)
+	}
+	index, err := filepath.Glob(filepath.Join(workDir, "ledger/generations/*/*/*/*/current.json"))
+	if err != nil || len(index) != 1 {
+		t.Fatalf("ledger indexes = %v, %v", index, err)
+	}
+	beforeIndex, _ := os.ReadFile(index[0])
+	beforeManifest, _ := os.ReadFile(filepath.Join(projectDir, project.Output.Directory, "bundle/manifest.json"))
+	adapter.refresh = map[string]bool{"assets": true}
+	adapter.payloadSuffix = "-new"
+	service.publishLedger = func(*captureledger.Store, captureledger.Generation, string) error {
+		return errors.New("cache unavailable")
+	}
+	var events []model.ProgressEvent
+	result, err := service.PullWithOptions(context.Background(), project, projectDir, "", "", PullOptions{WorkDir: workDir, Progress: func(event model.ProgressEvent) { events = append(events, event) }})
+	if err != nil {
+		t.Fatalf("valid installed bundle reported failure: %v", err)
+	}
+	afterManifest, _ := os.ReadFile(filepath.Join(projectDir, project.Output.Directory, "bundle/manifest.json"))
+	if bytes.Equal(beforeManifest, afterManifest) || result.Receipt == nil {
+		t.Fatal("new bundle was not installed with a receipt")
+	}
+	afterIndex, _ := os.ReadFile(index[0])
+	if !bytes.Equal(beforeIndex, afterIndex) {
+		t.Fatal("failed cache publication changed the prior ledger index")
+	}
+	foundWarning := false
+	for _, event := range events {
+		foundWarning = foundWarning || event.Phase == "ledger"
+	}
+	if !foundWarning {
+		t.Fatal("cache publication failure was not reported in progress")
+	}
+}

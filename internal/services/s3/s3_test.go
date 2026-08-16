@@ -48,12 +48,26 @@ func TestReusableS3CaptureInventoriesButDoesNotDownloadUnchangedObjects(t *testi
 	if client.gets != 2 {
 		t.Fatalf("first GetObject calls = %d, want 2", client.gets)
 	}
+	ledger, err := captureledger.OpenStore(filepath.Join(firstRoot, "ledger"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	generation := captureledger.Generation{SchemaVersion: captureledger.CurrentSchemaVersion, ID: strings.Repeat("c", 64), Source: captureledger.SourceIdentity{AccountID: scope.AccountID, Region: scope.Region}, CreatedAt: time.Unix(1, 0).UTC(), CompletedAt: time.Unix(2, 0).UTC(), Resources: []captureledger.Resource{*first}}
+	if err := ledger.Publish(generation, firstOptions.ArtifactDirectory); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := ledger.LoadCandidates(generation.Source, first.Descriptor)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	secondRoot := t.TempDir()
 	secondSnapshot, _ := model.NewSnapshot(ref, "s3", Bucket{Name: ref.ID})
 	secondOptions := firstOptions
 	secondOptions.ArtifactDirectory, secondOptions.CheckpointDirectory = filepath.Join(secondRoot, "artifacts"), filepath.Join(secondRoot, "checkpoint")
-	second, err := adapter.captureObjectsReusable(context.Background(), scope, ref, &Bucket{Name: ref.ID}, secondSnapshot, secondOptions, catalog.ReuseRequest{Candidate: first, Materialize: copyLedgerArtifact(firstOptions.ArtifactDirectory, secondOptions.ArtifactDirectory)})
+	second, err := adapter.captureObjectsReusable(context.Background(), scope, ref, &Bucket{Name: ref.ID}, secondSnapshot, secondOptions, catalog.ReuseRequest{Candidate: &loaded.Resources[0], Materialize: func(artifact captureledger.Artifact) error {
+		return ledger.Materialize(artifact, secondOptions.ArtifactDirectory)
+	}})
 	if err != nil {
 		t.Fatal(err)
 	}

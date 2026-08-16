@@ -236,8 +236,8 @@ func (a *Application) PullWithOptions(ctx context.Context, p config.Project, pro
 		return PullResult{}, filesystemError(err)
 	}
 	if ledgerGeneration != nil {
-		if err := ledger.Publish(*ledgerGeneration, filepath.Join(tmp, "artifacts")); err != nil {
-			return PullResult{}, filesystemError(err)
+		if err := a.publishLedger(ledger, *ledgerGeneration, filepath.Join(tmp, "artifacts")); err != nil {
+			report(model.ProgressEvent{Operation: "pull", Phase: "ledger", Message: "bundle installed; capture reuse cache was not updated"})
 		}
 	}
 	if err := os.RemoveAll(tmp); err != nil {
@@ -276,12 +276,6 @@ func attachLedgerDecisions(receipt *inspection.Receipt, generation captureledger
 				decision.ArtifactBytes += artifact.Size
 			}
 			change.Units = append(change.Units, decision)
-			if unit.Reason == captureledger.ReasonCaptureDefinitionChanged && change.Outcome == inspection.OutcomeUnchanged {
-				change.Outcome = inspection.OutcomeChanged
-				change.Categories = append(change.Categories, inspection.CategoryDataset)
-				receipt.Counts.Unchanged--
-				receipt.Counts.Changed++
-			}
 		}
 		sort.Slice(change.Units, func(i, j int) bool {
 			return cmp.Or(cmp.Compare(change.Units[i].ID, change.Units[j].ID), cmp.Compare(change.Units[i].Outcome, change.Units[j].Outcome), cmp.Compare(change.Units[i].Reason, change.Units[j].Reason)) < 0

@@ -220,7 +220,7 @@ func (a *Adapter) captureObjectsReusable(ctx context.Context, scope model.Source
 	var resource *captureledger.Resource
 	if reuseEnabled {
 		resource = &captureledger.Resource{Descriptor: captureledger.ResourceDescriptor{Service: ref.Service, Type: ref.Type, ID: ref.ID}, CaptureDefinition: definition}
-		if err := scanS3InventoryPacks(invPath, func(number int, entries []inventoryEntry) error {
+		if err := scanS3InventoryPacks(invPath, len(cp.Chunks), func(number int, entries []inventoryEntry) error {
 			freshness := s3PackFreshness(entries)
 			if number <= len(cp.Chunks) {
 				resource.Units = append(resource.Units, captureledger.Unit{ID: fmt.Sprintf("pack-%06d", number), Freshness: freshness, Artifacts: chunkArtifacts(cp.Chunks[number-1]), Outcome: captureledger.UnitOutcomeRefreshed, Reason: captureledger.ReasonNoCandidate, CapturedAt: time.Now().UTC()})
@@ -281,9 +281,10 @@ func (a *Adapter) captureObjectsReusable(ctx context.Context, scope model.Source
 			reason = captureledger.ReasonSourceContentChanged
 		}
 		var chunk model.DataChunk
-		reused := found && unit.Outcome != captureledger.UnitOutcomeInvalidated && unit.Freshness.Kind == freshness.Kind && unit.Freshness.Digest == freshness.Digest && unit.Freshness.Records == freshness.Records && unit.Freshness.Bytes == freshness.Bytes && len(unit.Artifacts) == 2 && reuseEnabled
+		dataArtifact, indexArtifact, artifactErr := s3UnitArtifacts(unit)
+		reused := found && unit.Outcome != captureledger.UnitOutcomeInvalidated && unit.Freshness.Kind == freshness.Kind && unit.Freshness.Digest == freshness.Digest && unit.Freshness.Records == freshness.Records && unit.Freshness.Bytes == freshness.Bytes && artifactErr == nil && reuseEnabled
 		if reused {
-			for _, artifact := range unit.Artifacts {
+			for _, artifact := range []captureledger.Artifact{dataArtifact, indexArtifact} {
 				if err := reuse.Materialize(artifact); err != nil {
 					reused = false
 					if classified, ok := captureledger.InvalidationReason(err); ok {
@@ -296,7 +297,7 @@ func (a *Adapter) captureObjectsReusable(ctx context.Context, scope model.Source
 			}
 		}
 		if reused {
-			data, index := ledgerArtifactRef(unit.Artifacts[0]), ledgerArtifactRef(unit.Artifacts[1])
+			data, index := ledgerArtifactRef(dataArtifact), ledgerArtifactRef(indexArtifact)
 			chunk = model.DataChunk{Data: data, Index: &index, Records: int64(len(entries)), SourceBytes: inventorySize(entries)}
 			unit.Outcome, unit.Reason, unit.Freshness = captureledger.UnitOutcomeReused, captureledger.ReasonReused, freshness
 		} else {
@@ -353,7 +354,10 @@ func missingS3Units(candidate captureledger.Resource, currentRecords int64) []ca
 	return []captureledger.Unit{{ID: "objects-missing", Freshness: captureledger.FreshnessEvidence{Kind: "s3_inventory_count_v1", Digest: hex.EncodeToString(digest[:]), Records: previousRecords - currentRecords}, Outcome: captureledger.UnitOutcomeInvalidated, Reason: captureledger.ReasonSourceUnitMissing, CapturedAt: capturedAt}}
 }
 
-func scanS3InventoryPacks(path string, visit func(int, []inventoryEntry) error) error {
+func scanS3InventoryPacks(path string, maxPacks int, visit func(int, []inventoryEntry) error) error {
+	if maxPacks == 0 {
+		return nil
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return err
@@ -375,6 +379,9 @@ func scanS3InventoryPacks(path string, visit func(int, []inventoryEntry) error) 
 		return nil
 	}
 	for {
+		if number > maxPacks {
+			return nil
+		}
 		line, readErr := reader.ReadBytes('\n')
 		if readErr != nil && readErr != io.EOF {
 			return readErr
@@ -396,6 +403,28 @@ func scanS3InventoryPacks(path string, visit func(int, []inventoryEntry) error) 
 			return flush()
 		}
 	}
+}
+
+func s3UnitArtifacts(unit captureledger.Unit) (captureledger.Artifact, captureledger.Artifact, error) {
+	var data, index captureledger.Artifact
+	for _, artifact := range unit.Artifacts {
+		switch {
+		case strings.HasSuffix(artifact.Path, ".index.ndjson.gz"):
+			if index.Path != "" {
+				return captureledger.Artifact{}, captureledger.Artifact{}, fmt.Errorf("duplicate S3 index artifact")
+			}
+			index = artifact
+		case strings.HasSuffix(artifact.Path, ".tar.gz"):
+			if data.Path != "" {
+				return captureledger.Artifact{}, captureledger.Artifact{}, fmt.Errorf("duplicate S3 data artifact")
+			}
+			data = artifact
+		}
+	}
+	if data.Path == "" || index.Path == "" {
+		return captureledger.Artifact{}, captureledger.Artifact{}, fmt.Errorf("S3 unit requires one data and one index artifact")
+	}
+	return data, index, nil
 }
 
 func s3CaptureDefinition(scope model.SourceScope, ref model.ResourceRef, opts model.CaptureOptions) (string, error) {

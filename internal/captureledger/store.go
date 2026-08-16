@@ -151,18 +151,9 @@ func (s *Store) OpenArtifact(artifact Artifact) (*os.File, error) {
 	if artifact.Size < 0 || !validSHA256(artifact.SHA256) {
 		return nil, &InvalidationError{Reason: ReasonArtifactCorrupt, Err: fmt.Errorf("invalid artifact metadata")}
 	}
-	filename := s.blobPath(artifact)
-	f, err := openNoFollow(filename)
+	f, err := s.openBlob(artifact)
 	if err != nil {
-		return nil, &InvalidationError{Reason: ReasonArtifactMissing, Err: err}
-	}
-	info, err := f.Stat()
-	if err != nil || !info.Mode().IsRegular() {
-		_ = f.Close()
-		if err == nil {
-			err = fmt.Errorf("blob is not a regular file")
-		}
-		return nil, &InvalidationError{Reason: ReasonArtifactMissing, Err: err}
+		return nil, err
 	}
 	got, err := sumOpenFile(f)
 	if err != nil {
@@ -180,30 +171,85 @@ func (s *Store) OpenArtifact(artifact Artifact) (*os.File, error) {
 	return f, nil
 }
 
-// Materialize verifies a blob, then hard-links it into the current capture
-// root or copies it when linking is unavailable. The destination is verified
-// before it can be consumed by bundle rendering.
+func (s *Store) openBlob(artifact Artifact) (*os.File, error) {
+	f, err := openNoFollow(s.blobPath(artifact))
+	if err != nil {
+		return nil, &InvalidationError{Reason: ReasonArtifactMissing, Err: err}
+	}
+	info, err := f.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		_ = f.Close()
+		if err == nil {
+			err = fmt.Errorf("blob is not a regular file")
+		}
+		return nil, &InvalidationError{Reason: ReasonArtifactMissing, Err: err}
+	}
+	return f, nil
+}
+
+// Materialize copies a regular no-follow blob into the current capture root
+// while verifying its size and checksum.
 func (s *Store) Materialize(artifact Artifact, artifactRoot string) error {
 	if err := bundle.ValidateRelativePath(artifact.Path); err != nil {
 		return &InvalidationError{Reason: ReasonArtifactCorrupt, Err: err}
 	}
 	destination := filepath.Join(artifactRoot, filepath.FromSlash(artifact.Path))
-	if err := os.MkdirAll(filepath.Dir(destination), 0o700); err != nil {
+	if err := ensureMaterializeParent(artifactRoot, artifact.Path); err != nil {
 		return err
 	}
-	if err := os.Link(s.blobPath(artifact), destination); err != nil {
-		if !errors.Is(err, os.ErrExist) {
-			if err := copyExclusive(destination, s.blobPath(artifact)); err != nil {
-				return &InvalidationError{Reason: ReasonArtifactMissing, Err: err}
-			}
-		}
-	}
-	got, err := bundle.SumFile(destination)
+	f, err := s.openBlob(artifact)
 	if err != nil {
 		return err
 	}
-	if got.SHA256 != artifact.SHA256 || got.Size != artifact.Size {
-		_ = os.Remove(destination)
+	err = copyOpenVerified(destination, f, artifact)
+	_ = f.Close()
+	if errors.Is(err, os.ErrExist) {
+		return verifyMaterialized(destination, artifact)
+	}
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func ensureMaterializeParent(root, relative string) error {
+	info, err := os.Lstat(root)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return &InvalidationError{Reason: ReasonArtifactMissing, Err: fmt.Errorf("artifact root is not a regular directory")}
+	}
+	current := root
+	parts := strings.Split(filepath.Dir(filepath.FromSlash(relative)), string(filepath.Separator))
+	for _, part := range parts {
+		if part == "." {
+			continue
+		}
+		current = filepath.Join(current, part)
+		if err := os.Mkdir(current, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+			return err
+		}
+		info, err := os.Lstat(current)
+		if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return &InvalidationError{Reason: ReasonArtifactMissing, Err: fmt.Errorf("artifact destination parent is not a regular directory")}
+		}
+	}
+	return nil
+}
+
+func verifyMaterialized(path string, artifact Artifact) error {
+	f, err := openNoFollow(path)
+	if err != nil {
+		return &InvalidationError{Reason: ReasonArtifactMissing, Err: err}
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		return &InvalidationError{Reason: ReasonArtifactMissing, Err: fmt.Errorf("materialized artifact is not a regular file")}
+	}
+	got, err := sumOpenFile(f)
+	if err != nil || got.SHA256 != artifact.SHA256 || got.Size != artifact.Size {
 		return &InvalidationError{Reason: ReasonArtifactCorrupt, Err: fmt.Errorf("materialized blob size or checksum mismatch")}
 	}
 	return nil
@@ -275,7 +321,7 @@ func digestBytes(payload []byte) string {
 }
 
 func openNoFollow(filename string) (*os.File, error) {
-	fd, err := unix.Open(filename, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	fd, err := unix.Open(filename, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
 	if err != nil {
 		return nil, err
 	}

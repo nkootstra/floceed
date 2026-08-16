@@ -610,15 +610,15 @@ func TestLedgerDecisionsPreserveReceiptClassificationsAndSortUnits(t *testing.T)
 	}}}
 	attachLedgerDecisions(&receipt, generation, map[string]string{"s3\x00bucket\x00assets": strings.Repeat("b", 64)})
 
-	if receipt.Counts != (inspection.ReceiptCounts{Removed: 1, Changed: 1}) {
+	if receipt.Counts != (inspection.ReceiptCounts{Removed: 1, Unchanged: 1}) {
 		t.Fatalf("receipt counts = %#v", receipt.Counts)
 	}
-	changed, removed := receipt.Resources[0], receipt.Resources[1]
-	if changed.Outcome != inspection.OutcomeChanged || !reflect.DeepEqual(changed.Categories, []inspection.ChangeCategory{inspection.CategoryDataset}) {
-		t.Fatalf("policy invalidation classification = %#v", changed)
+	unchanged, removed := receipt.Resources[0], receipt.Resources[1]
+	if unchanged.Outcome != inspection.OutcomeUnchanged || len(unchanged.Categories) != 0 {
+		t.Fatalf("capture decision changed semantic classification = %#v", unchanged)
 	}
-	if len(changed.Units) != 2 || changed.Units[0].ID != "pack-1" || changed.Units[1].ID != "pack-2" {
-		t.Fatalf("unit order = %#v", changed.Units)
+	if len(unchanged.Units) != 2 || unchanged.Units[0].ID != "pack-1" || unchanged.Units[1].ID != "pack-2" {
+		t.Fatalf("unit order = %#v", unchanged.Units)
 	}
 	if removed.Outcome != inspection.OutcomeRemoved || len(removed.Units) != 0 {
 		t.Fatalf("selection removal classification changed = %#v", removed)

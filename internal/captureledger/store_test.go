@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"golang.org/x/sys/unix"
 )
 
 func TestStorePublishesAndReopensVerifiedGeneration(t *testing.T) {
@@ -126,6 +128,83 @@ func TestLoadCandidatesDefersBlobVerificationUntilSelected(t *testing.T) {
 	}
 	if err := store.ValidateArtifact(unit.Artifacts[0]); err == nil {
 		t.Fatal("selected corrupt artifact passed deferred validation")
+	}
+}
+
+func TestMaterializeRejectsSymlinkedBlobAndDestination(t *testing.T) {
+	root, artifacts, generation, _ := storeFixture(t)
+	store, _ := OpenStore(root)
+	if err := store.Publish(generation, artifacts); err != nil {
+		t.Fatal(err)
+	}
+	artifact := generation.Resources[0].Units[0].Artifacts[0]
+	blob := store.blobPath(artifact)
+	if err := os.Remove(blob); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(artifacts, filepath.FromSlash(artifact.Path)), blob); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Materialize(artifact, t.TempDir()); err == nil {
+		t.Fatal("symlinked blob was materialized")
+	}
+
+	if err := os.Remove(blob); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Publish(generation, artifacts); err != nil {
+		t.Fatal(err)
+	}
+	destinationRoot := t.TempDir()
+	destination := filepath.Join(destinationRoot, filepath.FromSlash(artifact.Path))
+	if err := os.MkdirAll(filepath.Dir(destination), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(artifacts, filepath.FromSlash(artifact.Path)), destination); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Materialize(artifact, destinationRoot); err == nil {
+		t.Fatal("symlinked destination was accepted")
+	}
+}
+
+func TestMaterializeRejectsFIFOBlobWithoutBlocking(t *testing.T) {
+	root, artifacts, generation, _ := storeFixture(t)
+	store, _ := OpenStore(root)
+	if err := store.Publish(generation, artifacts); err != nil {
+		t.Fatal(err)
+	}
+	artifact := generation.Resources[0].Units[0].Artifacts[0]
+	blob := store.blobPath(artifact)
+	if err := os.Remove(blob); err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Mkfifo(blob, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Materialize(artifact, t.TempDir()); err == nil {
+		t.Fatal("FIFO blob was materialized")
+	}
+}
+
+func TestMaterializeRejectsSymlinkedDestinationParent(t *testing.T) {
+	root, artifacts, generation, _ := storeFixture(t)
+	store, _ := OpenStore(root)
+	if err := store.Publish(generation, artifacts); err != nil {
+		t.Fatal(err)
+	}
+	artifact := generation.Resources[0].Units[0].Artifacts[0]
+	destinationRoot := t.TempDir()
+	outside := t.TempDir()
+	firstParent := strings.Split(filepath.FromSlash(artifact.Path), string(filepath.Separator))[0]
+	if err := os.Symlink(outside, filepath.Join(destinationRoot, firstParent)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Materialize(artifact, destinationRoot); err == nil {
+		t.Fatal("symlinked destination parent was accepted")
+	}
+	if entries, err := os.ReadDir(outside); err != nil || len(entries) != 0 {
+		t.Fatalf("materialization escaped destination root: entries=%v err=%v", entries, err)
 	}
 }
 
