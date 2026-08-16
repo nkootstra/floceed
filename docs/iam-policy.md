@@ -73,6 +73,14 @@ Structure-only projects can omit `s3:GetObject`, `s3:GetObjectTagging`, and
 `dynamodb:Scan`. An optional configuration permission denied for one resource
 is reported as a finding instead of hiding that resource.
 
+Completed S3 reuse evaluates freshness with `ListObjectsV2`, which AWS
+authorizes through the existing `s3:ListBucket` action in `ReadSelectedS3`.
+It adds no permission beyond the policy above. An unchanged inventory can avoid
+`s3:GetObject` body reads during that pull, but data-enabled capture still needs
+`s3:GetObject` for first capture and any refreshed unit. DynamoDB does not use
+incremental reads or table metadata as a freshness token in v0.4: data-enabled
+tables still require `dynamodb:Scan` and are conservatively scanned again.
+
 Fixture profiles do not add AWS permissions. DynamoDB attribute transformation
 and cohort selection operate on items already returned by `dynamodb:Scan`; S3
 metadata and allowlisted textual-body transformation operate on objects already

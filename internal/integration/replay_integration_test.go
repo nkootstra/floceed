@@ -104,6 +104,31 @@ func TestGovernedSchema3BundleReplaysPreparedTransformedArtifacts(t *testing.T) 
 	verifySnapshot(t, ctx, endpoint, transformedObject, transformedItemID)
 }
 
+func TestReplayUsesStandaloneBundleAfterCaptureStateIsDetached(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
+	defer cancel()
+
+	bundleRoot := renderSyntheticBundle(t, ctx, replayFixture{
+		SchemaVersion: 3,
+		ObjectBody:    "standalone reused and refreshed fixture\n",
+		ItemID:        "standalone-fixture",
+	})
+	captureState := filepath.Join(filepath.Dir(bundleRoot), "artifacts")
+	detachedState := filepath.Join(filepath.Dir(bundleRoot), "detached-capture-state")
+	if err := os.Rename(captureState, detachedState); err != nil {
+		t.Fatalf("detach capture state: %v", err)
+	}
+	if err := bundle.ValidateGenerated(bundleRoot); err != nil {
+		t.Fatalf("validate bundle without capture state: %v", err)
+	}
+
+	container := startFloci(t, ctx, bundleRoot, t.TempDir())
+	defer testcontainers.CleanupContainer(t, container)
+	endpoint := endpointFor(t, ctx, container)
+	waitForReady(t, ctx, container, endpoint)
+	verifySnapshot(t, ctx, endpoint, "standalone reused and refreshed fixture\n", "standalone-fixture")
+}
+
 type replayFixture struct {
 	SchemaVersion int
 	ObjectBody    string

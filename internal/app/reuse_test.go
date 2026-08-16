@@ -174,6 +174,27 @@ func TestPullCombinesReusedAndFreshArtifactsInOneBundle(t *testing.T) {
 	if bytes.Contains(manifest, []byte("ledger")) {
 		t.Fatal("mixed bundle contains a ledger reference")
 	}
+	detachedWorkDir := filepath.Join(projectDir, "detached-work")
+	if err := os.Rename(workDir, detachedWorkDir); err != nil {
+		t.Fatalf("detach capture work and ledger: %v", err)
+	}
+	if err := bundle.ValidateGenerated(root); err != nil {
+		t.Fatalf("mixed bundle depends on detached capture state: %v", err)
+	}
+	for _, snapshot := range result.Snapshots {
+		if snapshot.Dataset == nil || len(snapshot.Dataset.Chunks) != 1 {
+			t.Fatalf("detached snapshot dataset = %#v", snapshot.Dataset)
+		}
+		chunk := snapshot.Dataset.Chunks[0]
+		if chunk.Index == nil {
+			t.Fatalf("detached snapshot chunk has no index: %#v", chunk)
+		}
+		for _, ref := range []model.ArtifactRef{chunk.Data, *chunk.Index} {
+			if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(ref.Path))); err != nil {
+				t.Fatalf("standalone artifact %q: %v", ref.Path, err)
+			}
+		}
+	}
 }
 
 func TestPullReusesVerifiedCandidateIntoCompleteStandaloneBundle(t *testing.T) {
@@ -306,7 +327,7 @@ func TestPullPublishesLedgerOnlyAfterSuccessfulInstall(t *testing.T) {
 	workDir := filepath.Join(projectDir, "work")
 	project := config.NewProject()
 	project.Source.Region = "eu-west-1"
-	project.Resources.S3 = []config.S3Resource{{Name: "assets"}}
+	project.Resources.S3 = []config.S3Resource{{Name: "assets"}, {Name: "uploads"}}
 	adapter := &reusableTestAdapter{}
 	service := New("test")
 	service.Factory = adapterFactory{adapter: adapter}
@@ -316,24 +337,47 @@ func TestPullPublishesLedgerOnlyAfterSuccessfulInstall(t *testing.T) {
 		t.Fatal(err)
 	}
 	indexes, err := filepath.Glob(filepath.Join(workDir, "ledger/generations/*/*/*/*/current.json"))
-	if err != nil || len(indexes) != 1 {
+	if err != nil || len(indexes) != 2 {
 		t.Fatalf("ledger indexes = %v, %v", indexes, err)
 	}
-	before, err := os.ReadFile(indexes[0])
+	beforeIndexes := make(map[string][]byte, len(indexes))
+	for _, index := range indexes {
+		beforeIndexes[index], err = os.ReadFile(index)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	target := filepath.Join(projectDir, project.Output.Directory)
+	beforeManifest, err := os.ReadFile(filepath.Join(target, "bundle/manifest.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	adapter.refresh = map[string]bool{"assets": true}
+	adapter.refresh = map[string]bool{"uploads": true}
 	service.Now = func() time.Time { return time.Unix(20, 0).UTC() }
 	service.ComposeValidator = func(context.Context, string) error { return errors.New("render failed") }
 	if _, err := service.PullWithOptions(context.Background(), project, projectDir, "", "", PullOptions{WorkDir: workDir}); err == nil {
 		t.Fatal("pull succeeded despite render failure")
 	}
-	after, err := os.ReadFile(indexes[0])
+	if adapter.candidateCalls != 1 {
+		t.Fatalf("reused candidate calls = %d, want 1", adapter.candidateCalls)
+	}
+	for _, index := range indexes {
+		after, readErr := os.ReadFile(index)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if !bytes.Equal(beforeIndexes[index], after) {
+			t.Fatalf("failed mixed render published ledger generation %q", index)
+		}
+	}
+	afterManifest, err := os.ReadFile(filepath.Join(target, "bundle/manifest.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(before, after) {
-		t.Fatal("failed render published a ledger generation")
+	if !bytes.Equal(beforeManifest, afterManifest) {
+		t.Fatal("failed mixed render changed the installed bundle")
+	}
+	if err := bundle.ValidateGenerated(target); err != nil {
+		t.Fatalf("prior bundle is not replayable after failed mixed render: %v", err)
 	}
 }
