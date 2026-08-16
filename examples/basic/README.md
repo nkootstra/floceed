@@ -6,6 +6,7 @@ expected account ID, and resource names before running it.
 ```bash
 floceed plan --project floceed.yaml
 floceed pull --project floceed.yaml
+floceed inspect --project floceed.yaml
 floceed up --project floceed.yaml
 ```
 
@@ -14,6 +15,21 @@ floceed up --project floceed.yaml
 `checksums.json`. Fixture bytes below `.floceed/bundle/data/` are ignored by
 the generated `.floceed/.gitignore`; decide deliberately how they should be
 stored and shared.
+
+Inspect the installed bundle before starting Docker, emit its stable JSON read
+model for automation, or compare it with another project/bundle:
+
+```bash
+floceed inspect --project floceed.yaml --output json
+floceed inspect --project floceed.yaml --compare ../previous/floceed.yaml
+floceed inspect --project floceed.yaml --runtime
+```
+
+The first two forms are offline. `--runtime` adds a bounded Floci initialization
+readiness check; an unavailable runtime does not invalidate the artifact.
+Receipts classify resources as added, removed, changed, or unchanged and report
+safe semantic categories without fixture values. They explain differences but
+never reconcile or delete local state.
 
 The example also defines a fictional `share-safe` fixture profile. Inject its
 key material at runtime and select it explicitly:

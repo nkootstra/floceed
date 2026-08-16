@@ -136,6 +136,61 @@ func TestInspectJSONInvalidBundleUsesStableErrorEnvelopeAndExitCode(t *testing.T
 	}
 }
 
+func TestInspectCommittedFixturesOffline(t *testing.T) {
+	current := filepath.Join("testdata", "inspect", "current", "floceed.yaml")
+	baseline := filepath.Join("testdata", "inspect", "baseline", "floceed.yaml")
+	governanceCurrent := filepath.Join("testdata", "inspect", "governance-current", "floceed.yaml")
+	for _, args := range [][]string{
+		{"inspect", "--project", current},
+		{"inspect", "--project", current, "--output", "json"},
+		{"inspect", "--project", current, "--compare", baseline, "--output", "json"},
+		{"inspect", "--project", governanceCurrent, "--compare", current, "--output", "json"},
+	} {
+		var out bytes.Buffer
+		cmd := New(Options{Stdout: &out, Stderr: &bytes.Buffer{}, App: app.New("test")})
+		cmd.SetArgs(args)
+		if err := cmd.ExecuteContext(context.Background()); err != nil {
+			t.Fatalf("floceed %v: %v", args, err)
+		}
+		for _, canary := range []string{"FIXTURE_RECORD_SECRET_CANARY", "GOVERNANCE_REPLACEMENT_SECRET_CANARY"} {
+			if strings.Contains(out.String(), canary) {
+				t.Fatalf("floceed %v disclosed %q", args, canary)
+			}
+		}
+	}
+
+	result := inspectFixtureJSON(t, current, baseline)
+	if result.Receipt == nil || result.Receipt.Counts != (inspection.ReceiptCounts{Added: 1, Removed: 1, Changed: 1, Unchanged: 1}) {
+		t.Fatalf("baseline receipt = %#v", result.Receipt)
+	}
+	governance := inspectFixtureJSON(t, governanceCurrent, current)
+	if governance.Receipt == nil || governance.Receipt.Counts.Changed == 0 {
+		t.Fatalf("governance receipt = %#v", governance.Receipt)
+	}
+	for _, change := range governance.Receipt.Resources {
+		if change.Outcome == inspection.OutcomeChanged && !reflect.DeepEqual(change.Categories, []inspection.ChangeCategory{inspection.CategoryGovernance}) {
+			t.Fatalf("governance categories = %v", change.Categories)
+		}
+	}
+}
+
+func inspectFixtureJSON(t *testing.T, project, compare string) inspection.Inspection {
+	t.Helper()
+	var out bytes.Buffer
+	cmd := New(Options{Stdout: &out, Stderr: &bytes.Buffer{}, App: app.New("test")})
+	cmd.SetArgs([]string{"inspect", "--project", project, "--compare", compare, "--output", "json"})
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var envelope struct {
+		Data inspection.Inspection `json:"data"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	return envelope.Data
+}
+
 func (f *fakeService) PlanWithOptions(_ context.Context, _ config.Project, options app.PlanOptions) (app.Plan, error) {
 	f.planned = true
 	f.fixtureProfile = options.FixtureProfile

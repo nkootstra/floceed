@@ -1,0 +1,148 @@
+{
+  "schema_version": 3,
+  "tool": {
+    "version": "v0.3.0-fixture"
+  },
+  "target": {
+    "floci_version": "1.6.0",
+    "image": "ghcr.io/example/floci:1.6.0"
+  },
+  "source": {
+    "account_id": "123456789012",
+    "region": "eu-west-1"
+  },
+  "capture": {
+    "captured_at": "2026-08-16T10:21:00Z"
+  },
+  "selected": [
+    {
+      "service": "dynamodb",
+      "type": "table",
+      "id": "customers"
+    },
+    {
+      "service": "s3",
+      "type": "bucket",
+      "id": "assets"
+    },
+    {
+      "service": "s3",
+      "type": "bucket",
+      "id": "reports"
+    }
+  ],
+  "snapshots": [
+    {
+      "resource": {
+        "service": "dynamodb",
+        "type": "table",
+        "id": "customers"
+      },
+      "service": "dynamodb",
+      "structure_version": 1,
+      "structure": {
+        "name": "customers",
+        "attribute_definitions": [],
+        "key_schema": [
+          {
+            "attribute_name": "id",
+            "key_type": "HASH"
+          }
+        ],
+        "billing_mode": "PROVISIONED",
+        "private_fixture_canary": "FIXTURE_RECORD_SECRET_CANARY"
+      },
+      "dataset": {
+        "format": "dynamodb-ndjson-gzip-v1",
+        "records": 0,
+        "source_bytes": 0,
+        "consistency": "eventual",
+        "chunks": null
+      }
+    },
+    {
+      "resource": {
+        "service": "s3",
+        "type": "bucket",
+        "id": "assets"
+      },
+      "service": "s3",
+      "structure_version": 1,
+      "structure": {
+        "name": "assets",
+        "region": "eu-west-1"
+      },
+      "dataset": {
+        "format": "s3-tar-gzip-v1",
+        "records": 0,
+        "source_bytes": 0,
+        "consistency": "point-in-time",
+        "chunks": null
+      }
+    },
+    {
+      "resource": {
+        "service": "s3",
+        "type": "bucket",
+        "id": "reports"
+      },
+      "service": "s3",
+      "structure_version": 1,
+      "structure": {
+        "name": "reports",
+        "region": "eu-west-1"
+      },
+      "dataset": {
+        "format": "s3-tar-gzip-v1",
+        "records": 0,
+        "source_bytes": 0,
+        "consistency": "point-in-time",
+        "chunks": null
+      }
+    }
+  ],
+  "operations": [
+    {
+      "id": "create-customers",
+      "stage": "base",
+      "service": "dynamodb",
+      "resource_id": "customers",
+      "action": "create_table"
+    }
+  ],
+  "findings": [
+    {
+      "code": "FIXTURE_METADATA_ONLY",
+      "severity": "info",
+      "support": "full",
+      "message": "GOVERNANCE_REPLACEMENT_SECRET_CANARY",
+      "remediation": "FIXTURE_RECORD_SECRET_CANARY"
+    }
+  ],
+  "governance": {
+    "profile": "share-safe",
+    "policy_identity": "policy-fixture-v1",
+    "cohort_identity": "cohort-fixture-v1",
+    "key_ids": [
+      "fixture-key-id"
+    ],
+    "algorithms": [
+      "pseudonym/v1"
+    ],
+    "rules": [
+      {
+        "rule_id": "customer-email",
+        "action": "pseudonymize",
+        "count": "10-99"
+      }
+    ],
+    "cohorts": [
+      {
+        "resource_identity": "dynamodb/table/customers",
+        "eligible": "100-999",
+        "retained": "10-99",
+        "truncated": true
+      }
+    ]
+  }
+}
