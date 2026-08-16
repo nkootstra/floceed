@@ -138,6 +138,12 @@ type memorySink struct {
 	data []byte
 }
 
+type failingSink struct{ err error }
+
+func (s failingSink) WriteArtifact(context.Context, string, func(io.Writer) error) (model.ArtifactRef, error) {
+	return model.ArtifactRef{}, s.err
+}
+
 func (s *memorySink) WriteArtifact(_ context.Context, path string, write func(io.Writer) error) (model.ArtifactRef, error) {
 	var b bytes.Buffer
 	if err := write(&b); err != nil {
@@ -224,5 +230,35 @@ func TestCaptureDataHonorsItemLimitAndIsDeterministic(t *testing.T) {
 	want := "{\"pk\":{\"S\":\"a\"}}\n{\"pk\":{\"S\":\"z\"}}\n"
 	if string(sink.data) != want {
 		t.Fatalf("got %q want %q", sink.data, want)
+	}
+}
+
+func TestBoundedCaptureResumePreservesTruncationAfterFinalizationFailure(t *testing.T) {
+	root := t.TempDir()
+	f := &fakeClient{scans: []*dynamodb.ScanOutput{{
+		Items:            []map[string]types.AttributeValue{{"pk": &types.AttributeValueMemberS{Value: "a"}}},
+		LastEvaluatedKey: map[string]types.AttributeValue{"pk": &types.AttributeValueMemberS{Value: "a"}},
+	}}}
+	adapter := New(f)
+	opts := model.CaptureOptions{
+		Mode:                "bounded",
+		Limits:              model.DataLimits{MaxItems: 1, MaxPages: 1},
+		ArtifactDirectory:   filepath.Join(root, "artifacts"),
+		CheckpointDirectory: filepath.Join(root, "checkpoint"),
+	}
+	finalizeErr := errors.New("finalization failed")
+	if _, err := adapter.captureData(context.Background(), "orders", opts, failingSink{err: finalizeErr}); !errors.Is(err, finalizeErr) {
+		t.Fatalf("first capture error = %v, want %v", err, finalizeErr)
+	}
+
+	result, err := adapter.captureData(context.Background(), "orders", opts, &memorySink{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Truncated {
+		t.Fatalf("resumed result = %#v, want truncated", result)
+	}
+	if len(f.scans) != 0 {
+		t.Fatalf("resume performed an unexpected scan")
 	}
 }

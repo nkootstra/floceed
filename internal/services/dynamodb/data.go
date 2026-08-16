@@ -74,10 +74,11 @@ type DataResult struct {
 	Truncated        bool
 }
 
-// captureCheckpointVersion 2 records the capture definition (mode, limits)
-// alongside progress so a checkpoint can only be resumed by a run with
-// identical capture options.
-const captureCheckpointVersion = 2
+// captureCheckpointVersion 3 records the capture definition (mode, limits)
+// and whether a bounded scan was truncated alongside progress. A checkpoint
+// can therefore only be resumed by a run with identical capture options while
+// preserving the final result classification.
+const captureCheckpointVersion = 3
 
 type captureCheckpoint struct {
 	Version          int             `json:"version"`
@@ -89,6 +90,7 @@ type captureCheckpoint struct {
 	Runs             []checkpointRun `json:"runs"`
 	Items            int             `json:"items"`
 	Pages            int             `json:"pages"`
+	Truncated        bool            `json:"truncated,omitempty"`
 	SourceBytes      int64           `json:"source_bytes"`
 	ConsumedCapacity float64         `json:"consumed_capacity"`
 }
@@ -136,7 +138,7 @@ func (a *Adapter) captureData(ctx context.Context, table string, opts model.Capt
 			return DataResult{}, fmt.Errorf("decode DynamoDB resume key: %w", err)
 		}
 	}
-	r := DataResult{Items: cp.Items, Pages: cp.Pages, ConsumedCapacity: cp.ConsumedCapacity}
+	r := DataResult{Items: cp.Items, Pages: cp.Pages, ConsumedCapacity: cp.ConsumedCapacity, Truncated: cp.Truncated}
 	diskChecked := false
 	checkDisk := func() error {
 		if !full || diskChecked {
@@ -221,6 +223,10 @@ func (a *Adapter) captureData(ctx context.Context, table string, opts model.Capt
 		if err != nil {
 			return r, err
 		}
+		if !full && len(key) > 0 && (r.Pages == opts.Limits.MaxPages || r.Items == opts.Limits.MaxItems) {
+			r.Truncated = true
+		}
+		cp.Truncated = r.Truncated
 		if err := saveCheckpoint(cpPath, cp); err != nil {
 			return r, err
 		}
@@ -231,8 +237,7 @@ func (a *Adapter) captureData(ctx context.Context, table string, opts model.Capt
 		if len(key) == 0 {
 			break
 		}
-		if !full && (r.Pages == opts.Limits.MaxPages || r.Items == opts.Limits.MaxItems) {
-			r.Truncated = true
+		if r.Truncated {
 			break
 		}
 	}
