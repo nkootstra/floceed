@@ -37,6 +37,13 @@ func PackFixture(ctx context.Context, source, destination string) error {
 	if _, err := VerifyFixture(source); err != nil {
 		return err
 	}
+	verifiedChecksums, err := os.ReadFile(filepath.Join(source, "checksums.json"))
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(checksumsBytes, verifiedChecksums) {
+		return fmt.Errorf("fixture checksum inventory changed during verification")
+	}
 	var checksums Checksums
 	if err := json.Unmarshal(checksumsBytes, &checksums); err != nil {
 		return err
