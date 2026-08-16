@@ -1,0 +1,4 @@
+# Changes to fixture admission and CI trust-boundary inputs require maintainer review.
+/.github/workflows/ci.yml @nkootstra
+/internal/integration/testdata/ @nkootstra
+/docs/bundle-format.md @nkootstra

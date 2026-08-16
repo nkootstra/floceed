@@ -41,3 +41,63 @@ jobs:
           cache: true
       - name: Replay integration
         run: go test -tags=integration ./internal/integration -count=1 -v
+
+  fixture-producer:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v6
+        with:
+          go-version: 1.26.6
+          cache: true
+      - name: Build CLI
+        run: go build -o floceed-ci ./cmd/floceed
+      - name: Generate committed-shape fixture
+        run: go run ./internal/testfixture/cmd/generate-bundle --output fixture-artifact
+      - name: Pack fixture
+        run: ./floceed-ci fixture pack --input fixture-artifact/current/.floceed --archive fixture.tar.gz --output json
+      - name: Upload producer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: floceed-fixture-${{ github.sha }}
+          path: |
+            fixture.tar.gz
+            internal/integration/testdata/fixture-policy.yaml
+          if-no-files-found: error
+
+  fixture-consumer:
+    needs: fixture-producer
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 10
+    env:
+      AWS_ACCESS_KEY_ID: ""
+      AWS_SECRET_ACCESS_KEY: ""
+      AWS_SESSION_TOKEN: ""
+      AWS_PROFILE: ""
+      AWS_CONFIG_FILE: /dev/null
+      AWS_SHARED_CREDENTIALS_FILE: /dev/null
+      AWS_EC2_METADATA_DISABLED: "true"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v6
+        with:
+          go-version: 1.26.6
+          cache: true
+      - name: Build CLI
+        run: go build -o floceed-ci ./cmd/floceed
+      - name: Download producer artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: floceed-fixture-${{ github.sha }}
+          path: fixture-input
+      - name: Unpack and verify fixture
+        run: |
+          ./floceed-ci fixture unpack --archive fixture-input/fixture.tar.gz --target fixture-input/unpacked --output json
+          ./floceed-ci fixture verify --input fixture-input/unpacked --output json
+      - name: Admit fixture under protected policy
+        run: ./floceed-ci fixture admit --input fixture-input/unpacked --policy fixture-input/internal/integration/testdata/fixture-policy.yaml --output json

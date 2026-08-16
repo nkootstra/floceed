@@ -103,3 +103,22 @@ can be reported as `source_unit_missing` and omitted from the newly assembled
 standalone bundle; replay continues to use the same non-destructive application
 contract described above. Failed capture or rendering preserves the previously
 installed, replayable directory.
+
+## CI fixture verification and admission
+
+`floceed fixture verify --input <directory> --output json` validates a local
+fixture without loading AWS configuration or contacting a source. It checks the
+complete checksum inventory, regular-file and safe-path constraints, manifest
+schema and artifact references, and derives a stable `sha256:` identity from
+sorted path/size/digest records. Provenance is self-asserted metadata; checksum
+consistency is not authenticity.
+
+`floceed fixture admit --input <directory> --policy <policy.yaml>` evaluates
+verified facts against a strict, versioned policy. The result binds the policy
+digest, fixture identity, evaluation time, and decision. Keep policy files on
+the protected repository side of a CI trust boundary. Fixture contents cannot
+override the admission policy.
+
+For transport, `floceed fixture pack` creates a deterministic gzip/tar archive
+and `floceed fixture unpack` extracts it through an atomic, bounded, no-link
+path. Re-run `fixture verify` after unpacking before inspection or replay.

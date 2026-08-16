@@ -5,6 +5,19 @@ S3 buckets and DynamoDB tables from AWS, normalizes them, and emits a portable
 bundle that Floci replays locally through `ready.d` initialization hooks. It is
 not a network proxy and never writes to the source account.
 
+CI consumers can verify and admit a generated fixture without AWS credentials:
+
+```bash
+floceed fixture verify --input .floceed --output json
+floceed fixture admit --input .floceed --policy ci/fixture-policy.yaml --output json
+floceed fixture pack --input .floceed --archive fixture.tar.gz
+floceed fixture unpack --archive fixture.tar.gz --target .floceed-unpacked
+```
+
+Verification proves local integrity and derives a stable fixture identity.
+Admission applies repository policy; self-asserted provenance is not treated as
+authentic without a protected carrier or external attestation.
+
 ## Install
 
 Floceed requires Go 1.26 or newer. Docker and Docker Compose are needed only
