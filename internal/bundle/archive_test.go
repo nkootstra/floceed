@@ -74,3 +74,18 @@ func TestUnpackRejectsTraversalBeforeTargetMutation(t *testing.T) {
 		t.Fatalf("target exists after rejection: %v", err)
 	}
 }
+
+func TestOpenRegularNoFollowRejectsSymlink(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "target")
+	outside := filepath.Join(root, "outside")
+	if err := os.WriteFile(outside, []byte("outside"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, target); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := openRegularNoFollow(target); err == nil {
+		t.Fatal("symlink opened as archive source")
+	}
+}

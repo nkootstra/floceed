@@ -65,7 +65,6 @@ jobs:
           name: floceed-fixture-${{ github.sha }}
           path: |
             fixture.tar.gz
-            internal/integration/testdata/fixture-policy.yaml
           if-no-files-found: error
 
   fixture-consumer:
@@ -100,4 +99,4 @@ jobs:
           ./floceed-ci fixture unpack --archive fixture-input/fixture.tar.gz --target fixture-input/unpacked --output json
           ./floceed-ci fixture verify --input fixture-input/unpacked --output json
       - name: Admit fixture under protected policy
-        run: ./floceed-ci fixture admit --input fixture-input/unpacked --policy fixture-input/internal/integration/testdata/fixture-policy.yaml --output json
+        run: ./floceed-ci fixture admit --input fixture-input/unpacked --policy internal/integration/testdata/fixture-policy.yaml --output json

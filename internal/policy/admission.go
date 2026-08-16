@@ -37,7 +37,10 @@ type Facts struct {
 	Manifest   model.Manifest
 	CapturedAt time.Time
 	Provenance *model.Provenance
-	ProducerOK bool
+	// TrustedProducer is supplied by the consumer's trusted execution
+	// context, never derived from fixture contents. A self-asserted
+	// provenance.json cannot satisfy a producer binding.
+	TrustedProducer *ProducerBinding
 }
 
 type Decision struct {
@@ -114,12 +117,16 @@ func (p Policy) Evaluate(f Facts, now time.Time) Decision {
 		}
 		deny("finding_" + finding.Code)
 	}
-	if !f.ProducerOK && (p.Producer.Repository != "" || p.Producer.Workflow != "") {
+	if (p.Producer.Repository != "" || p.Producer.Workflow != "") && !matchesProducer(p.Producer, f.TrustedProducer) {
 		deny("producer_binding_unverified")
 	}
 	sort.Strings(d.Reasons)
 	d.Reasons = unique(d.Reasons)
 	return d
+}
+
+func matchesProducer(expected ProducerBinding, actual *ProducerBinding) bool {
+	return actual != nil && expected.Repository == actual.Repository && expected.Workflow == actual.Workflow
 }
 
 func snapshotFindings(snapshots []model.Snapshot) []model.Finding {

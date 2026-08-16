@@ -4,6 +4,9 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -11,6 +14,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -23,6 +28,18 @@ const (
 func PackFixture(ctx context.Context, source, destination string) error {
 	if _, err := VerifyFixture(source); err != nil {
 		return err
+	}
+	checksumsBytes, err := os.ReadFile(filepath.Join(source, "checksums.json"))
+	if err != nil {
+		return err
+	}
+	var checksums Checksums
+	if err := json.Unmarshal(checksumsBytes, &checksums); err != nil {
+		return err
+	}
+	expected := make(map[string]Checksum, len(checksums.Files))
+	for _, checksum := range checksums.Files {
+		expected[checksum.Path] = checksum
 	}
 	var files []string
 	if err := filepath.WalkDir(source, func(path string, entry os.DirEntry, err error) error {
@@ -62,28 +79,46 @@ func PackFixture(ctx context.Context, source, destination string) error {
 			return err
 		}
 		filename := filepath.Join(source, filepath.FromSlash(rel))
-		info, err := os.Stat(filename)
+		f, err := openRegularNoFollow(filename)
 		if err != nil {
 			return err
 		}
-		if !info.Mode().IsRegular() {
-			return fmt.Errorf("archive source is not regular: %s", rel)
-		}
-		f, err := os.Open(filename)
+		info, err := f.Stat()
 		if err != nil {
+			f.Close()
 			return err
+		}
+		checksum, hasExpected := expected[rel]
+		if hasExpected && (checksum.Size != info.Size()) {
+			f.Close()
+			return fmt.Errorf("archive source changed: %s", rel)
 		}
 		h := &tar.Header{Name: rel, Mode: 0o600, Size: info.Size(), ModTime: time.Unix(0, 0).UTC(), Typeflag: tar.TypeReg}
 		if err := tw.WriteHeader(h); err != nil {
 			f.Close()
 			return err
 		}
-		if _, err := io.Copy(tw, f); err != nil {
+		hash := sha256.New()
+		written, err := io.CopyN(io.MultiWriter(tw, hash), f, info.Size())
+		if err != nil || written != info.Size() {
 			f.Close()
+			if err == nil {
+				err = io.ErrUnexpectedEOF
+			}
 			return err
 		}
 		if err := f.Close(); err != nil {
 			return err
+		}
+		finalInfo, err := os.Stat(filename)
+		if err != nil || finalInfo.Size() != info.Size() {
+			if err == nil {
+				err = fmt.Errorf("archive source changed: %s", rel)
+			}
+			return err
+		}
+		if hasExpected && hex.EncodeToString(hash.Sum(nil)) != checksum.SHA256 {
+			return fmt.Errorf("archive source changed: %s", rel)
 		}
 	}
 	if err := tw.Close(); err != nil {
@@ -99,6 +134,28 @@ func PackFixture(ctx context.Context, source, destination string) error {
 		return err
 	}
 	return os.Rename(tmpName, destination)
+}
+
+func openRegularNoFollow(filename string) (*os.File, error) {
+	fd, err := unix.Open(filename, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, err
+	}
+	f := os.NewFile(uintptr(fd), filename)
+	if f == nil {
+		_ = unix.Close(fd)
+		return nil, fmt.Errorf("open archive source: %s", filename)
+	}
+	info, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		f.Close()
+		return nil, fmt.Errorf("archive source is not regular: %s", filename)
+	}
+	return f, nil
 }
 
 // UnpackFixture safely extracts a deterministic fixture archive and atomically

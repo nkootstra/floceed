@@ -40,3 +40,37 @@ func TestEvaluateDeniesExpiredAndDisallowedFinding(t *testing.T) {
 		t.Fatalf("reasons = %#v", decision.Reasons)
 	}
 }
+
+func TestEvaluateDoesNotTreatSelfAssertedProvenanceAsProducerBinding(t *testing.T) {
+	p, err := Load([]byte("schema_version: 1\nallowed_accounts: [123456789012]\nproducer:\n  repository: nkootstra/floceed\n  workflow: fixture-producer\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	decision := p.Evaluate(Facts{
+		Identity:   "sha256:fixture",
+		Manifest:   model.Manifest{Source: model.SourceMetadata{AccountID: "123456789012"}},
+		Provenance: &model.Provenance{SchemaVersion: 1, AccountID: "123456789012"},
+	}, time.Unix(0, 0).UTC())
+	if decision.Allowed || len(decision.Reasons) != 1 || decision.Reasons[0] != "producer_binding_unverified" {
+		t.Fatalf("decision = %#v", decision)
+	}
+}
+
+func TestEvaluateRequiresExactTrustedProducerBinding(t *testing.T) {
+	p, err := Load([]byte("schema_version: 1\nallowed_accounts: [123456789012]\nproducer:\n  repository: nkootstra/floceed\n  workflow: fixture-producer\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	facts := Facts{Identity: "sha256:fixture", Manifest: model.Manifest{Source: model.SourceMetadata{AccountID: "123456789012"}}}
+	if d := p.Evaluate(facts, time.Unix(0, 0).UTC()); d.Allowed {
+		t.Fatal("missing trusted producer accepted")
+	}
+	facts.TrustedProducer = &ProducerBinding{Repository: "other/repo", Workflow: "fixture-producer"}
+	if d := p.Evaluate(facts, time.Unix(0, 0).UTC()); d.Allowed {
+		t.Fatal("mismatched trusted producer accepted")
+	}
+	facts.TrustedProducer = &ProducerBinding{Repository: "nkootstra/floceed", Workflow: "fixture-producer"}
+	if d := p.Evaluate(facts, time.Unix(0, 0).UTC()); !d.Allowed {
+		t.Fatalf("matching trusted producer rejected: %#v", d)
+	}
+}
