@@ -49,6 +49,33 @@ func TestManifestValidateRejectsUnsupportedSnapshotContracts(t *testing.T) {
 	}
 }
 
+func TestManifestValidateEventDependencySnapshotARN(t *testing.T) {
+	valid := func(resource ResourceRef, service, arn string) Snapshot {
+		structure, err := json.Marshal(map[string]string{"name": resource.ID, "arn": arn})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return Snapshot{Resource: resource, Service: service, StructureVersion: CurrentSnapshotStructureVersion, Structure: structure}
+	}
+	for _, tt := range []struct {
+		name string
+		item Snapshot
+		ok   bool
+	}{
+		{"valid SQS", valid(ResourceRef{Service: "sqs", ID: "jobs", ARN: "arn:aws:sqs:eu-west-1:123456789012:jobs"}, "sqs", "arn:aws:sqs:eu-west-1:123456789012:jobs"), true},
+		{"valid SNS", valid(ResourceRef{Service: "sns", ID: "events"}, "sns", "arn:aws:sns:eu-west-1:123456789012:events"), true},
+		{"wrong service", valid(ResourceRef{Service: "sqs", ID: "jobs"}, "sqs", "arn:aws:sns:eu-west-1:123456789012:jobs"), false},
+		{"wrong resource ARN", valid(ResourceRef{Service: "sqs", ID: "jobs", ARN: "arn:aws:sqs:eu-west-1:123456789012:other"}, "sqs", "arn:aws:sqs:eu-west-1:123456789012:jobs"), false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			err := (Manifest{SchemaVersion: CurrentManifestSchemaVersion, Snapshots: []Snapshot{tt.item}}).Validate()
+			if (err == nil) != tt.ok {
+				t.Fatalf("Validate() error = %v, valid = %v", err, tt.ok)
+			}
+		})
+	}
+}
+
 func TestFindingJSONUsesStableFields(t *testing.T) {
 	b, err := json.Marshal(Finding{Code: "S3_REPLICATION_UNSUPPORTED", Severity: SeverityWarning, Support: SupportTargetUnsupported})
 	if err != nil {

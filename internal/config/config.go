@@ -178,7 +178,8 @@ func NewDynamoDBDataPolicy() *DynamoDBDataPolicy {
 
 var accountID = regexp.MustCompile(`^[0-9]{12}$`)
 var opaqueName = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]{0,63}$`)
-var dependencyName = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_.-]{0,79}$`)
+var dependencyBaseName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]*$`)
+var arnPartition = regexp.MustCompile(`^(?:aws|aws-us-gov|aws-cn|aws-iso|aws-iso-b|aws-iso-e|aws-iso-f|aws-eusc)$`)
 
 func Decode(r io.Reader) (Project, error) {
 	p := NewProject()
@@ -394,7 +395,7 @@ func validateSQSResources(resources []SQSResource) error {
 	names := make([]string, len(resources))
 	for i, resource := range resources {
 		names[i] = resource.Name
-		if !dependencyName.MatchString(resource.Name) {
+		if !validDependencyName(resource.Name, 80) {
 			return fmt.Errorf("SQS resource %q has invalid name: %w", resource.Name, ErrValidation)
 		}
 		if err := validateDependencyARN("sqs", resource.Name, resource.ARN); err != nil {
@@ -408,7 +409,7 @@ func validateSNSResources(resources []SNSResource) error {
 	names := make([]string, len(resources))
 	for i, resource := range resources {
 		names[i] = resource.Name
-		if !dependencyName.MatchString(resource.Name) {
+		if !validDependencyName(resource.Name, 256) {
 			return fmt.Errorf("SNS resource %q has invalid name: %w", resource.Name, ErrValidation)
 		}
 		if err := validateDependencyARN("sns", resource.Name, resource.ARN); err != nil {
@@ -418,9 +419,17 @@ func validateSNSResources(resources []SNSResource) error {
 	return validateResourceNames("SNS", names)
 }
 
+func validDependencyName(name string, max int) bool {
+	if len(name) > max || name == "" {
+		return false
+	}
+	base := strings.TrimSuffix(name, ".fifo")
+	return dependencyBaseName.MatchString(base) && (base == name || strings.HasSuffix(name, ".fifo"))
+}
+
 func validateDependencyARN(service, name, arn string) error {
 	parts := strings.Split(arn, ":")
-	if len(parts) != 6 || parts[0] != "arn" || parts[1] != "aws" || parts[2] != service || parts[3] == "" || !accountID.MatchString(parts[4]) || parts[5] != name {
+	if len(parts) != 6 || parts[0] != "arn" || !arnPartition.MatchString(parts[1]) || parts[2] != service || parts[3] == "" || !accountID.MatchString(parts[4]) || parts[5] != name {
 		return fmt.Errorf("ARN %q does not match %s resource name: %w", arn, service, ErrValidation)
 	}
 	return nil

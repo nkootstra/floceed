@@ -113,6 +113,28 @@ resources:
 	}
 }
 
+func TestValidateEventDependencyNamesAndPartitions(t *testing.T) {
+	validSNS := strings.Repeat("topic", 17)
+	validSNS = validSNS[:85]
+	tests := []struct {
+		name    string
+		project Project
+		valid   bool
+	}{
+		{"SQS FIFO", Project{SchemaVersion: CurrentSchemaVersion, Source: Source{Region: "us-gov-west-1"}, Resources: Resources{SQS: []SQSResource{{Name: "jobs.fifo", ARN: "arn:aws-us-gov:sqs:us-gov-west-1:123456789012:jobs.fifo"}}}}, true},
+		{"SQS arbitrary dot", Project{SchemaVersion: CurrentSchemaVersion, Source: Source{Region: "eu-west-1"}, Resources: Resources{SQS: []SQSResource{{Name: "jobs.topic", ARN: "arn:aws:sqs:eu-west-1:123456789012:jobs.topic"}}}}, false},
+		{"SNS long name", Project{SchemaVersion: CurrentSchemaVersion, Source: Source{Region: "eu-west-1"}, Resources: Resources{SNS: []SNSResource{{Name: validSNS, ARN: "arn:aws:sns:eu-west-1:123456789012:" + validSNS}}}}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.project.Validate()
+			if (err == nil) != tt.valid {
+				t.Fatalf("Validate() error = %v, valid = %v", err, tt.valid)
+			}
+		})
+	}
+}
+
 func TestDecodeAppliesProjectAndCaptureDefaults(t *testing.T) {
 	project, err := Decode(strings.NewReader(`
 schema_version: 1

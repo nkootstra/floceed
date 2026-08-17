@@ -74,6 +74,26 @@ func TestErrorUsesMessageAndSupportsUnwrap(t *testing.T) {
 	}
 }
 
+func TestPlanRejectsConfiguredEventDependenciesUntilAdaptersExist(t *testing.T) {
+	service := New("test")
+	service.Factory = registryFactory{registry: func() *catalog.Registry {
+		registry, err := catalog.New()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return registry
+	}()}
+	_, err := service.Plan(context.Background(), config.Project{
+		SchemaVersion: config.CurrentSchemaVersion,
+		Source:        config.Source{Region: "eu-west-1"},
+		Resources:     config.Resources{SQS: []config.SQSResource{{Name: "jobs", ARN: "arn:aws:sqs:eu-west-1:123456789012:jobs"}}},
+	}, "", "")
+	var appErr *Error
+	if !errors.As(err, &appErr) || appErr.Code != "UNSUPPORTED_EVENT_DEPENDENCY" {
+		t.Fatalf("Plan() error = %v, want unsupported dependency error", err)
+	}
+}
+
 func TestEmptyErrorHasStableFallback(t *testing.T) {
 	err := &Error{}
 	if got := err.Error(); got != "floceed operation failed" {
