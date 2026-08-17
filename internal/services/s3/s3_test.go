@@ -886,6 +886,34 @@ func TestFinalizePlanningDisablesUnresolvedNotifications(t *testing.T) {
 	}
 }
 
+func TestFinalizePlanningKeepsResolvedNotifications(t *testing.T) {
+	snapshot, err := model.NewSnapshot(model.ResourceRef{Service: "s3", ID: "assets"}, "s3", Bucket{Name: "assets", Region: "eu-west-1", Notifications: map[string]any{
+		"QueueConfigurations": []any{map[string]any{"QueueArn": "arn:aws:sqs:eu-west-1:123456789012:jobs"}},
+		"TopicConfigurations": []any{map[string]any{"TopicArn": "arn:aws:sns:eu-west-1:123456789012:events"}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	findings, err := New(nil).FinalizePlanning(snapshot, []model.Dependency{{Kind: "notifications", To: model.ResourceRef{Service: "sns", Type: "topic", ID: "events", ARN: "arn:aws:sns:eu-west-1:123456789012:events"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bucket, err := model.DecodeStructure[Bucket](snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	notifications := bucket.Notifications.(map[string]any)
+	if _, ok := notifications["QueueConfigurations"]; !ok {
+		t.Fatal("resolved queue notification was removed")
+	}
+	if _, ok := notifications["TopicConfigurations"]; ok {
+		t.Fatal("unresolved topic notification was retained")
+	}
+	if len(findings) != 1 || findings[0].Code != "DEPENDENCY_NOT_SELECTED" {
+		t.Fatalf("findings = %#v", findings)
+	}
+}
+
 func TestFinalizePlanningRejectsInvalidStructure(t *testing.T) {
 	snapshot := &model.Snapshot{Resource: model.ResourceRef{Service: "s3", ID: "assets"}, Service: "s3", StructureVersion: model.CurrentSnapshotStructureVersion, Structure: []byte("{")}
 	dependency := model.Dependency{Kind: "notifications", To: model.ResourceRef{Service: "sqs", ID: "jobs"}}

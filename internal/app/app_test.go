@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -367,6 +368,35 @@ func TestPlanCapturesInMemoryAndReportsIAM(t *testing.T) {
 	}
 	if len(plan.Operations) != 2 || len(plan.RequiredIAMActions) == 0 {
 		t.Fatalf("incomplete plan: %#v", plan)
+	}
+}
+
+func TestOperationsMakeResolvedTargetsPrecedeLinks(t *testing.T) {
+	snapshot := &model.Snapshot{Service: "s3", Resource: model.ResourceRef{Service: "s3", Type: "bucket", ID: "assets"}}
+	ops := operations(snapshot, []model.Dependency{{To: model.ResourceRef{Service: "sqs", Type: "queue", ID: "jobs"}}})
+	if len(ops) != 3 {
+		t.Fatalf("operations = %#v", ops)
+	}
+	link := ops[2]
+	if link.ID != "links:s3:assets" || !slices.Contains(link.DependsOn, "mutable:s3:assets") || !slices.Contains(link.DependsOn, "mutable:sqs:jobs") {
+		t.Fatalf("link dependencies = %#v", link)
+	}
+}
+
+func TestDependencyResolutionRequiresExactARN(t *testing.T) {
+	selected := map[string]model.ResourceRef{
+		resourceIdentityKey("sqs", "queue", "jobs"): {Service: "sqs", Type: "queue", ID: "jobs", ARN: "arn:aws:sqs:eu-west-1:123456789012:jobs"},
+	}
+	if !dependencyResolved(model.Dependency{To: selected[resourceIdentityKey("sqs", "queue", "jobs")]}, selected) {
+		t.Fatal("exact selected ARN was not resolved")
+	}
+	for _, dependency := range []model.Dependency{
+		{To: model.ResourceRef{Service: "sqs", Type: "queue", ID: "jobs"}},
+		{To: model.ResourceRef{Service: "sqs", Type: "queue", ID: "jobs", ARN: "arn:aws:sqs:eu-west-1:999999999999:jobs"}},
+	} {
+		if dependencyResolved(dependency, selected) {
+			t.Fatalf("dependency incorrectly resolved: %#v", dependency.To)
+		}
 	}
 }
 

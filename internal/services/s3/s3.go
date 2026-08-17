@@ -95,13 +95,44 @@ func (*Adapter) FinalizePlanning(snapshot *model.Snapshot, dependencies []model.
 	if err != nil {
 		return nil, err
 	}
-	bucket.Notifications = nil
+	remove := make(map[string]struct{}, len(dependencies))
+	for _, dependency := range dependencies {
+		remove[dependency.To.ARN] = struct{}{}
+	}
+	if notifications, ok := bucket.Notifications.(map[string]any); ok {
+		matchedField := false
+		for field, arnField := range map[string]string{"QueueConfigurations": "QueueArn", "TopicConfigurations": "TopicArn", "LambdaFunctionConfigurations": "LambdaFunctionArn"} {
+			items, ok := notifications[field].([]any)
+			if !ok {
+				continue
+			}
+			matchedField = true
+			kept := items[:0]
+			for _, item := range items {
+				configuration, _ := item.(map[string]any)
+				arn, _ := configuration[arnField].(string)
+				if _, found := remove[arn]; !found {
+					kept = append(kept, item)
+				}
+			}
+			if len(kept) == 0 {
+				delete(notifications, field)
+			} else {
+				notifications[field] = kept
+			}
+		}
+		if len(notifications) == 0 || !matchedField {
+			bucket.Notifications = nil
+		}
+	} else {
+		bucket.Notifications = nil
+	}
 	if err := model.SetStructure(snapshot, bucket); err != nil {
 		return nil, err
 	}
 	findings := make([]model.Finding, 0, len(dependencies))
 	for _, dependency := range dependencies {
-		findings = append(findings, model.Finding{Code: "DEPENDENCY_NOT_SELECTED", Severity: model.SeverityWarning, Support: model.SupportImporterUnsupported, Resource: snapshot.Resource.ID, Property: dependency.Kind, Message: fmt.Sprintf("Reference to %s %s is disabled because that resource type is not part of the MVP", dependency.To.Service, dependency.To.ID), Remediation: "Remove the source link or add it after a future floceed adapter supports the dependency."})
+		findings = append(findings, model.Finding{Code: "DEPENDENCY_NOT_SELECTED", Severity: model.SeverityWarning, Support: model.SupportImporterUnsupported, Resource: snapshot.Resource.ID, Property: dependency.Kind, Message: fmt.Sprintf("Reference to %s %s is disabled because that target was not explicitly selected", dependency.To.Service, dependency.To.ID), Remediation: "Add the exact dependency ARN to the project resources or remove the source link."})
 	}
 	return findings, nil
 }
