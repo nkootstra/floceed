@@ -383,6 +383,23 @@ func TestOperationsMakeResolvedTargetsPrecedeLinks(t *testing.T) {
 	}
 }
 
+func TestDependencyResolutionRequiresExactARN(t *testing.T) {
+	selected := map[string]model.ResourceRef{
+		resourceIdentityKey("sqs", "queue", "jobs"): {Service: "sqs", Type: "queue", ID: "jobs", ARN: "arn:aws:sqs:eu-west-1:123456789012:jobs"},
+	}
+	if !dependencyResolved(model.Dependency{To: selected[resourceIdentityKey("sqs", "queue", "jobs")]}, selected) {
+		t.Fatal("exact selected ARN was not resolved")
+	}
+	for _, dependency := range []model.Dependency{
+		{To: model.ResourceRef{Service: "sqs", Type: "queue", ID: "jobs"}},
+		{To: model.ResourceRef{Service: "sqs", Type: "queue", ID: "jobs", ARN: "arn:aws:sqs:eu-west-1:999999999999:jobs"}},
+	} {
+		if dependencyResolved(dependency, selected) {
+			t.Fatalf("dependency incorrectly resolved: %#v", dependency.To)
+		}
+	}
+}
+
 func TestPlanRejectsUnexpectedAccount(t *testing.T) {
 	a := &adapter{}
 	service := New("test")

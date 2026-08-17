@@ -275,8 +275,7 @@ func (a *Application) capture(ctx context.Context, req captureRequest) (captureR
 		adapter := jobs[i].adapter
 		var resolved, unresolved []model.Dependency
 		for _, dependency := range dependenciesBySnapshot[i] {
-			candidate, ok := selected[resourceIdentityKey(dependency.To.Service, dependency.To.Type, dependency.To.ID)]
-			if ok && (dependency.To.ARN == "" || candidate.ARN == "" || dependency.To.ARN == candidate.ARN) {
+			if dependencyResolved(dependency, selected) {
 				resolved = append(resolved, dependency)
 			} else {
 				unresolved = append(unresolved, dependency)
@@ -299,6 +298,11 @@ func (a *Application) capture(ctx context.Context, req captureRequest) (captureR
 	captured.Plan = result
 	captured.Snapshots = snapshots
 	return captured, nil
+}
+
+func dependencyResolved(dependency model.Dependency, selected map[string]model.ResourceRef) bool {
+	candidate, ok := selected[resourceIdentityKey(dependency.To.Service, dependency.To.Type, dependency.To.ID)]
+	return ok && dependency.To.ARN != "" && candidate.ARN != "" && dependency.To.ARN == candidate.ARN
 }
 
 func resourceIdentityKey(service, resourceType, id string) string {
