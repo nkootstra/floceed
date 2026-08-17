@@ -97,7 +97,9 @@ func (*Adapter) FinalizePlanning(snapshot *model.Snapshot, dependencies []model.
 	}
 	remove := make(map[string]struct{}, len(dependencies))
 	for _, dependency := range dependencies {
-		remove[dependency.To.ARN] = struct{}{}
+		if dependency.To.ARN != "" {
+			remove[dependency.To.ARN] = struct{}{}
+		}
 	}
 	if notifications, ok := bucket.Notifications.(map[string]any); ok {
 		matchedField := false
@@ -132,9 +134,21 @@ func (*Adapter) FinalizePlanning(snapshot *model.Snapshot, dependencies []model.
 	}
 	findings := make([]model.Finding, 0, len(dependencies))
 	for _, dependency := range dependencies {
-		findings = append(findings, model.Finding{Code: "DEPENDENCY_NOT_SELECTED", Severity: model.SeverityWarning, Support: model.SupportImporterUnsupported, Resource: snapshot.Resource.ID, Property: dependency.Kind, Message: fmt.Sprintf("Reference to %s %s is disabled because that target was not explicitly selected", dependency.To.Service, dependency.To.ID), Remediation: "Add the exact dependency ARN to the project resources or remove the source link."})
+		code, support, remediation := dependencyFinding(dependency.To.Service)
+		findings = append(findings, model.Finding{Code: code, Severity: model.SeverityWarning, Support: support, Resource: snapshot.Resource.ID, Property: "notifications." + dependency.To.Service, Message: fmt.Sprintf("Reference to %s %s is omitted because that target was not explicitly selected", dependency.To.Service, dependency.To.ID), Remediation: remediation})
 	}
 	return findings, nil
+}
+
+func dependencyFinding(service string) (string, model.SupportState, string) {
+	switch service {
+	case "sqs":
+		return "S3_NOTIFICATION_SQS_NOT_SELECTED", model.SupportImporterUnsupported, "Add the exact SQS ARN to project.resources.sqs to retain this notification."
+	case "sns":
+		return "S3_NOTIFICATION_SNS_NOT_SELECTED", model.SupportImporterUnsupported, "Add the exact SNS ARN to project.resources.sns to retain this notification."
+	default:
+		return "S3_NOTIFICATION_TARGET_UNSUPPORTED", model.SupportTargetUnsupported, "Remove the notification or add support for its target service before replay."
+	}
 }
 
 type Tag struct {

@@ -38,6 +38,7 @@ func (a *Adapter) Dependencies(s *model.Snapshot) []model.Dependency {
 	}
 	typesByField := map[string]string{"QueueConfigurations": "queue", "TopicConfigurations": "topic", "LambdaFunctionConfigurations": "function"}
 	var out []model.Dependency
+	seen := make(map[string]struct{})
 	for field, resourceType := range typesByField {
 		values, _ := root[field].([]any)
 		for _, value := range values {
@@ -46,6 +47,10 @@ func (a *Adapter) Dependencies(s *model.Snapshot) []model.Dependency {
 			if arn == "" {
 				continue
 			}
+			if _, exists := seen[arn]; exists {
+				continue
+			}
+			seen[arn] = struct{}{}
 			parts := strings.Split(arn, ":")
 			id := parts[len(parts)-1]
 			service := map[string]string{"queue": "sqs", "topic": "sns", "function": "lambda"}[resourceType]

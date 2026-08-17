@@ -149,8 +149,18 @@ func (m Model) help() string {
 }
 
 func badge(s model.SupportState, plain bool) string {
-	labels := map[model.SupportState]string{model.SupportFull: "FULL", model.SupportStructureOnly: "STRUCTURE ONLY", model.SupportPartial: "PARTIAL", model.SupportImporterUnsupported: "IMPORTER UNSUPPORTED", model.SupportTargetUnsupported: "TARGET UNSUPPORTED"}
-	label := "[" + labels[s] + "]"
+	labels := map[model.SupportState]string{
+		model.SupportFull:                "FULL",
+		model.SupportStructureOnly:       "STRUCTURE ONLY",
+		model.SupportPartial:             "PARTIAL",
+		model.SupportImporterUnsupported: "IMPORTER UNSUPPORTED",
+		model.SupportTargetUnsupported:   "TARGET UNSUPPORTED",
+	}
+	labelText, ok := labels[s]
+	if !ok {
+		labelText = "UNKNOWN"
+	}
+	label := "[" + labelText + "]"
 	if plain {
 		return label
 	}

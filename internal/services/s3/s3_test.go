@@ -881,20 +881,24 @@ func TestFinalizePlanningDisablesUnresolvedNotifications(t *testing.T) {
 	if bucket.Notifications != nil {
 		t.Fatalf("notifications were not disabled: %#v", snapshot.Structure)
 	}
-	if len(findings) != 1 || findings[0].Code != "DEPENDENCY_NOT_SELECTED" || findings[0].Property != "notifications" {
+	if len(findings) != 1 || findings[0].Code != "S3_NOTIFICATION_SQS_NOT_SELECTED" || findings[0].Property != "notifications.sqs" {
 		t.Fatalf("findings = %#v", findings)
 	}
 }
 
 func TestFinalizePlanningKeepsResolvedNotifications(t *testing.T) {
 	snapshot, err := model.NewSnapshot(model.ResourceRef{Service: "s3", ID: "assets"}, "s3", Bucket{Name: "assets", Region: "eu-west-1", Notifications: map[string]any{
-		"QueueConfigurations": []any{map[string]any{"QueueArn": "arn:aws:sqs:eu-west-1:123456789012:jobs"}},
-		"TopicConfigurations": []any{map[string]any{"TopicArn": "arn:aws:sns:eu-west-1:123456789012:events"}},
+		"QueueConfigurations":          []any{map[string]any{"Id": "queue-created", "QueueArn": "arn:aws:sqs:eu-west-1:123456789012:jobs", "Events": []any{"s3:ObjectCreated:*"}, "Filter": map[string]any{"Key": map[string]any{"FilterRules": []any{map[string]any{"Name": "prefix", "Value": "incoming/"}}}}}},
+		"TopicConfigurations":          []any{map[string]any{"TopicArn": "arn:aws:sns:eu-west-1:123456789012:events"}},
+		"LambdaFunctionConfigurations": []any{map[string]any{"LambdaFunctionArn": "arn:aws:lambda:eu-west-1:123456789012:function:worker"}},
 	}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	findings, err := New(nil).FinalizePlanning(snapshot, []model.Dependency{{Kind: "notifications", To: model.ResourceRef{Service: "sns", Type: "topic", ID: "events", ARN: "arn:aws:sns:eu-west-1:123456789012:events"}}})
+	findings, err := New(nil).FinalizePlanning(snapshot, []model.Dependency{
+		{Kind: "notifications", To: model.ResourceRef{Service: "sns", Type: "topic", ID: "events", ARN: "arn:aws:sns:eu-west-1:123456789012:events"}},
+		{Kind: "notifications", To: model.ResourceRef{Service: "lambda", Type: "function", ID: "worker", ARN: "arn:aws:lambda:eu-west-1:123456789012:function:worker"}},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -906,11 +910,38 @@ func TestFinalizePlanningKeepsResolvedNotifications(t *testing.T) {
 	if _, ok := notifications["QueueConfigurations"]; !ok {
 		t.Fatal("resolved queue notification was removed")
 	}
+	queue := notifications["QueueConfigurations"].([]any)[0].(map[string]any)
+	if got := queue["Events"]; !reflect.DeepEqual(got, []any{"s3:ObjectCreated:*"}) {
+		t.Fatalf("queue events changed: %#v", got)
+	}
+	if got := queue["Filter"]; got == nil {
+		t.Fatal("queue filter was removed")
+	}
 	if _, ok := notifications["TopicConfigurations"]; ok {
 		t.Fatal("unresolved topic notification was retained")
 	}
-	if len(findings) != 1 || findings[0].Code != "DEPENDENCY_NOT_SELECTED" {
+	if _, ok := notifications["LambdaFunctionConfigurations"]; ok {
+		t.Fatal("unsupported Lambda notification was retained")
+	}
+	if len(findings) != 2 || findings[0].Code != "S3_NOTIFICATION_SNS_NOT_SELECTED" || findings[1].Code != "S3_NOTIFICATION_TARGET_UNSUPPORTED" {
 		t.Fatalf("findings = %#v", findings)
+	}
+}
+
+func TestDependenciesDeduplicatesNotificationTargets(t *testing.T) {
+	snapshot, err := model.NewSnapshot(model.ResourceRef{Service: "s3", ID: "assets"}, "s3", Bucket{
+		Name: "assets",
+		Notifications: map[string]any{"QueueConfigurations": []any{
+			map[string]any{"QueueArn": "arn:aws:sqs:eu-west-1:123456789012:jobs"},
+			map[string]any{"QueueArn": "arn:aws:sqs:eu-west-1:123456789012:jobs"},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deps := New(nil).Dependencies(snapshot)
+	if len(deps) != 1 || deps[0].To.ARN != "arn:aws:sqs:eu-west-1:123456789012:jobs" {
+		t.Fatalf("dependencies = %#v", deps)
 	}
 }
 
