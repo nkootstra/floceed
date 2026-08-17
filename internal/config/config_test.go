@@ -79,6 +79,40 @@ func TestValidateRejectsDuplicateResources(t *testing.T) {
 	}
 }
 
+func TestDecodeAcceptsExplicitEventDependencyResources(t *testing.T) {
+	project, err := Decode(strings.NewReader(`schema_version: 1
+source:
+  region: eu-west-1
+resources:
+  sqs:
+    - name: jobs.fifo
+      arn: arn:aws:sqs:eu-west-1:123456789012:jobs.fifo
+  sns:
+    - name: events
+      arn: arn:aws:sns:eu-west-1:123456789012:events
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(project.Resources.SQS) != 1 || len(project.Resources.SNS) != 1 {
+		t.Fatalf("resources = %#v", project.Resources)
+	}
+}
+
+func TestDecodeRejectsMismatchedEventDependencyARN(t *testing.T) {
+	_, err := Decode(strings.NewReader(`schema_version: 1
+source:
+  region: eu-west-1
+resources:
+  sqs:
+    - name: jobs
+      arn: arn:aws:sqs:eu-west-1:123456789012:other
+`))
+	if err == nil || !strings.Contains(err.Error(), "does not match") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
 func TestDecodeAppliesProjectAndCaptureDefaults(t *testing.T) {
 	project, err := Decode(strings.NewReader(`
 schema_version: 1
