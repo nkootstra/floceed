@@ -431,6 +431,20 @@ func validateSnapshot(snapshot Snapshot) error {
 		if err := json.Unmarshal(snapshot.Structure, &value); err != nil || value.Attributes == nil || len(value.Keys) == 0 || value.BillingMode == "" {
 			return fmt.Errorf("DynamoDB structure requires attribute_definitions, key_schema, and billing_mode: %w", ErrValidation)
 		}
+	case "sqs", "sns":
+		var value struct {
+			ARN string `json:"arn"`
+		}
+		if err := json.Unmarshal(snapshot.Structure, &value); err != nil || value.ARN == "" {
+			return fmt.Errorf("%s structure requires arn: %w", snapshot.Service, ErrValidation)
+		}
+		parts := strings.Split(value.ARN, ":")
+		if len(parts) != 6 || parts[0] != "arn" || parts[1] == "" || parts[2] != snapshot.Service || parts[3] == "" || !snapshotAccountID.MatchString(parts[4]) || parts[5] != snapshot.Resource.ID {
+			return fmt.Errorf("%s structure ARN must match resource identity: %w", snapshot.Service, ErrValidation)
+		}
+		if snapshot.Resource.ARN != "" && snapshot.Resource.ARN != value.ARN {
+			return fmt.Errorf("%s structure ARN must match resource ARN: %w", snapshot.Service, ErrValidation)
+		}
 	default:
 		return fmt.Errorf("unsupported snapshot service %q: %w", snapshot.Service, ErrValidation)
 	}
@@ -439,3 +453,4 @@ func validateSnapshot(snapshot Snapshot) error {
 
 var ErrSchema = errors.New("schema version error")
 var ErrValidation = errors.New("validation error")
+var snapshotAccountID = regexp.MustCompile(`^[0-9]{12}$`)

@@ -117,6 +117,8 @@ type Output struct {
 type Resources struct {
 	S3       []S3Resource       `yaml:"s3,omitempty" json:"s3"`
 	DynamoDB []DynamoDBResource `yaml:"dynamodb,omitempty" json:"dynamodb"`
+	SQS      []SQSResource      `yaml:"sqs,omitempty" json:"sqs"`
+	SNS      []SNSResource      `yaml:"sns,omitempty" json:"sns"`
 }
 type S3Resource struct {
 	Name string        `yaml:"name" json:"name"`
@@ -135,6 +137,14 @@ type DynamoDBResource struct {
 	Name                string              `yaml:"name" json:"name"`
 	PreserveProvisioned bool                `yaml:"preserve_provisioned,omitempty" json:"preserve_provisioned"`
 	Data                *DynamoDBDataPolicy `yaml:"data,omitempty" json:"data,omitempty"`
+}
+type SQSResource struct {
+	Name string `yaml:"name" json:"name"`
+	ARN  string `yaml:"arn" json:"arn"`
+}
+type SNSResource struct {
+	Name string `yaml:"name" json:"name"`
+	ARN  string `yaml:"arn" json:"arn"`
 }
 type DynamoDBDataPolicy struct {
 	Enabled  bool     `yaml:"enabled" json:"enabled"`
@@ -168,6 +178,8 @@ func NewDynamoDBDataPolicy() *DynamoDBDataPolicy {
 
 var accountID = regexp.MustCompile(`^[0-9]{12}$`)
 var opaqueName = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]{0,63}$`)
+var dependencyBaseName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]*$`)
+var arnPartition = regexp.MustCompile(`^(?:aws|aws-us-gov|aws-cn|aws-iso|aws-iso-b|aws-iso-e|aws-iso-f|aws-eusc)$`)
 
 func Decode(r io.Reader) (Project, error) {
 	p := NewProject()
@@ -364,11 +376,61 @@ func (p Project) Validate() error {
 			}
 		}
 	}
+	if err := validateSQSResources(p.Resources.SQS); err != nil {
+		return err
+	}
+	if err := validateSNSResources(p.Resources.SNS); err != nil {
+		return err
+	}
 	if hasFullData(p) && p.Target.HookTimeoutSeconds <= DefaultHookTimeoutSeconds {
 		return fmt.Errorf("full data mode requires target.hook_timeout_seconds greater than %d: %w", DefaultHookTimeoutSeconds, ErrValidation)
 	}
 	if err := p.validateFixtureProfiles(); err != nil {
 		return err
+	}
+	return nil
+}
+
+func validateSQSResources(resources []SQSResource) error {
+	names := make([]string, len(resources))
+	for i, resource := range resources {
+		names[i] = resource.Name
+		if !validDependencyName(resource.Name, 80) {
+			return fmt.Errorf("SQS resource %q has invalid name: %w", resource.Name, ErrValidation)
+		}
+		if err := validateDependencyARN("sqs", resource.Name, resource.ARN); err != nil {
+			return fmt.Errorf("SQS resource %q: %w", resource.Name, err)
+		}
+	}
+	return validateResourceNames("SQS", names)
+}
+
+func validateSNSResources(resources []SNSResource) error {
+	names := make([]string, len(resources))
+	for i, resource := range resources {
+		names[i] = resource.Name
+		if !validDependencyName(resource.Name, 256) {
+			return fmt.Errorf("SNS resource %q has invalid name: %w", resource.Name, ErrValidation)
+		}
+		if err := validateDependencyARN("sns", resource.Name, resource.ARN); err != nil {
+			return fmt.Errorf("SNS resource %q: %w", resource.Name, err)
+		}
+	}
+	return validateResourceNames("SNS", names)
+}
+
+func validDependencyName(name string, max int) bool {
+	if len(name) > max || name == "" {
+		return false
+	}
+	base := strings.TrimSuffix(name, ".fifo")
+	return dependencyBaseName.MatchString(base) && (base == name || strings.HasSuffix(name, ".fifo"))
+}
+
+func validateDependencyARN(service, name, arn string) error {
+	parts := strings.Split(arn, ":")
+	if len(parts) != 6 || parts[0] != "arn" || !arnPartition.MatchString(parts[1]) || parts[2] != service || parts[3] == "" || !accountID.MatchString(parts[4]) || parts[5] != name {
+		return fmt.Errorf("ARN %q does not match %s resource name: %w", arn, service, ErrValidation)
 	}
 	return nil
 }

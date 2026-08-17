@@ -86,6 +86,9 @@ type captureRequest struct {
 func (a *Application) capture(ctx context.Context, req captureRequest) (captureResult, error) {
 	p, profile, region := req.Project, req.Profile, req.Region
 	policy := req.Governance
+	if len(p.Resources.SQS) > 0 || len(p.Resources.SNS) > 0 {
+		return captureResult{}, &Error{Kind: ErrorPlan, Code: "UNSUPPORTED_EVENT_DEPENDENCY", Message: "SQS and SNS resources are validated but not capturable yet; remove resources.sqs/resources.sns until event dependency support is enabled"}
+	}
 	if profile == "" {
 		profile = p.Source.Profile
 	}
