@@ -242,6 +242,9 @@ func TestNoColorViewsContainNoANSI(t *testing.T) {
 			t.Fatalf("plain badge %s = %q", state, got)
 		}
 	}
+	if got := badge(model.SupportTargetUnsupported, true); got != "[TARGET UNSUPPORTED]" {
+		t.Fatalf("target unsupported badge = %q", got)
+	}
 }
 
 func TestIdentityRunsAsTypedCommand(t *testing.T) {
