@@ -144,6 +144,7 @@ class ReplayValidationTests(unittest.TestCase):
         cases = (
             ({**self.s3_snapshot(), "structure": {"name": "assets"}}, "S3 structure requires a region"),
             ({**self.dynamodb_snapshot(), "structure": {"name": "records", "key_schema": [], "billing_mode": "PAY_PER_REQUEST"}}, "requires attribute_definitions"),
+            ({**self.sqs_snapshot(), "structure": {"name": "jobs", "arn": "arn:aws:sns:eu-west-1:123456789012:jobs"}}, "sqs structure ARN must match resource identity"),
             ({**self.s3_snapshot(), "service": "unknown", "resource": {"service": "unknown", "id": "assets"}}, "service 'unknown' is unsupported"),
         )
         for snapshot, message in cases:
@@ -152,6 +153,25 @@ class ReplayValidationTests(unittest.TestCase):
                 self.write_json("bundle/manifest.json", self.manifest)
 
                 self.assert_rejected(message)
+
+    def test_accepts_minimal_event_targets(self):
+        self.manifest["snapshots"] = [self.sqs_snapshot(), self.sns_snapshot()]
+        self.write_json("bundle/manifest.json", self.manifest)
+        manifest = replay.validate_bundle()
+        self.assertEqual(["sqs", "sns"], [snapshot["service"] for snapshot in manifest["snapshots"]])
+
+    def test_fifo_topic_creation_preserves_fifo_attribute(self):
+        class FakeSNS:
+            def __init__(self):
+                self.calls = []
+
+            def create_topic(self, **kwargs):
+                self.calls.append(kwargs)
+                return {"TopicArn": "arn:aws:sns:eu-west-1:123456789012:events.fifo"}
+
+        client = FakeSNS()
+        self.assertEqual("arn:aws:sns:eu-west-1:123456789012:events.fifo", replay.ensure_topic(client, {"name": "events.fifo"}))
+        self.assertEqual({"FifoTopic": "true"}, client.calls[0]["Attributes"])
 
     @staticmethod
     def s3_snapshot() -> dict:
@@ -174,6 +194,24 @@ class ReplayValidationTests(unittest.TestCase):
                 "key_schema": [{"name": "id", "type": "HASH"}],
                 "billing_mode": "PAY_PER_REQUEST",
             },
+        }
+
+    @staticmethod
+    def sqs_snapshot() -> dict:
+        return {
+            "resource": {"service": "sqs", "type": "queue", "id": "jobs"},
+            "service": "sqs",
+            "structure_version": 1,
+            "structure": {"name": "jobs", "arn": "arn:aws:sqs:eu-west-1:123456789012:jobs"},
+        }
+
+    @staticmethod
+    def sns_snapshot() -> dict:
+        return {
+            "resource": {"service": "sns", "type": "topic", "id": "events"},
+            "service": "sns",
+            "structure_version": 1,
+            "structure": {"name": "events", "arn": "arn:aws:sns:eu-west-1:123456789012:events"},
         }
 
     def test_rejects_non_loopback_or_https_endpoint(self):

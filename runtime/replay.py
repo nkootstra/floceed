@@ -144,6 +144,13 @@ def validate_snapshots(snapshots: list, manifest_version: int = 1) -> None:
                 fail(f"snapshot {index} DynamoDB structure requires key_schema")
             if not structure.get("billing_mode"):
                 fail(f"snapshot {index} DynamoDB structure requires billing_mode")
+        elif service in {"sqs", "sns"}:
+            if not isinstance(structure.get("arn"), str) or not structure["arn"]:
+                fail(f"snapshot {index} {service} structure requires arn")
+            arn = structure["arn"].split(":")
+            expected_type = "sqs" if service == "sqs" else "sns"
+            if len(arn) != 6 or arn[0] != "arn" or arn[2] != expected_type or arn[5] != resource.get("id"):
+                fail(f"snapshot {index} {service} structure ARN must match resource identity")
         else:
             fail(f"snapshot {index} service {service!r} is unsupported")
         if manifest_version >= 2:
@@ -194,6 +201,12 @@ def buckets(manifest: dict):
     for snapshot in manifest.get("snapshots", []):
         if snapshot.get("service") == "s3":
             yield snapshot["structure"], snapshot
+
+
+def targets(manifest: dict):
+    for snapshot in manifest.get("snapshots", []):
+        if snapshot.get("service") in {"sqs", "sns"}:
+            yield snapshot["service"], snapshot["structure"]
 
 
 def missing(error: ClientError, *codes: str) -> bool:
@@ -259,13 +272,40 @@ def apply_bucket_mutable(s3, bucket: dict) -> None:
         getattr(s3, operation)(Bucket=name, **{argument: request_value})
 
 
-def apply_bucket_links(s3, bucket: dict) -> None:
+def apply_bucket_links(s3, bucket: dict, target_arns: dict[str, str]) -> None:
     name = bucket["name"]
     if bucket.get("policy"):
         s3.put_bucket_policy(Bucket=name, Policy=bucket["policy"])
     notifications = bucket.get("notifications")
     if notifications:
+        notifications = json.loads(json.dumps(notifications))
+        for field, arn_field, service in (("QueueConfigurations", "QueueArn", "sqs"), ("TopicConfigurations", "TopicArn", "sns")):
+            for configuration in notifications.get(field, []):
+                captured = configuration.get(arn_field)
+                if captured in target_arns:
+                    configuration[arn_field] = target_arns[captured]
         s3.put_bucket_notification_configuration(Bucket=name, NotificationConfiguration=notifications)
+
+
+def ensure_queue(sqs, structure: dict) -> str:
+    name = structure["name"]
+    attributes = {"FifoQueue": "true"} if name.endswith(".fifo") else {}
+    try:
+        response = sqs.get_queue_url(QueueName=name)
+        url = response["QueueUrl"]
+    except ClientError as error:
+        if not missing(error, "AWS.SimpleQueueService.NonExistentQueue", "QueueDoesNotExist"):
+            raise
+        response = sqs.create_queue(QueueName=name, Attributes=attributes)
+        url = response["QueueUrl"]
+    details = sqs.get_queue_attributes(QueueUrl=url, AttributeNames=["QueueArn"])
+    return details["Attributes"]["QueueArn"]
+
+
+def ensure_topic(sns, structure: dict) -> str:
+    name = structure["name"]
+    attributes = {"FifoTopic": "true"} if name.endswith(".fifo") else {}
+    return sns.create_topic(Name=name, Attributes=attributes)["TopicArn"]
 
 
 def stream_sha256(body) -> str:
@@ -526,9 +566,14 @@ def main() -> None:
     manifest = validate_bundle()
     ddb = local_client(manifest, "dynamodb")
     s3 = local_client(manifest, "s3")
+    sqs = local_client(manifest, "sqs")
+    sns = local_client(manifest, "sns")
+    target_arns = {}
     stages = {"base", "links", "data"} if sys.argv[1] == "all" else {sys.argv[1]}
     if "base" in stages:
         progress("base")
+        for service, structure in targets(manifest):
+            target_arns[structure["arn"]] = ensure_queue(sqs, structure) if service == "sqs" else ensure_topic(sns, structure)
         for table, _ in tables(manifest):
             ensure_table(ddb, table)
             apply_mutable(ddb, table)
@@ -538,7 +583,10 @@ def main() -> None:
     if "links" in stages:
         progress("links")
         for bucket, _ in buckets(manifest):
-            apply_bucket_links(s3, bucket)
+            for service, structure in targets(manifest):
+                if structure["arn"] not in target_arns:
+                    target_arns[structure["arn"]] = ensure_queue(sqs, structure) if service == "sqs" else ensure_topic(sns, structure)
+            apply_bucket_links(s3, bucket, target_arns)
     if "data" in stages:
         progress("data")
         for _, snapshot in tables(manifest):
