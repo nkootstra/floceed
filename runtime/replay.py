@@ -303,7 +303,9 @@ def ensure_queue(sqs, structure: dict) -> str:
 
 
 def ensure_topic(sns, structure: dict) -> str:
-    return sns.create_topic(Name=structure["name"])["TopicArn"]
+    name = structure["name"]
+    attributes = {"FifoTopic": "true"} if name.endswith(".fifo") else {}
+    return sns.create_topic(Name=name, Attributes=attributes)["TopicArn"]
 
 
 def stream_sha256(body) -> str:

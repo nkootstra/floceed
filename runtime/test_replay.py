@@ -160,6 +160,19 @@ class ReplayValidationTests(unittest.TestCase):
         manifest = replay.validate_bundle()
         self.assertEqual(["sqs", "sns"], [snapshot["service"] for snapshot in manifest["snapshots"]])
 
+    def test_fifo_topic_creation_preserves_fifo_attribute(self):
+        class FakeSNS:
+            def __init__(self):
+                self.calls = []
+
+            def create_topic(self, **kwargs):
+                self.calls.append(kwargs)
+                return {"TopicArn": "arn:aws:sns:eu-west-1:123456789012:events.fifo"}
+
+        client = FakeSNS()
+        self.assertEqual("arn:aws:sns:eu-west-1:123456789012:events.fifo", replay.ensure_topic(client, {"name": "events.fifo"}))
+        self.assertEqual({"FifoTopic": "true"}, client.calls[0]["Attributes"])
+
     @staticmethod
     def s3_snapshot() -> dict:
         return {
