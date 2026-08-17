@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -367,6 +368,18 @@ func TestPlanCapturesInMemoryAndReportsIAM(t *testing.T) {
 	}
 	if len(plan.Operations) != 2 || len(plan.RequiredIAMActions) == 0 {
 		t.Fatalf("incomplete plan: %#v", plan)
+	}
+}
+
+func TestOperationsMakeResolvedTargetsPrecedeLinks(t *testing.T) {
+	snapshot := &model.Snapshot{Service: "s3", Resource: model.ResourceRef{Service: "s3", Type: "bucket", ID: "assets"}}
+	ops := operations(snapshot, []model.Dependency{{To: model.ResourceRef{Service: "sqs", Type: "queue", ID: "jobs"}}})
+	if len(ops) != 3 {
+		t.Fatalf("operations = %#v", ops)
+	}
+	link := ops[2]
+	if link.ID != "links:s3:assets" || !slices.Contains(link.DependsOn, "mutable:s3:assets") || !slices.Contains(link.DependsOn, "mutable:sqs:jobs") {
+		t.Fatalf("link dependencies = %#v", link)
 	}
 }
 

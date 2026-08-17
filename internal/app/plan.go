@@ -231,6 +231,7 @@ func (a *Application) capture(ctx context.Context, req captureRequest) (captureR
 
 	captured := captureResult{Plan: result}
 	var snapshots []model.Snapshot
+	dependenciesBySnapshot := make([][]model.Dependency, len(selections))
 	for i, selection := range selections {
 		adapter := jobs[i].adapter
 		snapshot := outcomes[i].snapshot
@@ -238,12 +239,8 @@ func (a *Application) capture(ctx context.Context, req captureRequest) (captureR
 		result.Selected = append(result.Selected, selection.Resource)
 		result.Findings = append(result.Findings, snapshot.Findings...)
 		deps := adapter.Dependencies(snapshot)
-		planningFindings, err := adapter.FinalizePlanning(snapshot, deps)
-		if err != nil {
-			return captureResult{}, sourceError(err)
-		}
-		result.Findings = append(result.Findings, planningFindings...)
 		result.Dependencies = append(result.Dependencies, deps...)
+		dependenciesBySnapshot[i] = deps
 		for _, art := range snapshot.Data {
 			result.EstimatedBytes += art.Size
 		}
@@ -255,7 +252,6 @@ func (a *Application) capture(ctx context.Context, req captureRequest) (captureR
 				}
 			}
 		}
-		result.Operations = append(result.Operations, operations(snapshot, deps)...)
 		snapshots = append(snapshots, *snapshot)
 		if outcomes[i].resource != nil {
 			captured.LedgerResources = append(captured.LedgerResources, *outcomes[i].resource)
@@ -270,6 +266,28 @@ func (a *Application) capture(ctx context.Context, req captureRequest) (captureR
 		if result.Governance != nil {
 			appendGovernanceAudit(result.Governance, policy, jobs[i].options.GovernanceAudit.Result())
 		}
+	}
+	selected := make(map[string]model.ResourceRef, len(selections))
+	for _, selection := range selections {
+		selected[resourceIdentityKey(selection.Resource.Service, selection.Resource.Type, selection.Resource.ID)] = selection.Resource
+	}
+	for i := range snapshots {
+		adapter := jobs[i].adapter
+		var resolved, unresolved []model.Dependency
+		for _, dependency := range dependenciesBySnapshot[i] {
+			candidate, ok := selected[resourceIdentityKey(dependency.To.Service, dependency.To.Type, dependency.To.ID)]
+			if ok && (dependency.To.ARN == "" || candidate.ARN == "" || dependency.To.ARN == candidate.ARN) {
+				resolved = append(resolved, dependency)
+			} else {
+				unresolved = append(unresolved, dependency)
+			}
+		}
+		planningFindings, err := adapter.FinalizePlanning(&snapshots[i], unresolved)
+		if err != nil {
+			return captureResult{}, sourceError(err)
+		}
+		result.Findings = append(result.Findings, planningFindings...)
+		result.Operations = append(result.Operations, operations(&snapshots[i], resolved)...)
 	}
 	if result.Governance != nil {
 		sort.Slice(result.Governance.Rules, func(i, j int) bool { return result.Governance.Rules[i].RuleID < result.Governance.Rules[j].RuleID })
@@ -344,7 +362,12 @@ func operations(s *model.Snapshot, deps []model.Dependency) []model.Operation {
 	base := s.Service + ":" + s.Resource.ID
 	ops := []model.Operation{{ID: "base:" + base, Stage: model.StageBase, Service: s.Service, ResourceID: s.Resource.ID, Action: "ensure"}, {ID: "mutable:" + base, Stage: model.StageMutable, Service: s.Service, ResourceID: s.Resource.ID, Action: "apply", DependsOn: []string{"base:" + base}}}
 	if len(deps) > 0 {
-		ops = append(ops, model.Operation{ID: "links:" + base, Stage: model.StageLinks, Service: s.Service, ResourceID: s.Resource.ID, Action: "link", DependsOn: []string{"mutable:" + base}})
+		dependsOn := []string{"mutable:" + base}
+		for _, dependency := range deps {
+			dependsOn = append(dependsOn, "mutable:"+dependency.To.Service+":"+dependency.To.ID)
+		}
+		sort.Strings(dependsOn)
+		ops = append(ops, model.Operation{ID: "links:" + base, Stage: model.StageLinks, Service: s.Service, ResourceID: s.Resource.ID, Action: "link", DependsOn: dependsOn})
 	}
 	if len(s.Data) > 0 || (s.Dataset != nil && len(s.Dataset.Chunks) > 0) {
 		ops = append(ops, model.Operation{ID: "data:" + base, Stage: model.StageData, Service: s.Service, ResourceID: s.Resource.ID, Action: "upsert", DependsOn: []string{"mutable:" + base}})
