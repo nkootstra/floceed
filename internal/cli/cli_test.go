@@ -58,6 +58,9 @@ type fakeService struct {
 	inspectOptions app.InspectOptions
 	inspected      bool
 	logs           []byte
+	downCalled     bool
+	downDir        string
+	downErr        error
 }
 
 func (f *fakeService) InspectWithOptions(_ context.Context, _ config.Project, _ string, options app.InspectOptions) (inspection.Inspection, error) {
@@ -125,6 +128,20 @@ func TestDownRequiresExplicitConfirmation(t *testing.T) {
 	cmd.SetArgs([]string{"down", "--project", writeProject(t)})
 	if err := cmd.ExecuteContext(context.Background()); err == nil || !strings.Contains(err.Error(), "--yes") {
 		t.Fatalf("down without confirmation error = %v", err)
+	}
+}
+
+func TestDownDelegatesAfterConfirmation(t *testing.T) {
+	fake := &fakeService{}
+	var out bytes.Buffer
+	projectFile := writeProject(t)
+	cmd := New(Options{Stdout: &out, Stderr: &bytes.Buffer{}, App: fake})
+	cmd.SetArgs([]string{"down", "--project", projectFile, "--yes"})
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !fake.downCalled || fake.downDir != filepath.Dir(projectFile) || !strings.Contains(out.String(), "preserved_data") {
+		t.Fatalf("down delegation/output: called=%v dir=%q output=%q", fake.downCalled, fake.downDir, out.String())
 	}
 }
 
@@ -523,7 +540,11 @@ func (f *fakeService) Up(_ context.Context, _ config.Project, _ string, wait tim
 	return nil
 }
 
-func (f *fakeService) Down(context.Context, config.Project, string) error { return nil }
+func (f *fakeService) Down(_ context.Context, _ config.Project, dir string) error {
+	f.downCalled = true
+	f.downDir = dir
+	return f.downErr
+}
 
 func writeProject(t *testing.T) string {
 	t.Helper()
