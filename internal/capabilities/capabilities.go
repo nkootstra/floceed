@@ -41,6 +41,7 @@ func Current(toolVersion string) Report {
 			{Service: "sns", Support: "structure_only", DataModes: []string{"structure"}},
 			{Service: "sqs", Support: "partial", DataModes: []string{"bounded"}},
 			{Service: "events", Support: "structure_only", DataModes: []string{"structure"}},
+			{Service: "lambda", Support: "structure_only", DataModes: []string{"structure"}},
 		},
 	}
 }

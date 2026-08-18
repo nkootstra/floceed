@@ -169,6 +169,15 @@ class ReplayValidationTests(unittest.TestCase):
         self.write_json("bundle/manifest.json", self.manifest)
         self.assertEqual("events", replay.validate_bundle()["snapshots"][0]["service"])
 
+    def test_accepts_lambda_structure(self):
+        self.manifest["snapshots"] = [{
+            "resource": {"service": "lambda", "type": "function", "id": "worker"},
+            "service": "lambda", "structure_version": 1,
+            "structure": {"name": "worker", "arn": "arn:aws:lambda:eu-west-1:123456789012:function:worker", "runtime": "python3.12"},
+        }]
+        self.write_json("bundle/manifest.json", self.manifest)
+        self.assertEqual("lambda", replay.validate_bundle()["snapshots"][0]["service"])
+
     def test_fifo_topic_creation_preserves_fifo_attribute(self):
         class FakeSNS:
             def __init__(self):

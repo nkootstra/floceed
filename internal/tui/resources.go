@@ -111,6 +111,8 @@ func (m Model) Project() config.Project {
 			p.Resources.Kinesis = append(p.Resources.Kinesis, config.KinesisResource{Name: r.Ref.ID, ARN: r.Ref.ARN})
 		case "events":
 			p.Resources.EventBridge = append(p.Resources.EventBridge, config.EventBridgeResource{Name: r.Ref.ID, ARN: r.Ref.ARN})
+		case "lambda":
+			p.Resources.Lambda = append(p.Resources.Lambda, config.LambdaResource{Name: r.Ref.ID, ARN: r.Ref.ARN})
 		}
 	}
 	return p

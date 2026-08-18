@@ -163,6 +163,12 @@ def validate_snapshots(snapshots: list, manifest_version: int = 1) -> None:
             arn = structure["arn"].split(":")
             if len(arn) != 6 or arn[0] != "arn" or arn[2] != "events" or arn[5] != "event-bus/" + resource.get("id"):
                 fail(f"snapshot {index} EventBridge structure ARN must match resource identity")
+        elif service == "lambda":
+            if not isinstance(structure.get("arn"), str) or not structure["arn"]:
+                fail(f"snapshot {index} Lambda structure requires arn")
+            arn = structure["arn"].split(":")
+            if len(arn) != 7 or arn[0] != "arn" or arn[2] != "lambda" or arn[5] != "function" or arn[6] != resource.get("id"):
+                fail(f"snapshot {index} Lambda structure ARN must match resource identity")
         else:
             fail(f"snapshot {index} service {service!r} is unsupported")
         if manifest_version >= 2:

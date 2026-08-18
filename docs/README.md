@@ -343,6 +343,12 @@ rules, event patterns, and targets. Replay creates buses and upserts their
 rules and targets; historical events, archive contents, and replay-time
 delivery history are not captured.
 
+Explicitly selected Lambda functions support structure-only capture of runtime
+configuration, aliases, and event-source mappings. Function code, layers,
+versions' deployment packages, and invocation history are not copied or
+executed by replay; use this support to document topology and dependencies
+until a safe executable-package contract is available.
+
 Existing tables with incompatible keys or indexes and buckets with incompatible
 immutable object-lock state fail without replacement. Floceed does not rewrite
 arbitrary strings that look like ARNs.
