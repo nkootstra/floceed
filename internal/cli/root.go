@@ -355,11 +355,29 @@ func progressReporter(w io.Writer, mode string) func(model.ProgressEvent) {
 				marker = ""
 			}
 			parts = append(parts, fmt.Sprintf("%d/%s%d", event.CompletedRecords, marker, event.TotalRecords))
+			if event.RemainingRecords > 0 {
+				parts = append(parts, fmt.Sprintf("%d remaining", event.RemainingRecords))
+			}
+		} else if event.RemainingRecords > 0 {
+			parts = append(parts, fmt.Sprintf("%d remaining", event.RemainingRecords))
+		}
+		if event.RemainingBytes > 0 {
+			parts = append(parts, fmt.Sprintf("%s remaining", progressBytesLabel(event.RemainingBytes)))
 		}
 		if len(parts) > 0 {
 			_, _ = fmt.Fprintf(w, "%s\n", strings.Join(parts, " "))
 		}
 	}
+}
+
+func progressBytesLabel(n int64) string {
+	if n < 1024 {
+		return fmt.Sprintf("%d B", n)
+	}
+	if n < 1<<20 {
+		return fmt.Sprintf("%.1f KiB", float64(n)/(1<<10))
+	}
+	return fmt.Sprintf("%.1f MiB", float64(n)/(1<<20))
 }
 
 func renderCommand(service Service) *cobra.Command {

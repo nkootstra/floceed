@@ -171,8 +171,10 @@ type ProgressEvent struct {
 	Resource         string `json:"resource,omitempty"`
 	CompletedRecords int64  `json:"completed_records,omitempty"`
 	TotalRecords     int64  `json:"total_records,omitempty"`
+	RemainingRecords int64  `json:"remaining_records,omitempty"`
 	CompletedBytes   int64  `json:"completed_bytes,omitempty"`
 	TotalBytes       int64  `json:"total_bytes,omitempty"`
+	RemainingBytes   int64  `json:"remaining_bytes,omitempty"`
 	CompletedChunks  int64  `json:"completed_chunks,omitempty"`
 	TotalChunks      int64  `json:"total_chunks,omitempty"`
 	TotalPrecision   string `json:"total_precision,omitempty"`

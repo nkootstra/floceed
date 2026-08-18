@@ -165,6 +165,12 @@ func (a *Application) PullWithOptions(ctx context.Context, p config.Project, pro
 		event.SchemaVersion = 1
 		event.Event = "progress"
 		event.Sequence = sequence
+		if event.TotalRecords > event.CompletedRecords {
+			event.RemainingRecords = event.TotalRecords - event.CompletedRecords
+		}
+		if event.TotalBytes > event.CompletedBytes {
+			event.RemainingBytes = event.TotalBytes - event.CompletedBytes
+		}
 		options.Progress(event)
 	}
 	report(model.ProgressEvent{Operation: "pull", Phase: "prepare", Message: "preparing capture"})
