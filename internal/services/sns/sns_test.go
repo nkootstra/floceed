@@ -3,6 +3,7 @@ package sns
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -16,7 +17,7 @@ func TestPlanCaptureAndDiscoverAreMetadataOnly(t *testing.T) {
 	adapter := New()
 	project := config.Project{Resources: config.Resources{SNS: []config.SNSResource{{Name: "events", ARN: "arn:aws:sns:eu-west-1:123456789012:events"}}}}
 	contribution := adapter.Plan(project, true)
-	if len(contribution.Selections) != 1 || len(contribution.RequiredIAMActions) != 0 {
+	if len(contribution.Selections) != 1 || !slices.Contains(contribution.RequiredIAMActions, "sns:ListSubscriptionsByTopic") {
 		t.Fatalf("contribution = %#v", contribution)
 	}
 	selection := contribution.Selections[0]

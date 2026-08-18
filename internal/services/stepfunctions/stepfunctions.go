@@ -11,6 +11,7 @@ import (
 	"github.com/nkootstra/floceed/internal/catalog"
 	"github.com/nkootstra/floceed/internal/config"
 	"github.com/nkootstra/floceed/internal/model"
+	"github.com/nkootstra/floceed/internal/services/structureonly"
 )
 
 type Client interface {
@@ -18,41 +19,35 @@ type Client interface {
 	ListTagsForResource(context.Context, *awsSfn.ListTagsForResourceInput, ...func(*awsSfn.Options)) (*awsSfn.ListTagsForResourceOutput, error)
 }
 
-type Adapter struct{ client Client }
+type Adapter struct {
+	structureonly.Base
+	client Client
+}
+
+var _ catalog.Adapter = (*Adapter)(nil)
 
 func New(client ...Client) *Adapter {
 	var c Client
 	if len(client) > 0 {
 		c = client[0]
 	}
-	return &Adapter{client: c}
-}
-
-func (*Adapter) Service() model.ServiceDescriptor {
-	return model.ServiceDescriptor{Name: "stepfunctions", DisplayName: "Step Functions", Support: model.SupportStructureOnly}
-}
-
-func (*Adapter) Plan(project config.Project, _ bool) catalog.PlanContribution {
-	out := catalog.PlanContribution{Selections: make([]catalog.Selection, 0, len(project.Resources.StateMachines))}
-	for _, resource := range project.Resources.StateMachines {
-		out.Selections = append(out.Selections, catalog.Selection{Resource: model.ResourceRef{Service: "stepfunctions", Type: "state_machine", ID: resource.Name, ARN: resource.ARN}})
-		out.RequiredIAMActions = append(out.RequiredIAMActions, "states:DescribeStateMachine", "states:ListTagsForResource")
+	return &Adapter{
+		Base: structureonly.New(structureonly.Descriptor{
+			ServiceName:  "stepfunctions",
+			DisplayName:  "Step Functions",
+			ResourceType: "state_machine",
+			IAMActions:   []string{"states:DescribeStateMachine", "states:ListTagsForResource"},
+			Resources: func(project config.Project) []structureonly.Named {
+				return structureonly.Select(project.Resources.StateMachines, func(r config.StateMachineResource) (string, string) { return r.Name, r.ARN })
+			},
+		}),
+		client: c,
 	}
-	return out
 }
-
-func (*Adapter) FinalizePlanning(*model.Snapshot, []model.Dependency) ([]model.Finding, error) {
-	return nil, nil
-}
-func (*Adapter) Discover(context.Context, model.SourceScope) (model.DiscoveryResult, error) {
-	return model.DiscoveryResult{}, nil
-}
-func (*Adapter) Dependencies(*model.Snapshot) []model.Dependency              { return nil }
-func (*Adapter) Validate(*model.Snapshot, model.Capabilities) []model.Finding { return nil }
 
 func (a *Adapter) Capture(ctx context.Context, _ model.SourceScope, ref model.ResourceRef, opts model.CaptureOptions) (*model.Snapshot, error) {
-	if opts.IncludeData {
-		return nil, model.ErrValidation
+	if err := a.CheckStructureOnly(opts); err != nil {
+		return nil, err
 	}
 	structure := map[string]any{"name": ref.ID, "arn": ref.ARN, "tags": []map[string]string{}}
 	if a.client != nil {
@@ -62,7 +57,11 @@ func (a *Adapter) Capture(ctx context.Context, _ model.SourceScope, ref model.Re
 		}
 		structure["type"] = string(description.Type)
 		structure["role_arn"] = aws.ToString(description.RoleArn)
-		structure["logging_level"] = string(description.LoggingConfiguration.Level)
+		loggingLevel := ""
+		if description.LoggingConfiguration != nil {
+			loggingLevel = string(description.LoggingConfiguration.Level)
+		}
+		structure["logging_level"] = loggingLevel
 		structure["tracing_enabled"] = description.TracingConfiguration != nil && description.TracingConfiguration.Enabled
 		tags, err := a.client.ListTagsForResource(ctx, &awsSfn.ListTagsForResourceInput{ResourceArn: aws.String(ref.ARN)})
 		if err != nil {
@@ -75,5 +74,5 @@ func (a *Adapter) Capture(ctx context.Context, _ model.SourceScope, ref model.Re
 		sort.Slice(values, func(i, j int) bool { return values[i]["key"] < values[j]["key"] })
 		structure["tags"] = values
 	}
-	return model.NewSnapshot(ref, "stepfunctions", structure)
+	return a.Snapshot(ref, structure)
 }

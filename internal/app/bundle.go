@@ -89,20 +89,9 @@ func (a *Application) PullWithOptions(ctx context.Context, p config.Project, pro
 		return PullResult{}, err
 	}
 	target := filepath.Join(projectDir, filepath.FromSlash(p.Output.Directory))
-	baselineState := BaselineAbsent
-	var baselineProjection inspection.Projection
-	if _, statErr := os.Stat(target); statErr == nil {
-		generated, loadErr := bundle.LoadGenerated(ctx, target)
-		if loadErr != nil {
-			return PullResult{}, invalidBaselineError(loadErr)
-		}
-		baselineProjection, loadErr = inspection.ProjectManifest(generated.Manifest)
-		if loadErr != nil {
-			return PullResult{}, inspectError(loadErr)
-		}
-		baselineState = BaselinePresent
-	} else if !errors.Is(statErr, os.ErrNotExist) {
-		return PullResult{}, inspectError(statErr)
+	baselineState, baselineProjection, err := loadPullBaseline(ctx, target)
+	if err != nil {
+		return PullResult{}, err
 	}
 	workBase := options.WorkDir
 	if workBase == "" {
@@ -196,24 +185,9 @@ func (a *Application) PullWithOptions(ctx context.Context, p config.Project, pro
 	if err != nil {
 		return PullResult{}, &Error{Kind: ErrorPlan, Code: "MANIFEST_INVALID", Message: err.Error(), Err: err}
 	}
-	var ledgerGeneration *captureledger.Generation
-	if len(captured.LedgerResources) != 0 {
-		completedAt := time.Now().UTC()
-		if a.Now != nil {
-			completedAt = a.Now().UTC()
-		}
-		generation := captureledger.Generation{
-			SchemaVersion: captureledger.CurrentSchemaVersion,
-			Source:        captureledger.SourceIdentity{AccountID: source.Identity.AccountID, Region: effectiveRegion},
-			CreatedAt:     completedAt,
-			CompletedAt:   completedAt,
-			Resources:     captured.LedgerResources,
-		}
-		generation.ID = ledgerGenerationID(generation)
-		if _, err := generation.CanonicalJSON(); err != nil {
-			return PullResult{}, &Error{Kind: ErrorPlan, Code: "CAPTURE_LEDGER_INVALID", Message: err.Error(), Err: err}
-		}
-		ledgerGeneration = &generation
+	ledgerGeneration, err := a.buildLedgerGeneration(captured, source.Identity.AccountID, effectiveRegion)
+	if err != nil {
+		return PullResult{}, err
 	}
 	report(model.ProgressEvent{Operation: "pull", Phase: "install", Message: "validating and installing bundle"})
 	beforeInstall := func() error {
@@ -259,6 +233,49 @@ func (a *Application) PullWithOptions(ctx context.Context, p config.Project, pro
 		result.Receipt = &receipt
 	}
 	return result, nil
+}
+
+// loadPullBaseline validates the installed bundle and projects it for the
+// semantic comparison receipt. An absent target is the "first pull" case.
+func loadPullBaseline(ctx context.Context, target string) (BaselineState, inspection.Projection, error) {
+	if _, statErr := os.Stat(target); statErr == nil {
+		generated, loadErr := bundle.LoadGenerated(ctx, target)
+		if loadErr != nil {
+			return BaselineAbsent, inspection.Projection{}, invalidBaselineError(loadErr)
+		}
+		projection, loadErr := inspection.ProjectManifest(generated.Manifest)
+		if loadErr != nil {
+			return BaselineAbsent, inspection.Projection{}, inspectError(loadErr)
+		}
+		return BaselinePresent, projection, nil
+	} else if !errors.Is(statErr, os.ErrNotExist) {
+		return BaselineAbsent, inspection.Projection{}, filesystemError(statErr)
+	}
+	return BaselineAbsent, inspection.Projection{}, nil
+}
+
+// buildLedgerGeneration wraps captured ledger resources in a completed
+// generation ready for publication, when any reusable unit was captured.
+func (a *Application) buildLedgerGeneration(captured captureResult, accountID, region string) (*captureledger.Generation, error) {
+	if len(captured.LedgerResources) == 0 {
+		return nil, nil
+	}
+	completedAt := time.Now().UTC()
+	if a.Now != nil {
+		completedAt = a.Now().UTC()
+	}
+	generation := captureledger.Generation{
+		SchemaVersion: captureledger.CurrentSchemaVersion,
+		Source:        captureledger.SourceIdentity{AccountID: accountID, Region: region},
+		CreatedAt:     completedAt,
+		CompletedAt:   completedAt,
+		Resources:     captured.LedgerResources,
+	}
+	generation.ID = ledgerGenerationID(generation)
+	if _, err := generation.CanonicalJSON(); err != nil {
+		return nil, &Error{Kind: ErrorPlan, Code: "CAPTURE_LEDGER_INVALID", Message: err.Error(), Err: err}
+	}
+	return &generation, nil
 }
 
 func attachLedgerDecisions(receipt *inspection.Receipt, generation captureledger.Generation, previous map[string]string) {

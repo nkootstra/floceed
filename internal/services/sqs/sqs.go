@@ -2,22 +2,16 @@
 package sqs
 
 import (
-	"bufio"
 	"context"
-	"crypto/sha256"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
-	"os"
-	"path/filepath"
-	"strings"
 
 	awsSQS "github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/nkootstra/floceed/internal/catalog"
 	"github.com/nkootstra/floceed/internal/config"
 	"github.com/nkootstra/floceed/internal/model"
+	"github.com/nkootstra/floceed/internal/services/ndjson"
 )
 
 type Client interface {
@@ -26,6 +20,8 @@ type Client interface {
 }
 
 type Adapter struct{ client Client }
+
+var _ catalog.Adapter = (*Adapter)(nil)
 
 func New(client ...Client) *Adapter {
 	var c Client
@@ -41,17 +37,25 @@ func (*Adapter) Service() model.ServiceDescriptor {
 
 func (*Adapter) Plan(project config.Project, _ bool) catalog.PlanContribution {
 	contribution := catalog.PlanContribution{Selections: make([]catalog.Selection, 0, len(project.Resources.SQS))}
+	messageCapture := false
 	for _, resource := range project.Resources.SQS {
 		selection := catalog.Selection{Resource: model.ResourceRef{Service: "sqs", Type: "queue", ID: resource.Name, ARN: resource.ARN}}
 		if resource.Data != nil {
-			contribution.RequiredIAMActions = append(contribution.RequiredIAMActions, "sqs:GetQueueUrl")
+			// Gate the data actions on the project configuration so a plan
+			// reports the same RequiredIAMActions a subsequent pull needs;
+			// the run-level includeData flag is enforced separately in
+			// buildCaptureJobs, which forces IncludeData off for
+			// structure-only pulls.
+			messageCapture = messageCapture || resource.Data.Enabled
 			selection.Options.IncludeData = resource.Data.Enabled
 			selection.Options.Mode = string(resource.Data.Mode)
 			selection.Options.Limits.MaxItems = resource.Data.MaxMessages
 			selection.Options.Limits.MaxTotalBytes = resource.Data.MaxBytes
-			contribution.RequiredIAMActions = append(contribution.RequiredIAMActions, "sqs:ReceiveMessage")
 		}
 		contribution.Selections = append(contribution.Selections, selection)
+	}
+	if messageCapture {
+		contribution.RequiredIAMActions = []string{"sqs:GetQueueUrl", "sqs:ReceiveMessage"}
 	}
 	return contribution
 }
@@ -82,54 +86,51 @@ func (a *Adapter) Capture(ctx context.Context, _ model.SourceScope, ref model.Re
 	if err != nil {
 		return nil, err
 	}
-	name := "bundle/data/sqs/" + ref.ID + ".ndjson"
-	clean := filepath.Clean(filepath.FromSlash(name))
-	if filepath.IsAbs(clean) || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
-		return nil, fmt.Errorf("unsafe SQS artifact path: %w", model.ErrValidation)
-	}
-	destination := filepath.Join(opts.ArtifactDirectory, clean)
-	if err := os.MkdirAll(filepath.Dir(destination), 0o700); err != nil {
-		return nil, err
-	}
-	file, err := os.OpenFile(destination, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	writer, err := ndjson.Create(opts.ArtifactDirectory, "bundle/data/sqs/"+ref.ID+".ndjson", opts.Limits.MaxTotalBytes)
 	if err != nil {
 		return nil, err
 	}
-	hash := sha256.New()
-	writer := bufio.NewWriter(io.MultiWriter(file, hash))
-	var count, size int64
+	var count int64
 	for _, message := range messages.Messages {
+		if err := ctx.Err(); err != nil {
+			writer.Abort()
+			return nil, err
+		}
 		body := []byte("")
 		if message.Body != nil {
 			body = []byte(*message.Body)
 		}
-		value, _ := json.Marshal(map[string]any{"body_base64": base64.StdEncoding.EncodeToString(body), "message_attributes": message.MessageAttributes})
-		value = append(value, '\n')
-		if opts.Limits.MaxTotalBytes > 0 && size+int64(len(value)) > opts.Limits.MaxTotalBytes {
-			break
-		}
-		if _, err := writer.Write(value); err != nil {
-			file.Close()
+		value, err := json.Marshal(map[string]any{"body_base64": base64.StdEncoding.EncodeToString(body), "message_attributes": message.MessageAttributes})
+		if err != nil {
+			writer.Abort()
 			return nil, err
 		}
+		written, err := writer.Write(value)
+		if err != nil {
+			writer.Abort()
+			return nil, err
+		}
+		if !written {
+			break
+		}
 		count++
-		size += int64(len(value))
 		if opts.Progress != nil {
-			opts.Progress(model.ProgressEvent{Operation: "pull", Phase: "capture", Service: "sqs", Resource: ref.ID, CompletedRecords: count, CompletedBytes: size, TotalRecords: int64(opts.Limits.MaxItems), TotalBytes: opts.Limits.MaxTotalBytes, TotalPrecision: "unknown"})
+			opts.Progress(model.ProgressEvent{Operation: "pull", Phase: "capture", Service: "sqs", Resource: ref.ID, CompletedRecords: count, CompletedBytes: writer.Size(), TotalRecords: int64(opts.Limits.MaxItems), TotalBytes: opts.Limits.MaxTotalBytes, TotalPrecision: "unknown"})
 		}
 	}
-	if err := writer.Flush(); err != nil {
-		file.Close()
+	if err := ctx.Err(); err != nil {
+		writer.Abort()
 		return nil, err
 	}
-	if err := file.Close(); err != nil {
+	artifact, err := writer.Commit()
+	if err != nil {
 		return nil, err
 	}
 	snapshot, err := model.NewSnapshot(ref, "sqs", map[string]string{"name": ref.ID, "arn": ref.ARN})
 	if err != nil {
 		return nil, err
 	}
-	snapshot.Dataset = &model.Dataset{Format: "sqs-messages-ndjson-v1", Records: count, SourceBytes: size, Consistency: "best_effort", Chunks: []model.DataChunk{{Data: model.ArtifactRef{Path: filepath.ToSlash(name), SHA256: hex.EncodeToString(hash.Sum(nil)), Size: size}, Records: count, SourceBytes: size}}}
+	snapshot.Dataset = &model.Dataset{Format: "sqs-messages-ndjson-v1", Records: count, SourceBytes: artifact.Size, Consistency: "best_effort", Chunks: []model.DataChunk{{Data: artifact, Records: count, SourceBytes: artifact.Size}}}
 	return snapshot, nil
 }
 

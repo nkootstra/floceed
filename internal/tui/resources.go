@@ -70,59 +70,82 @@ func (m Model) selectedResources() []model.ResourceSummary {
 
 func resourceKey(ref model.ResourceRef) string { return ref.Service + "/" + ref.ID }
 
+// fullDataHookTimeout floors target.hook_timeout_seconds when full data mode is
+// selected in the interactive flow. Full replays can take hours.
+const fullDataHookTimeout = 3600
+
+func ensureFullDataTimeout(p *config.Project) {
+	// Floor the replay timeout for full mode, but never downgrade an explicit
+	// larger value already present in the loaded project.
+	if p.Target.HookTimeoutSeconds <= config.DefaultHookTimeoutSeconds {
+		p.Target.HookTimeoutSeconds = fullDataHookTimeout
+	}
+}
+
+// projectBuilders maps a service name to the project-file entry it produces.
+// S3 and DynamoDB are special-cased because their data policies carry bounds;
+// every other service contributes a name/ARN resource.
+var projectBuilders = map[string]func(p *config.Project, m Model, r model.ResourceSummary, data bool){
+	"s3": func(p *config.Project, m Model, r model.ResourceSummary, data bool) {
+		entry := config.S3Resource{Name: r.Ref.ID}
+		if data {
+			entry.Data = config.NewS3DataPolicy()
+			entry.Data.Mode = m.dataMode[resourceKey(r.Ref)]
+			if entry.Data.Mode == config.DataModeFull {
+				entry.Data.MaxObjects = 0
+				entry.Data.MaxObjectBytes = 0
+				entry.Data.MaxTotalBytes = 0
+				ensureFullDataTimeout(p)
+			}
+		}
+		p.Resources.S3 = append(p.Resources.S3, entry)
+	},
+	"dynamodb": func(p *config.Project, m Model, r model.ResourceSummary, data bool) {
+		entry := config.DynamoDBResource{Name: r.Ref.ID}
+		if data {
+			entry.Data = config.NewDynamoDBDataPolicy()
+			entry.Data.Mode = m.dataMode[resourceKey(r.Ref)]
+			if entry.Data.Mode == config.DataModeFull {
+				entry.Data.MaxItems = 0
+				entry.Data.MaxPages = 0
+				ensureFullDataTimeout(p)
+			}
+		}
+		p.Resources.DynamoDB = append(p.Resources.DynamoDB, entry)
+	},
+	"kinesis": func(p *config.Project, _ Model, r model.ResourceSummary, _ bool) {
+		p.Resources.Kinesis = append(p.Resources.Kinesis, config.KinesisResource{Name: r.Ref.ID, ARN: r.Ref.ARN})
+	},
+	"events": func(p *config.Project, _ Model, r model.ResourceSummary, _ bool) {
+		p.Resources.EventBridge = append(p.Resources.EventBridge, config.EventBridgeResource{Name: r.Ref.ID, ARN: r.Ref.ARN})
+	},
+	"lambda": func(p *config.Project, _ Model, r model.ResourceSummary, _ bool) {
+		p.Resources.Lambda = append(p.Resources.Lambda, config.LambdaResource{Name: r.Ref.ID, ARN: r.Ref.ARN})
+	},
+	"secretsmanager": func(p *config.Project, _ Model, r model.ResourceSummary, _ bool) {
+		p.Resources.Secrets = append(p.Resources.Secrets, config.SecretResource{Name: r.Ref.ID, ARN: r.Ref.ARN})
+	},
+	"ssm": func(p *config.Project, _ Model, r model.ResourceSummary, _ bool) {
+		p.Resources.Parameters = append(p.Resources.Parameters, config.ParameterResource{Name: r.Ref.ID, ARN: r.Ref.ARN})
+	},
+	"apigateway": func(p *config.Project, _ Model, r model.ResourceSummary, _ bool) {
+		p.Resources.APIs = append(p.Resources.APIs, config.APIResource{Name: r.Ref.ID, ARN: r.Ref.ARN})
+	},
+	"stepfunctions": func(p *config.Project, _ Model, r model.ResourceSummary, _ bool) {
+		p.Resources.StateMachines = append(p.Resources.StateMachines, config.StateMachineResource{Name: r.Ref.ID, ARN: r.Ref.ARN})
+	},
+	"logs": func(p *config.Project, _ Model, r model.ResourceSummary, _ bool) {
+		p.Resources.LogGroups = append(p.Resources.LogGroups, config.LogGroupResource{Name: r.Ref.ID, ARN: r.Ref.ARN})
+	},
+}
+
 func (m Model) Project() config.Project {
 	p := config.NewProject()
 	p.Source = config.Source{Profile: m.profile, Region: m.region, ExpectedAccountID: m.identity.AccountID}
 	for _, r := range m.selectedResources() {
-		data := m.dataEnabled[resourceKey(r.Ref)]
-		switch r.Ref.Service {
-		case "s3":
-			entry := config.S3Resource{Name: r.Ref.ID}
-			if data {
-				entry.Data = config.NewS3DataPolicy()
-				entry.Data.Mode = m.dataMode[resourceKey(r.Ref)]
-				if entry.Data.Mode == config.DataModeFull {
-					entry.Data.MaxObjects = 0
-					entry.Data.MaxObjectBytes = 0
-					entry.Data.MaxTotalBytes = 0
-					// Floor the replay timeout for full mode, but never downgrade an
-					// explicit larger value already present in the loaded project.
-					if p.Target.HookTimeoutSeconds <= config.DefaultHookTimeoutSeconds {
-						p.Target.HookTimeoutSeconds = 3600
-					}
-				}
-			}
-			p.Resources.S3 = append(p.Resources.S3, entry)
-		case "dynamodb":
-			entry := config.DynamoDBResource{Name: r.Ref.ID}
-			if data {
-				entry.Data = config.NewDynamoDBDataPolicy()
-				entry.Data.Mode = m.dataMode[resourceKey(r.Ref)]
-				if entry.Data.Mode == config.DataModeFull {
-					entry.Data.MaxItems = 0
-					entry.Data.MaxPages = 0
-					if p.Target.HookTimeoutSeconds <= config.DefaultHookTimeoutSeconds {
-						p.Target.HookTimeoutSeconds = 3600
-					}
-				}
-			}
-			p.Resources.DynamoDB = append(p.Resources.DynamoDB, entry)
-		case "kinesis":
-			p.Resources.Kinesis = append(p.Resources.Kinesis, config.KinesisResource{Name: r.Ref.ID, ARN: r.Ref.ARN})
-		case "events":
-			p.Resources.EventBridge = append(p.Resources.EventBridge, config.EventBridgeResource{Name: r.Ref.ID, ARN: r.Ref.ARN})
-		case "lambda":
-			p.Resources.Lambda = append(p.Resources.Lambda, config.LambdaResource{Name: r.Ref.ID, ARN: r.Ref.ARN})
-		case "secretsmanager":
-			p.Resources.Secrets = append(p.Resources.Secrets, config.SecretResource{Name: r.Ref.ID, ARN: r.Ref.ARN})
-		case "ssm":
-			p.Resources.Parameters = append(p.Resources.Parameters, config.ParameterResource{Name: r.Ref.ID, ARN: r.Ref.ARN})
-		case "apigateway":
-			p.Resources.APIs = append(p.Resources.APIs, config.APIResource{Name: r.Ref.ID, ARN: r.Ref.ARN})
-		case "stepfunctions":
-			p.Resources.StateMachines = append(p.Resources.StateMachines, config.StateMachineResource{Name: r.Ref.ID, ARN: r.Ref.ARN})
-		case "logs":
-			p.Resources.LogGroups = append(p.Resources.LogGroups, config.LogGroupResource{Name: r.Ref.ID, ARN: r.Ref.ARN})
+		key := resourceKey(r.Ref)
+		if builder, ok := projectBuilders[r.Ref.Service]; ok {
+			builder(&p, m, r, m.dataEnabled[key])
 		}
 	}
 	return p

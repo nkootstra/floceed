@@ -42,6 +42,37 @@ func TestValidateKinesisStreamARN(t *testing.T) {
 	}
 }
 
+func TestValidateSecretsManagerARN(t *testing.T) {
+	valid := func(arn string) error {
+		project := Project{SchemaVersion: CurrentSchemaVersion, Source: Source{Region: "eu-west-1"}, Resources: Resources{Secrets: []SecretResource{{Name: "db", ARN: arn}}}}
+		return project.Validate()
+	}
+	// Real Secrets Manager ARNs carry the name plus a random suffix.
+	if err := valid("arn:aws:secretsmanager:eu-west-1:123456789012:secret:db-AbCdEf"); err != nil {
+		t.Fatalf("valid Secrets Manager ARN rejected: %v", err)
+	}
+	if err := valid("arn:aws:secretsmanager:eu-west-1:123456789012:secret:db"); err != nil {
+		t.Fatalf("valid Secrets Manager ARN without suffix rejected: %v", err)
+	}
+	if err := valid("arn:aws-cn:secretsmanager:cn-north-1:123456789012:secret:db-AbCdEf"); err != nil {
+		t.Fatalf("valid China-partition Secrets Manager ARN rejected: %v", err)
+	}
+	for _, arn := range []string{
+		"arn:aws:secretsmanager:eu-west-1:123456789012:secret:users",
+		"arn:aws:secretsmanager:eu-west-1:123456789012:other:db",
+		"arn:aws:secretsmanager:eu-west-1:123456789012:db",
+		"arn:aws:secretsmanager:eu-west-1:123456789012:secret:db-secret-LongName",
+		"arn:aws:secretsmanager:eu-west-1:123456789012:secret:db-too-long-suffix-xyz",
+		"arn:aws:secretsmanager:eu-west-1:123456789012:secret:db-Xy!",
+		"arn:aws-unknown:secretsmanager:eu-west-1:123456789012:secret:db",
+		"arn:aws:secretsmanager::123456789012:secret:db",
+	} {
+		if err := valid(arn); err == nil {
+			t.Fatalf("mismatched Secrets Manager ARN accepted: %s", arn)
+		}
+	}
+}
+
 func TestSQSDataIsBoundedOnly(t *testing.T) {
 	project := Project{SchemaVersion: CurrentSchemaVersion, Source: Source{Region: "eu-west-1"}, Resources: Resources{SQS: []SQSResource{{Name: "jobs", ARN: "arn:aws:sqs:eu-west-1:123456789012:jobs", Data: &SQSDataPolicy{Enabled: true, Mode: DataModeFull}}}}}
 	if err := project.Validate(); err == nil {

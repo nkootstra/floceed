@@ -33,6 +33,15 @@ import (
 	"github.com/nkootstra/floceed/internal/storage"
 )
 
+var (
+	// ErrCheckpointCorrupt reports that a captured checkpoint fails integrity
+	// verification and cannot be resumed.
+	ErrCheckpointCorrupt = errors.New("corrupt S3 capture checkpoint; restart the capture")
+	// ErrCheckpointIncompatible reports that a checkpoint was written by a
+	// different capture configuration or tool version.
+	ErrCheckpointIncompatible = errors.New("incompatible S3 capture checkpoint; restart the capture (--restart) or use a different --work-dir")
+)
+
 const s3PackBytes int64 = 256 << 20
 const s3PackObjects = 10000
 
@@ -168,7 +177,7 @@ func (a *Adapter) captureObjectsReusable(ctx context.Context, scope model.Source
 		for _, ref := range refs {
 			sum, e := bundle.SumFile(filepath.Join(opts.ArtifactDirectory, filepath.FromSlash(ref.Path)))
 			if e != nil || sum.SHA256 != ref.SHA256 || sum.Size != ref.Size {
-				return nil, fmt.Errorf("corrupt S3 capture checkpoint; restart the capture")
+				return nil, ErrCheckpointCorrupt
 			}
 		}
 	}
@@ -665,7 +674,7 @@ func (a *Adapter) capturePack(ctx context.Context, bucket string, number int, en
 		gz.Header.ModTime = time.Unix(0, 0)
 		tw := tar.NewWriter(gz)
 		for _, entry := range entries {
-			o, e := a.client.GetObject(ctx, &awss3.GetObjectInput{Bucket: aws.String(bucket), Key: aws.String(entry.Key), IfMatch: emptyNil(entry.ETag), ChecksumMode: types.ChecksumModeEnabled})
+			o, e := a.client.GetObject(ctx, &awss3.GetObjectInput{Bucket: aws.String(bucket), Key: aws.String(entry.Key), IfMatch: awsconfig.StringOrNil(entry.ETag), ChecksumMode: types.ChecksumModeEnabled})
 			if e != nil {
 				return awsconfig.Classify(e, "download S3 object "+entry.Key, "")
 			}
@@ -768,10 +777,6 @@ func (a *Adapter) capturePack(ctx context.Context, bucket string, number int, en
 	return model.DataChunk{Data: pack, Index: &index, Records: int64(len(entries)), SourceBytes: inventorySize(entries)}, nil
 }
 
-func governedS3BodyRule(bucket string, object *awss3.GetObjectOutput, policy *governance.EffectivePolicy) (governance.Rule, bool, error) {
-	return newCaptureGovernance(bucket, policy).bodyRule(object)
-}
-
 func (compiled *captureGovernance) bodyRule(object *awss3.GetObjectOutput) (governance.Rule, bool, error) {
 	if compiled == nil || compiled.body == nil {
 		return governance.Rule{}, false, nil
@@ -798,10 +803,6 @@ func governedS3OutputSize(rule governance.Rule) (int64, error) {
 	default:
 		return 0, governance.ErrInvalidTransformation
 	}
-}
-
-func governedS3Metadata(bucket string, source map[string]string, policy *governance.EffectivePolicy, audit *governance.Audit) (map[string]string, error) {
-	return newCaptureGovernance(bucket, policy).governMetadata(source, audit)
 }
 
 func (compiled *captureGovernance) governMetadata(source map[string]string, audit *governance.Audit) (map[string]string, error) {
@@ -833,17 +834,6 @@ func (compiled *captureGovernance) governMetadata(source map[string]string, audi
 		}
 	}
 	return result, nil
-}
-
-func s3BodyRule(bucket string, policy *governance.EffectivePolicy) (governance.Rule, bool) {
-	if policy != nil {
-		for _, rule := range policy.Rules {
-			if rule.Service == governance.ServiceS3 && rule.Resource == bucket && rule.Target.Kind == governance.TargetS3TextBody {
-				return rule, true
-			}
-		}
-	}
-	return governance.Rule{}, false
 }
 
 func writeS3Artifact(ctx context.Context, root, rel, media string, write func(io.Writer) error) (model.ArtifactRef, error) {
@@ -913,10 +903,10 @@ func loadS3Checkpoint(path, bucket string, opts model.CaptureOptions, prefixes [
 	}
 	var cp s3Checkpoint
 	if err = json.Unmarshal(b, &cp); err != nil {
-		return cp, false, err
+		return cp, false, fmt.Errorf("%w: %v", ErrCheckpointCorrupt, err)
 	}
 	if cp.Version != s3CheckpointVersion || cp.Bucket != bucket || !s3CaptureIdentityMatches(cp, opts, prefixes) {
-		return cp, false, fmt.Errorf("incompatible S3 capture checkpoint; restart the capture (--restart) or use a different --work-dir")
+		return cp, false, ErrCheckpointIncompatible
 	}
 	return cp, true, nil
 }
@@ -1039,12 +1029,6 @@ func (c *contextReader) Read(p []byte) (int, error) {
 	default:
 		return c.r.Read(p)
 	}
-}
-func emptyNil(s string) *string {
-	if s == "" {
-		return nil
-	}
-	return &s
 }
 func sortTags(v []Tag) {
 	sort.Slice(v, func(i, j int) bool {

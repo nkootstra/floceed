@@ -569,9 +569,9 @@ func TestDoctorTextFailurePrintsChecksBeforeReturningError(t *testing.T) {
 		t.Fatalf("doctor output omitted checks: %s", got)
 	}
 }
-func (f *fakeService) Up(_ context.Context, _ config.Project, _ string, wait time.Duration) error {
+func (f *fakeService) UpWithOptions(_ context.Context, _ config.Project, _ string, options app.UpOptions) error {
 	f.started = true
-	f.wait = wait
+	f.wait = options.Wait
 	return nil
 }
 

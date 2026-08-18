@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -54,6 +55,19 @@ func TestMetadataOnlyStreamCapture(t *testing.T) {
 	}
 	if err := (model.Manifest{SchemaVersion: model.CurrentManifestSchemaVersion, Snapshots: []model.Snapshot{*snapshot}}).Validate(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestPlanIncludesDataIAMActionsWhenDataCaptureEnabled(t *testing.T) {
+	project := config.Project{Resources: config.Resources{Kinesis: []config.KinesisResource{{Name: "events", ARN: "arn:aws:kinesis:eu-west-1:123456789012:stream/events", Data: &config.KinesisDataPolicy{Enabled: true, Mode: config.DataModeBounded}}}}}
+	contribution := New().Plan(project, false)
+	for _, action := range []string{"kinesis:ListStreams", "kinesis:DescribeStreamSummary", "kinesis:ListShards", "kinesis:GetShardIterator", "kinesis:GetRecords"} {
+		if !slices.Contains(contribution.RequiredIAMActions, action) {
+			t.Fatalf("data-enabled plan must require %s regardless of run flag: %#v", action, contribution.RequiredIAMActions)
+		}
+	}
+	if !contribution.Selections[0].Options.IncludeData {
+		t.Fatal("data-enabled selection must carry IncludeData")
 	}
 }
 

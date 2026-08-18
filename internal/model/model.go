@@ -487,11 +487,13 @@ func validateSnapshot(snapshot Snapshot) error {
 			return fmt.Errorf("%s structure requires arn: %w", snapshot.Service, ErrValidation)
 		}
 		parts := strings.Split(value.ARN, ":")
-		expected := snapshot.Resource.ID
+		var valid bool
 		if snapshot.Service == "ssm" {
-			expected = "parameter" + expected
+			valid = len(parts) == 6 && parts[0] == "arn" && parts[2] == "ssm" && snapshotAccountID.MatchString(parts[4]) && parts[5] == "parameter"+snapshot.Resource.ID
+		} else {
+			valid = len(parts) == 7 && parts[0] == "arn" && parts[2] == "secretsmanager" && snapshotAccountID.MatchString(parts[4]) && parts[5] == "secret" && secretResourceMatchesName(parts[6], snapshot.Resource.ID)
 		}
-		if len(parts) != 6 || parts[0] != "arn" || parts[2] != snapshot.Service || !snapshotAccountID.MatchString(parts[4]) || (snapshot.Service == "ssm" && parts[5] != expected) || (snapshot.Service == "secretsmanager" && !strings.HasPrefix(parts[5], expected)) {
+		if !valid {
 			return fmt.Errorf("%s structure ARN must match resource identity: %w", snapshot.Service, ErrValidation)
 		}
 		if snapshot.Resource.ARN != "" && snapshot.Resource.ARN != value.ARN {
@@ -533,10 +535,17 @@ func validateSnapshot(snapshot Snapshot) error {
 		if len(parts) >= 6 {
 			resourcePart = strings.TrimPrefix(strings.Join(parts[5:], ":"), "log-group:")
 		}
-		if len(parts) < 7 || parts[0] != "arn" || parts[2] != "logs" || !snapshotAccountID.MatchString(parts[4]) || resourcePart == "" || !strings.HasPrefix(resourcePart, snapshot.Resource.ID) {
+		// DescribeLogGroups returns the ARN with a trailing ":*" for log groups
+		// created after AWS's 2019 ARN format change; configured ARNs may or may
+		// not carry it. Trim it before the identity check so a different log
+		// group whose name merely shares a prefix cannot pass.
+		resourcePart = strings.TrimSuffix(resourcePart, ":*")
+		if len(parts) < 7 || parts[0] != "arn" || parts[2] != "logs" || !snapshotAccountID.MatchString(parts[4]) || resourcePart != snapshot.Resource.ID {
 			return fmt.Errorf("CloudWatch Logs structure ARN must match resource identity: %w", ErrValidation)
 		}
-		if snapshot.Resource.ARN != "" && snapshot.Resource.ARN != value.ARN {
+		// A configured ARN may carry the optional ":*" suffix; compare identity
+		// only so a suffix difference cannot fail an otherwise valid manifest.
+		if snapshot.Resource.ARN != "" && trimLogGroupARNSuffix(snapshot.Resource.ARN) != trimLogGroupARNSuffix(value.ARN) {
 			return fmt.Errorf("CloudWatch Logs structure must match resource ARN: %w", ErrValidation)
 		}
 	default:
@@ -548,3 +557,37 @@ func validateSnapshot(snapshot Snapshot) error {
 var ErrSchema = errors.New("schema version error")
 var ErrValidation = errors.New("validation error")
 var snapshotAccountID = regexp.MustCompile(`^[0-9]{12}$`)
+
+// trimLogGroupARNSuffix strips the trailing ":*" that DescribeLogGroups appends
+// to log group ARNs created after AWS's 2019 ARN format change, so configured
+// and live ARNs compare on identity alone.
+func trimLogGroupARNSuffix(arn string) string {
+	return strings.TrimSuffix(arn, ":*")
+}
+
+// secretResourceMatchesName reports whether the resource part of a Secrets
+// Manager ARN names the configured secret. AWS appends a random `-XXXXXX`
+// suffix to the secret name, so the bare name and the name plus that exact
+// suffix are accepted, but a name that merely shares a prefix is not.
+func secretResourceMatchesName(resource, name string) bool {
+	if resource == name {
+		return true
+	}
+	if !strings.HasPrefix(resource, name+"-") {
+		return false
+	}
+	suffix := strings.TrimPrefix(resource, name+"-")
+	if len(suffix) != 6 {
+		return false
+	}
+	for _, r := range suffix {
+		if !alphanumeric(r) {
+			return false
+		}
+	}
+	return true
+}
+
+func alphanumeric(r rune) bool {
+	return 'a' <= r && r <= 'z' || 'A' <= r && r <= 'Z' || '0' <= r && r <= '9'
+}

@@ -3,12 +3,14 @@ package apigateway
 
 import (
 	"context"
+	"sort"
+
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsAPI "github.com/aws/aws-sdk-go-v2/service/apigatewayv2"
 	"github.com/nkootstra/floceed/internal/catalog"
 	"github.com/nkootstra/floceed/internal/config"
 	"github.com/nkootstra/floceed/internal/model"
-	"sort"
+	"github.com/nkootstra/floceed/internal/services/structureonly"
 )
 
 type Client interface {
@@ -16,37 +18,36 @@ type Client interface {
 	GetRoutes(context.Context, *awsAPI.GetRoutesInput, ...func(*awsAPI.Options)) (*awsAPI.GetRoutesOutput, error)
 	GetIntegrations(context.Context, *awsAPI.GetIntegrationsInput, ...func(*awsAPI.Options)) (*awsAPI.GetIntegrationsOutput, error)
 }
-type Adapter struct{ client Client }
+
+type Adapter struct {
+	structureonly.Base
+	client Client
+}
+
+var _ catalog.Adapter = (*Adapter)(nil)
 
 func New(client ...Client) *Adapter {
 	var c Client
 	if len(client) > 0 {
 		c = client[0]
 	}
-	return &Adapter{client: c}
-}
-func (*Adapter) Service() model.ServiceDescriptor {
-	return model.ServiceDescriptor{Name: "apigateway", DisplayName: "API Gateway", Support: model.SupportStructureOnly}
-}
-func (*Adapter) Plan(project config.Project, _ bool) catalog.PlanContribution {
-	out := catalog.PlanContribution{Selections: make([]catalog.Selection, 0, len(project.Resources.APIs))}
-	for _, r := range project.Resources.APIs {
-		out.Selections = append(out.Selections, catalog.Selection{Resource: model.ResourceRef{Service: "apigateway", Type: "api", ID: r.Name, ARN: r.ARN}})
-		out.RequiredIAMActions = append(out.RequiredIAMActions, "apigateway:GET")
+	return &Adapter{
+		Base: structureonly.New(structureonly.Descriptor{
+			ServiceName:  "apigateway",
+			DisplayName:  "API Gateway",
+			ResourceType: "api",
+			IAMActions:   []string{"apigateway:GET"},
+			Resources: func(project config.Project) []structureonly.Named {
+				return structureonly.Select(project.Resources.APIs, func(r config.APIResource) (string, string) { return r.Name, r.ARN })
+			},
+		}),
+		client: c,
 	}
-	return out
 }
-func (*Adapter) FinalizePlanning(*model.Snapshot, []model.Dependency) ([]model.Finding, error) {
-	return nil, nil
-}
-func (*Adapter) Discover(context.Context, model.SourceScope) (model.DiscoveryResult, error) {
-	return model.DiscoveryResult{}, nil
-}
-func (*Adapter) Dependencies(*model.Snapshot) []model.Dependency              { return nil }
-func (*Adapter) Validate(*model.Snapshot, model.Capabilities) []model.Finding { return nil }
+
 func (a *Adapter) Capture(ctx context.Context, _ model.SourceScope, ref model.ResourceRef, opts model.CaptureOptions) (*model.Snapshot, error) {
-	if opts.IncludeData {
-		return nil, model.ErrValidation
+	if err := a.CheckStructureOnly(opts); err != nil {
+		return nil, err
 	}
 	structure := map[string]any{"name": ref.ID, "arn": ref.ARN, "routes": []any{}, "integrations": []any{}}
 	if a.client != nil {
@@ -57,26 +58,70 @@ func (a *Adapter) Capture(ctx context.Context, _ model.SourceScope, ref model.Re
 		structure["protocol_type"] = string(api.ProtocolType)
 		structure["description"] = aws.ToString(api.Description)
 		structure["api_endpoint"] = aws.ToString(api.ApiEndpoint)
-		routes, err := a.client.GetRoutes(ctx, &awsAPI.GetRoutesInput{ApiId: aws.String(ref.ID)})
+		routes, err := a.collectRoutes(ctx, ref.ID)
 		if err != nil {
 			return nil, err
 		}
-		for _, route := range routes.Items {
-			structure["routes"] = append(structure["routes"].([]any), map[string]string{"id": aws.ToString(route.RouteId), "key": aws.ToString(route.RouteKey), "target": aws.ToString(route.Target)})
-		}
-		integrations, err := a.client.GetIntegrations(ctx, &awsAPI.GetIntegrationsInput{ApiId: aws.String(ref.ID)})
+		sort.Slice(routes, func(i, j int) bool { return routes[i].Key < routes[j].Key })
+		structure["routes"] = routes
+		integrations, err := a.collectIntegrations(ctx, ref.ID)
 		if err != nil {
 			return nil, err
 		}
-		for _, integration := range integrations.Items {
-			structure["integrations"] = append(structure["integrations"].([]any), map[string]string{"id": aws.ToString(integration.IntegrationId), "type": string(integration.IntegrationType), "uri": aws.ToString(integration.IntegrationUri), "connection_type": string(integration.ConnectionType)})
-		}
-		sort.Slice(structure["routes"], func(i, j int) bool {
-			return structure["routes"].([]any)[i].(map[string]string)["key"] < structure["routes"].([]any)[j].(map[string]string)["key"]
-		})
-		sort.Slice(structure["integrations"], func(i, j int) bool {
-			return structure["integrations"].([]any)[i].(map[string]string)["id"] < structure["integrations"].([]any)[j].(map[string]string)["id"]
-		})
+		sort.Slice(integrations, func(i, j int) bool { return integrations[i].ID < integrations[j].ID })
+		structure["integrations"] = integrations
 	}
-	return model.NewSnapshot(ref, "apigateway", structure)
+	return a.Snapshot(ref, structure)
+}
+
+type route struct {
+	ID     string `json:"id"`
+	Key    string `json:"key"`
+	Target string `json:"target"`
+}
+
+type integration struct {
+	ID             string `json:"id"`
+	Type           string `json:"type"`
+	URI            string `json:"uri"`
+	ConnectionType string `json:"connection_type"`
+}
+
+// collectRoutes and collectIntegrations are paginated: GetRoutes and
+// GetIntegrations cap at 50 items per page, so a bare call silently truncates
+// larger APIs.
+func (a *Adapter) collectRoutes(ctx context.Context, apiID string) ([]route, error) {
+	var out []route
+	var token *string
+	for {
+		page, err := a.client.GetRoutes(ctx, &awsAPI.GetRoutesInput{ApiId: aws.String(apiID), NextToken: token})
+		if err != nil {
+			return nil, err
+		}
+		for _, item := range page.Items {
+			out = append(out, route{ID: aws.ToString(item.RouteId), Key: aws.ToString(item.RouteKey), Target: aws.ToString(item.Target)})
+		}
+		if page.NextToken == nil || *page.NextToken == "" {
+			return out, nil
+		}
+		token = page.NextToken
+	}
+}
+
+func (a *Adapter) collectIntegrations(ctx context.Context, apiID string) ([]integration, error) {
+	var out []integration
+	var token *string
+	for {
+		page, err := a.client.GetIntegrations(ctx, &awsAPI.GetIntegrationsInput{ApiId: aws.String(apiID), NextToken: token})
+		if err != nil {
+			return nil, err
+		}
+		for _, item := range page.Items {
+			out = append(out, integration{ID: aws.ToString(item.IntegrationId), Type: string(item.IntegrationType), URI: aws.ToString(item.IntegrationUri), ConnectionType: string(item.ConnectionType)})
+		}
+		if page.NextToken == nil || *page.NextToken == "" {
+			return out, nil
+		}
+		token = page.NextToken
+	}
 }

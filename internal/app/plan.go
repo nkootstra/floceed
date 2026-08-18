@@ -18,6 +18,8 @@ import (
 	"github.com/nkootstra/floceed/internal/config"
 	"github.com/nkootstra/floceed/internal/governance"
 	"github.com/nkootstra/floceed/internal/model"
+	"github.com/nkootstra/floceed/internal/services/dynamodb"
+	"github.com/nkootstra/floceed/internal/services/s3"
 	"github.com/nkootstra/floceed/internal/storage"
 )
 
@@ -115,118 +117,17 @@ func (a *Application) capture(ctx context.Context, req captureRequest) (captureR
 	sort.Slice(selections, func(i, j int) bool {
 		return cmp.Or(cmp.Compare(selections[i].Resource.Service, selections[j].Resource.Service), cmp.Compare(selections[i].Resource.ID, selections[j].Resource.ID)) < 0
 	})
-	type captureJob struct {
-		adapter       catalog.Adapter
-		options       model.CaptureOptions
-		candidate     *captureledger.Resource
-		invalidReason captureledger.Reason
-		generationID  string
+	jobs, err := buildCaptureJobs(req, source, selections)
+	if err != nil {
+		return captureResult{}, err
 	}
-	jobs := make([]captureJob, len(selections))
-	for i, selection := range selections {
-		adapter, ok := source.Registry.Get(selection.Resource.Service)
-		if !ok {
-			return captureResult{}, &Error{Kind: ErrorPlan, Code: "ADAPTER_MISSING", Message: "no adapter for " + selection.Resource.Service}
-		}
-		options := selection.Options
-		options.Governance = policy
-		audit := governance.NewAudit()
-		options.GovernanceAudit = audit
-		options.AllowPartialData = p.Capture.AllowPartialData
-		if req.IncludeData {
-			options.ArtifactDirectory = req.ArtifactRoot
-			if req.CheckpointRoot != "" {
-				sum := sha256.Sum256([]byte(selection.Resource.Service + "\x00" + selection.Resource.ID))
-				options.CheckpointDirectory = filepath.Join(req.CheckpointRoot, hex.EncodeToString(sum[:16]))
-			}
-			options.Progress = req.Progress
-		} else {
-			options.IncludeData = false
-		}
-		job := captureJob{adapter: adapter, options: options}
-		if req.IncludeData && req.Ledger != nil {
-			descriptor := captureledger.ResourceDescriptor{Service: selection.Resource.Service, Type: selection.Resource.Type, ID: selection.Resource.ID}
-			generation, loadErr := req.Ledger.LoadCandidates(req.LedgerSource, descriptor)
-			if loadErr != nil {
-				job.invalidReason, _ = captureledger.InvalidationReason(loadErr)
-			} else {
-				job.generationID = generation.ID
-				for _, resource := range generation.Resources {
-					if resource.Descriptor == descriptor {
-						candidate := resource
-						job.candidate = &candidate
-						for _, unit := range resource.Units {
-							if unit.Outcome == captureledger.UnitOutcomeInvalidated && job.invalidReason == "" {
-								job.invalidReason = unit.Reason
-							}
-						}
-					}
-				}
-			}
-		}
-		jobs[i] = job
-	}
-
-	type captureOutcome struct {
-		snapshot *model.Snapshot
-		resource *captureledger.Resource
-		err      error
-	}
-	outcomes := make([]captureOutcome, len(jobs))
-	captureCtx, cancelCaptures := context.WithCancel(ctx)
-	defer cancelCaptures()
-	concurrency := p.Capture.ResourceWorkers
-	if concurrency == 0 {
-		concurrency = captureConcurrency
-	}
-	limit := make(chan struct{}, concurrency)
-	var captures sync.WaitGroup
-	for i, job := range jobs {
-		captures.Add(1)
-		go func() {
-			defer captures.Done()
-			select {
-			case limit <- struct{}{}:
-				defer func() { <-limit }()
-			case <-captureCtx.Done():
-				outcomes[i].err = captureCtx.Err()
-				return
-			}
-			if reusable, ok := job.adapter.(catalog.ReusableAdapter); ok && req.Ledger != nil {
-				result, captureErr := reusable.CaptureReusable(captureCtx, source.Scope, selections[i].Resource, job.options, catalog.ReuseRequest{
-					Candidate:          job.candidate,
-					InvalidationReason: job.invalidReason,
-					Validate:           req.Ledger.ValidateArtifact,
-					Materialize:        func(artifact captureledger.Artifact) error { return req.Ledger.Materialize(artifact, req.ArtifactRoot) },
-				})
-				outcomes[i].snapshot, outcomes[i].resource, outcomes[i].err = result.Snapshot, result.Resource, captureErr
-			} else {
-				outcomes[i].snapshot, outcomes[i].err = job.adapter.Capture(captureCtx, source.Scope, selections[i].Resource, job.options)
-			}
-			if outcomes[i].err != nil {
-				cancelCaptures()
-			}
-		}()
-	}
-	captures.Wait()
-
-	// Prefer a concrete adapter failure over cancellation induced by another
-	// capture, while retaining selection order when several adapters fail.
-	var captureErr error
-	for _, outcome := range outcomes {
-		if outcome.err == nil {
-			continue
-		}
-		if captureErr == nil || (errors.Is(captureErr, context.Canceled) && !errors.Is(outcome.err, context.Canceled)) {
-			captureErr = outcome.err
-		}
-	}
-	if captureErr != nil {
+	outcomes := runCaptureJobs(ctx, req, source, selections, jobs)
+	if captureErr := firstCaptureError(outcomes); captureErr != nil {
 		var diskErr *storage.InsufficientSpaceError
 		if errors.As(captureErr, &diskErr) {
 			return captureResult{}, &Error{Kind: ErrorFilesystem, Code: "DISK_SPACE_INSUFFICIENT", Message: diskErr.Error(), Remediation: "Free disk space, choose a larger --work-dir, or reduce the capture scope.", Err: captureErr}
 		}
-		return captureResult{}, sourceError(captureErr)
+		return captureResult{}, captureError(captureErr)
 	}
 
 	captured := captureResult{Plan: result}
@@ -301,6 +202,155 @@ func (a *Application) capture(ctx context.Context, req captureRequest) (captureR
 	captured.Plan = result
 	captured.Snapshots = snapshots
 	return captured, nil
+}
+
+// captureJob is one adapter capture scheduled from a selection, enriched with
+// the governance policy, checkpoint paths, and any ledger reuse candidate.
+type captureJob struct {
+	adapter       catalog.Adapter
+	options       model.CaptureOptions
+	candidate     *captureledger.Resource
+	invalidReason captureledger.Reason
+	generationID  string
+}
+
+// captureOutcome is the result of one capture job, indexed like jobs.
+type captureOutcome struct {
+	snapshot *model.Snapshot
+	resource *captureledger.Resource
+	err      error
+}
+
+func buildCaptureJobs(req captureRequest, source Source, selections []catalog.Selection) ([]captureJob, error) {
+	policy := req.Governance
+	jobs := make([]captureJob, len(selections))
+	for i, selection := range selections {
+		adapter, ok := source.Registry.Get(selection.Resource.Service)
+		if !ok {
+			return nil, &Error{Kind: ErrorPlan, Code: "ADAPTER_MISSING", Message: "no adapter for " + selection.Resource.Service}
+		}
+		options := selection.Options
+		options.Governance = policy
+		options.GovernanceAudit = governance.NewAudit()
+		options.AllowPartialData = req.Project.Capture.AllowPartialData
+		if req.IncludeData {
+			options.ArtifactDirectory = req.ArtifactRoot
+			if req.CheckpointRoot != "" {
+				sum := sha256.Sum256([]byte(selection.Resource.Service + "\x00" + selection.Resource.ID))
+				options.CheckpointDirectory = filepath.Join(req.CheckpointRoot, hex.EncodeToString(sum[:16]))
+			}
+			options.Progress = req.Progress
+		} else {
+			options.IncludeData = false
+		}
+		job := captureJob{adapter: adapter, options: options}
+		if req.IncludeData && req.Ledger != nil {
+			job.attachLedgerCandidate(req.Ledger, req.LedgerSource, selection.Resource)
+		}
+		jobs[i] = job
+	}
+	return jobs, nil
+}
+
+// attachLedgerCandidate resolves the completed-generation candidate for a
+// resource so a ReusableAdapter can prove freshness before materializing.
+func (job *captureJob) attachLedgerCandidate(ledger *captureledger.Store, source captureledger.SourceIdentity, resource model.ResourceRef) {
+	descriptor := captureledger.ResourceDescriptor{Service: resource.Service, Type: resource.Type, ID: resource.ID}
+	generation, loadErr := ledger.LoadCandidates(source, descriptor)
+	if loadErr != nil {
+		job.invalidReason, _ = captureledger.InvalidationReason(loadErr)
+		return
+	}
+	job.generationID = generation.ID
+	for _, candidate := range generation.Resources {
+		if candidate.Descriptor != descriptor {
+			continue
+		}
+		value := candidate
+		job.candidate = &value
+		for _, unit := range candidate.Units {
+			if unit.Outcome == captureledger.UnitOutcomeInvalidated && job.invalidReason == "" {
+				job.invalidReason = unit.Reason
+			}
+		}
+		return
+	}
+}
+
+// runCaptureJobs executes the capture jobs under a bounded worker pool. A
+// failure cancels the remaining captures via the shared context.
+func runCaptureJobs(ctx context.Context, req captureRequest, source Source, selections []catalog.Selection, jobs []captureJob) []captureOutcome {
+	outcomes := make([]captureOutcome, len(jobs))
+	captureCtx, cancelCaptures := context.WithCancel(ctx)
+	defer cancelCaptures()
+	concurrency := req.Project.Capture.ResourceWorkers
+	if concurrency == 0 {
+		concurrency = captureConcurrency
+	}
+	limit := make(chan struct{}, concurrency)
+	var captures sync.WaitGroup
+	for i, job := range jobs {
+		captures.Add(1)
+		go func() {
+			defer captures.Done()
+			select {
+			case limit <- struct{}{}:
+				defer func() { <-limit }()
+			case <-captureCtx.Done():
+				outcomes[i].err = captureCtx.Err()
+				return
+			}
+			if reusable, ok := job.adapter.(catalog.ReusableAdapter); ok && req.Ledger != nil {
+				result, captureErr := reusable.CaptureReusable(captureCtx, source.Scope, selections[i].Resource, job.options, catalog.ReuseRequest{
+					Candidate:          job.candidate,
+					InvalidationReason: job.invalidReason,
+					Validate:           req.Ledger.ValidateArtifact,
+					Materialize:        func(artifact captureledger.Artifact) error { return req.Ledger.Materialize(artifact, req.ArtifactRoot) },
+				})
+				outcomes[i].snapshot, outcomes[i].resource, outcomes[i].err = result.Snapshot, result.Resource, captureErr
+			} else {
+				outcomes[i].snapshot, outcomes[i].err = job.adapter.Capture(captureCtx, source.Scope, selections[i].Resource, job.options)
+			}
+			if outcomes[i].err != nil {
+				cancelCaptures()
+			}
+		}()
+	}
+	captures.Wait()
+	return outcomes
+}
+
+// firstCaptureError prefers a concrete adapter failure over the cancellation
+// another capture induced, retaining selection order when several fail.
+func firstCaptureError(outcomes []captureOutcome) error {
+	var captureErr error
+	for _, outcome := range outcomes {
+		if outcome.err == nil {
+			continue
+		}
+		if captureErr == nil || (errors.Is(captureErr, context.Canceled) && !errors.Is(outcome.err, context.Canceled)) {
+			captureErr = outcome.err
+		}
+	}
+	return captureErr
+}
+
+// captureError classifies an adapter failure. Checkpoint corruption and
+// incompatibility are distinct, recoverable conditions with a known
+// remediation, so they get their own codes instead of collapsing into
+// AWS_SOURCE_FAILED where an agent cannot branch on them.
+func captureError(err error) error {
+	var appError *Error
+	if errors.As(err, &appError) {
+		return err
+	}
+	if errors.Is(err, dynamodb.ErrCheckpointCorrupt) || errors.Is(err, s3.ErrCheckpointCorrupt) {
+		return &Error{Kind: ErrorFilesystem, Code: "CHECKPOINT_CORRUPT", Message: err.Error(), Remediation: "restart the capture (--restart) or use a different --work-dir", Err: err}
+	}
+	if errors.Is(err, dynamodb.ErrCheckpointIncompatible) || errors.Is(err, s3.ErrCheckpointIncompatible) {
+		return &Error{Kind: ErrorFilesystem, Code: "CHECKPOINT_INCOMPATIBLE", Message: err.Error(), Remediation: "restart the capture (--restart) or use a different --work-dir", Err: err}
+	}
+	return sourceError(err)
 }
 
 func validateDependencyGraph(bySnapshot [][]model.Dependency, snapshots []model.Snapshot, selected map[string]model.ResourceRef) error {

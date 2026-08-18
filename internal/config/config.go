@@ -286,7 +286,7 @@ func (p Project) ResolveFixtureProfile(name string, getenv func(string) string) 
 	}
 	profile, ok := p.FixtureProfiles[name]
 	if !ok {
-		return nil, fmt.Errorf("unknown fixture profile %q: %w", name, ErrValidation)
+		return nil, fmt.Errorf("%w %q", ErrUnknownFixtureProfile, name)
 	}
 	rules := make([]governance.Rule, len(profile.Rules))
 	keyed := len(profile.Cohorts) != 0
@@ -598,11 +598,43 @@ func validateSecretResources(resources []SecretResource) error {
 			return fmt.Errorf("Secrets Manager resource %q has invalid name: %w", resource.Name, ErrValidation)
 		}
 		parts := strings.Split(resource.ARN, ":")
-		if len(parts) != 6 || parts[2] != "secretsmanager" || parts[5] == "" || !accountID.MatchString(parts[4]) {
+		// Secrets Manager ARNs carry the resource as `secret:<name>-<suffix>`,
+		// which splits into two segments: "secret" and the name with its random
+		// suffix. Accept only the bare name or the name plus AWS's fixed
+		// `-XXXXXX` suffix, so a different secret whose name merely starts with
+		// this one cannot pass.
+		if len(parts) != 7 || parts[0] != "arn" || !arnPartition.MatchString(parts[1]) || parts[2] != "secretsmanager" || parts[3] == "" || !accountID.MatchString(parts[4]) || parts[5] != "secret" || !secretResourceMatchesName(parts[6], resource.Name) {
 			return fmt.Errorf("Secrets Manager resource %q has invalid ARN: %w", resource.Name, ErrValidation)
 		}
 	}
 	return validateResourceNames("Secrets Manager", names)
+}
+
+// secretResourceMatchesName reports whether the resource part of a Secrets
+// Manager ARN names the configured secret. AWS appends a random `-XXXXXX`
+// suffix to the secret name, so the bare name and the name plus that exact
+// suffix are accepted, but a name that merely shares a prefix is not.
+func secretResourceMatchesName(resource, name string) bool {
+	if resource == name {
+		return true
+	}
+	if !strings.HasPrefix(resource, name+"-") {
+		return false
+	}
+	suffix := strings.TrimPrefix(resource, name+"-")
+	if len(suffix) != 6 {
+		return false
+	}
+	for _, r := range suffix {
+		if !alphanumeric(r) {
+			return false
+		}
+	}
+	return true
+}
+
+func alphanumeric(r rune) bool {
+	return 'a' <= r && r <= 'z' || 'A' <= r && r <= 'Z' || '0' <= r && r <= '9'
 }
 
 func validateParameterResources(resources []ParameterResource) error {
@@ -618,14 +650,6 @@ func validateParameterResources(resources []ParameterResource) error {
 		}
 	}
 	return validateResourceNames("SSM parameters", names)
-}
-
-func validateNamedARN(service, name, arn string) error {
-	parts := strings.Split(arn, ":")
-	if len(parts) != 6 || parts[0] != "arn" || !arnPartition.MatchString(parts[1]) || parts[2] != service || parts[3] == "" || !accountID.MatchString(parts[4]) || parts[5] != name {
-		return fmt.Errorf("ARN %q does not match %s resource name: %w", arn, service, ErrValidation)
-	}
-	return nil
 }
 
 func validateAPIResources(resources []APIResource) error {
@@ -848,3 +872,4 @@ func validateResourceNames(service string, names []string) error {
 }
 
 var ErrValidation = errors.New("invalid floceed project")
+var ErrUnknownFixtureProfile = errors.New("unknown fixture profile")

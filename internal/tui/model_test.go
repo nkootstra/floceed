@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -84,7 +85,7 @@ func TestMissingProfileRegionRequiresRegionEntry(t *testing.T) {
 
 func TestResourceSelectionsSurviveServiceFailure(t *testing.T) {
 	m := NewModel(fakeBackend{}, Options{})
-	m.screen = ScreenResources
+	m.screen, m.pending = ScreenResources, ScreenResources
 	m.resources = []model.ResourceSummary{{Ref: model.ResourceRef{Service: "s3", ID: "assets"}, Name: "assets"}}
 	m.selected[resourceKey(m.resources[0].Ref)] = true
 	m = update(t, m, scanFinishedMsg{result: app.ScanResult{
@@ -121,6 +122,31 @@ func TestEscapingNarrowedResourceFilterClampsCursor(t *testing.T) {
 	}
 }
 
+func TestStaleAsyncResultDoesNotHijackNavigation(t *testing.T) {
+	m := NewModel(fakeBackend{}, Options{})
+	m.profile, m.region, m.identity = "dev", "eu-west-1", awsconfig.Identity{AccountID: "123456789012"}
+	m.screen = ScreenServices
+
+	// Enter starts a scan from ScreenServices; Esc then backs out to Identity
+	// while the scan is still in flight.
+	m = press(t, m, "enter")
+	if m.Screen() != ScreenServices {
+		t.Fatalf("scan did not start from services: screen=%s", m.Screen())
+	}
+	m = press(t, m, "esc")
+	if m.Screen() != ScreenIdentity {
+		t.Fatalf("esc did not leave services: screen=%s", m.Screen())
+	}
+
+	// A stale scan result must not yank the user forward to Resources.
+	m = update(t, m, scanFinishedMsg{result: app.ScanResult{
+		Resources: []model.ResourceSummary{{Ref: model.ResourceRef{Service: "s3", ID: "assets"}, Name: "assets"}},
+	}})
+	if m.Screen() != ScreenIdentity {
+		t.Fatalf("stale scan result hijacked navigation to %s", m.Screen())
+	}
+}
+
 func TestRescanDropsDeselectedServiceStateAndPreservesSelectedServiceResources(t *testing.T) {
 	m := NewModel(fakeBackend{}, Options{})
 	m.screen = ScreenResources
@@ -153,6 +179,7 @@ func TestAsyncResultsReplaceStaleFindings(t *testing.T) {
 	m := NewModel(fakeBackend{}, Options{})
 	m.findings = []model.Finding{{Code: "STALE"}}
 
+	m.screen, m.pending = ScreenServices, ScreenServices
 	m = update(t, m, scanFinishedMsg{result: app.ScanResult{
 		Findings: []model.Finding{{Code: "SCAN_WARNING"}},
 	}})
@@ -160,11 +187,52 @@ func TestAsyncResultsReplaceStaleFindings(t *testing.T) {
 		t.Fatalf("scan findings = %#v, want only current scan findings", m.findings)
 	}
 
+	m.findings = []model.Finding{{Code: "STALE"}}
+	m.screen, m.pending = ScreenOptions, ScreenOptions
 	m = update(t, m, planFinishedMsg{plan: app.Plan{
 		Findings: []model.Finding{{Code: "PLAN_WARNING"}},
 	}})
 	if len(m.findings) != 1 || m.findings[0].Code != "PLAN_WARNING" {
 		t.Fatalf("plan findings = %#v, want only current plan findings", m.findings)
+	}
+}
+
+func TestStaleFailedScanDoesNotBlockIdentityScreen(t *testing.T) {
+	m := NewModel(fakeBackend{}, Options{})
+	m.profile, m.region, m.identity = "dev", "eu-west-1", awsconfig.Identity{AccountID: "123456789012"}
+	m.screen = ScreenServices
+
+	m = press(t, m, "enter") // scan starts; busy
+	m = press(t, m, "esc")   // back out to Identity while scan in flight
+
+	m = update(t, m, scanFinishedMsg{err: errors.New("scan exploded")})
+	if m.err != nil {
+		t.Fatalf("stale failed scan must not set m.err, got %v", m.err)
+	}
+	if m.screen != ScreenIdentity {
+		t.Fatalf("stale failed scan changed screen to %s", m.screen)
+	}
+	m = press(t, m, "enter")
+	if m.screen != ScreenServices {
+		t.Fatalf("stale failed scan blocked Identity advance: screen=%s", m.screen)
+	}
+}
+
+func TestStaleFailedPlanDoesNotSetErr(t *testing.T) {
+	m := NewModel(fakeBackend{}, Options{})
+	m.profile, m.region, m.identity = "dev", "eu-west-1", awsconfig.Identity{AccountID: "123456789012"}
+	m.screen = ScreenOptions
+	m.selected["s3/assets"] = true
+
+	m = press(t, m, "enter") // makePlan starts; busy
+	m = press(t, m, "esc")   // back to Resources
+
+	m = update(t, m, planFinishedMsg{err: errors.New("plan exploded")})
+	if m.err != nil {
+		t.Fatalf("stale failed plan must not set m.err, got %v", m.err)
+	}
+	if m.screen != ScreenResources {
+		t.Fatalf("stale failed plan changed screen to %s", m.screen)
 	}
 }
 

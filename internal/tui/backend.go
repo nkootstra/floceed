@@ -45,6 +45,8 @@ type application interface {
 // ApplicationBackend adapts *app.Application to the TUI Backend interface.
 type ApplicationBackend struct{ App application }
 
+var _ Backend = (*ApplicationBackend)(nil)
+
 func (b ApplicationBackend) Profiles(context.Context) ([]Profile, error) {
 	names, err := awsconfig.AvailableProfiles()
 	if err != nil {

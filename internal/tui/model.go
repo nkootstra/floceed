@@ -37,11 +37,15 @@ type Options struct {
 }
 
 type Model struct {
-	ctx             context.Context
-	cancel          context.CancelFunc
-	backend         Backend
-	opts            Options
-	screen          Screen
+	ctx     context.Context
+	cancel  context.CancelFunc
+	backend Backend
+	opts    Options
+	screen  Screen
+	// pending is the screen that launched an in-flight async operation.
+	// Completion handlers only navigate forward if the user is still on that
+	// screen (i.e. has not navigated away in the meantime).
+	pending         Screen
 	profiles        []Profile
 	profile, region string
 	identity        awsconfig.Identity

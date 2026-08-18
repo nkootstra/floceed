@@ -43,6 +43,8 @@ type Adapter struct {
 	names  map[string]struct{}
 }
 
+var _ catalog.Adapter = (*Adapter)(nil)
+
 func New(client Client) *Adapter { return &Adapter{client: client} }
 
 // NewFiltered restricts discovery to exact bucket names. Capture still requires an
