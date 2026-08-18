@@ -66,12 +66,19 @@ func (a *Adapter) Capture(ctx context.Context, _ model.SourceScope, ref model.Re
 				entry := map[string]any{"name": aws.ToString(rule.Name), "arn": aws.ToString(rule.Arn), "state": string(rule.State), "event_pattern": aws.ToString(rule.EventPattern), "description": aws.ToString(rule.Description)}
 				var targets []map[string]string
 				if rule.Name != nil {
-					targetsOut, err := a.client.ListTargetsByRule(ctx, &awsEvents.ListTargetsByRuleInput{EventBusName: aws.String(ref.ARN), Rule: rule.Name})
-					if err != nil {
-						return nil, err
-					}
-					for _, target := range targetsOut.Targets {
-						targets = append(targets, map[string]string{"id": aws.ToString(target.Id), "arn": aws.ToString(target.Arn), "role_arn": aws.ToString(target.RoleArn)})
+					var targetToken *string
+					for {
+						targetsOut, err := a.client.ListTargetsByRule(ctx, &awsEvents.ListTargetsByRuleInput{EventBusName: aws.String(ref.ARN), Rule: rule.Name, NextToken: targetToken})
+						if err != nil {
+							return nil, err
+						}
+						for _, target := range targetsOut.Targets {
+							targets = append(targets, map[string]string{"id": aws.ToString(target.Id), "arn": aws.ToString(target.Arn), "role_arn": aws.ToString(target.RoleArn)})
+						}
+						if targetsOut.NextToken == nil || *targetsOut.NextToken == "" {
+							break
+						}
+						targetToken = targetsOut.NextToken
 					}
 				}
 				sort.Slice(targets, func(i, j int) bool { return targets[i]["id"] < targets[j]["id"] })
