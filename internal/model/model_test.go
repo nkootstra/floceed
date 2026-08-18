@@ -57,7 +57,7 @@ func TestManifestValidateCloudWatchLogsARNIgnoresStarSuffix(t *testing.T) {
 		}
 		return Snapshot{Resource: resource, Service: "logs", StructureVersion: CurrentSnapshotStructureVersion, Structure: structure}
 	}
-	base := ResourceRef{Service: "logs", ID: "/app/orders"}
+	base := ResourceRef{Service: "logs", ID: "/app/orders", ARN: "arn:aws:logs:eu-west-1:123456789012:log-group:/app/orders"}
 	cases := []struct {
 		name string
 		item Snapshot

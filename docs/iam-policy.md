@@ -66,16 +66,21 @@ AWS requires `ListAllMyBuckets` and `ListTables` on `*`.
       "Resource": "arn:aws:dynamodb:REGION:ACCOUNT_ID:table/TABLE"
     },
     {
+      "Sid": "DiscoverKinesis",
+      "Effect": "Allow",
+      "Action": "kinesis:ListStreams",
+      "Resource": "*"
+    },
+    {
       "Sid": "ReadSelectedKinesis",
       "Effect": "Allow",
       "Action": [
-        "kinesis:ListStreams",
         "kinesis:DescribeStreamSummary",
         "kinesis:ListShards",
         "kinesis:GetShardIterator",
         "kinesis:GetRecords"
       ],
-      "Resource": "*"
+      "Resource": "arn:aws:kinesis:REGION:ACCOUNT_ID:stream/STREAM"
     },
     {
       "Sid": "ReadSelectedSQS",
@@ -93,13 +98,16 @@ AWS requires `ListAllMyBuckets` and `ListTables` on `*`.
       "Resource": "arn:aws:sns:REGION:ACCOUNT_ID:TOPIC"
     },
     {
+      "Sid": "DiscoverEventBridge",
+      "Effect": "Allow",
+      "Action": "events:ListRules",
+      "Resource": "*"
+    },
+    {
       "Sid": "ReadSelectedEventBridge",
       "Effect": "Allow",
-      "Action": [
-        "events:ListRules",
-        "events:ListTargetsByRule"
-      ],
-      "Resource": "arn:aws:events:REGION:ACCOUNT_ID:event-bus/BUS"
+      "Action": "events:ListTargetsByRule",
+      "Resource": "arn:aws:events:REGION:ACCOUNT_ID:event-bus/BUS/rule/*"
     },
     {
       "Sid": "ReadSelectedLambda",
@@ -115,7 +123,7 @@ AWS requires `ListAllMyBuckets` and `ListTables` on `*`.
       "Sid": "ReadSelectedSecretsManager",
       "Effect": "Allow",
       "Action": "secretsmanager:DescribeSecret",
-      "Resource": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:SECRET*"
+      "Resource": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:SECRET-??????"
     },
     {
       "Sid": "ReadSelectedSSM",
@@ -139,12 +147,15 @@ AWS requires `ListAllMyBuckets` and `ListTables` on `*`.
       "Resource": "arn:aws:states:REGION:ACCOUNT_ID:stateMachine:*"
     },
     {
+      "Sid": "DiscoverCloudWatchLogs",
+      "Effect": "Allow",
+      "Action": "logs:DescribeLogGroups",
+      "Resource": "*"
+    },
+    {
       "Sid": "ReadSelectedCloudWatchLogs",
       "Effect": "Allow",
-      "Action": [
-        "logs:DescribeLogGroups",
-        "logs:ListTagsForResource"
-      ],
+      "Action": "logs:ListTagsForResource",
       "Resource": "arn:aws:logs:REGION:ACCOUNT_ID:log-group:*"
     }
   ]
@@ -160,11 +171,15 @@ its ARN pattern is the API Gateway v2 control-plane resource, not the
 `execute-api` invocation resource.
 
 An optional configuration permission denied for one resource is reported as a
-finding instead of hiding that resource. The Kinesis, Lambda, SNS, EventBridge,
-Secrets Manager, SSM, Step Functions, API Gateway, and CloudWatch Logs
-statements above cover structure-only topology capture; the SQS statement is
-required only when SQS message capture is enabled. Remove the statements for
-services you do not select.
+finding instead of hiding that resource. The `Discover*` statements cover the
+list operations AWS requires on `*`; the `ReadSelected*` statements scope the
+per-resource reads to the selected resources. The Kinesis, Lambda, SNS,
+EventBridge, Secrets Manager, SSM, Step Functions, API Gateway, and CloudWatch
+Logs `ReadSelected*` statements above cover structure-only topology capture;
+the SQS statement is required only when SQS message capture is enabled. The
+Secrets Manager resource uses `SECRET-??????` so the `-XXXXXX` suffix AWS
+appends to every secret ARN is required, matching AWS's recommended
+least-privilege pattern. Remove the statements for services you do not select.
 
 Completed S3 reuse evaluates freshness with `ListObjectsV2`, which AWS
 authorizes through the existing `s3:ListBucket` action in `ReadSelectedS3`.

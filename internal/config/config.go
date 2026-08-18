@@ -603,7 +603,7 @@ func validateSecretResources(resources []SecretResource) error {
 		// suffix. Accept only the bare name or the name plus AWS's fixed
 		// `-XXXXXX` suffix, so a different secret whose name merely starts with
 		// this one cannot pass.
-		if len(parts) != 7 || parts[0] != "arn" || parts[2] != "secretsmanager" || !accountID.MatchString(parts[4]) || parts[5] != "secret" || !secretResourceMatchesName(parts[6], resource.Name) {
+		if len(parts) != 7 || parts[0] != "arn" || !arnPartition.MatchString(parts[1]) || parts[2] != "secretsmanager" || parts[3] == "" || !accountID.MatchString(parts[4]) || parts[5] != "secret" || !secretResourceMatchesName(parts[6], resource.Name) {
 			return fmt.Errorf("Secrets Manager resource %q has invalid ARN: %w", resource.Name, ErrValidation)
 		}
 	}

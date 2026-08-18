@@ -1,9 +1,14 @@
 package ndjson
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/nkootstra/floceed/internal/model"
 )
 
 func TestCommitWritesArtifactWithHashAndSize(t *testing.T) {
@@ -35,6 +40,10 @@ func TestCommitWritesArtifactWithHashAndSize(t *testing.T) {
 	}
 	if artifact.SHA256 == "" {
 		t.Fatal("SHA256 must be populated")
+	}
+	sum := sha256.Sum256(data)
+	if artifact.SHA256 != hex.EncodeToString(sum[:]) {
+		t.Fatalf("SHA256 = %q, want %q", artifact.SHA256, hex.EncodeToString(sum[:]))
 	}
 	// The temp file must be gone after Commit.
 	matches, _ := filepath.Glob(filepath.Join(filepath.Dir(dest), ".ndjson-*"))
@@ -85,31 +94,37 @@ func TestCreateRejectsUnsafePaths(t *testing.T) {
 		"bundle/../../escape.ndjson",
 		"bundle/..",
 	} {
-		if _, err := Create(t.TempDir(), name, 0); err == nil {
-			t.Fatalf("unsafe path %q accepted", name)
+		if _, err := Create(t.TempDir(), name, 0); !errors.Is(err, model.ErrValidation) {
+			t.Fatalf("unsafe path %q: err = %v, want model.ErrValidation", name, err)
 		}
 	}
 }
 
 func TestCreateRejectsExactParentTraversal(t *testing.T) {
-	if _, err := Create(t.TempDir(), "..", 0); err == nil {
-		t.Fatal("name cleaning to exactly \"..\" must be rejected")
+	if _, err := Create(t.TempDir(), "..", 0); !errors.Is(err, model.ErrValidation) {
+		t.Fatalf("name cleaning to exactly \"..\" must be rejected: err = %v, want model.ErrValidation", err)
 	}
 }
 
 func TestCreateProducesValidArtifactRef(t *testing.T) {
-	writer, err := Create(t.TempDir(), "bundle/data/sqs/jobs.ndjson", 0)
+	root := t.TempDir()
+	writer, err := Create(root, "bundle/data/sqs/jobs.ndjson", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := writer.Write([]byte(`{"body":"hello"}`)); err != nil {
+	body := []byte(`{"body":"hello"}`)
+	if _, err := writer.Write(body); err != nil {
 		t.Fatal(err)
 	}
 	artifact, err := writer.Commit()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if artifact.SHA256 == "" || artifact.Path == "" || artifact.Size == 0 {
+	if artifact.Path == "" || artifact.Size != int64(len(body))+1 {
 		t.Fatalf("artifact = %#v", artifact)
+	}
+	sum := sha256.Sum256(append(append([]byte(nil), body...), '\n'))
+	if artifact.SHA256 != hex.EncodeToString(sum[:]) {
+		t.Fatalf("SHA256 = %q, want %q", artifact.SHA256, hex.EncodeToString(sum[:]))
 	}
 }

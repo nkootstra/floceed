@@ -46,7 +46,7 @@ func New(client ...Client) *Adapter {
 }
 
 func (a *Adapter) Capture(ctx context.Context, _ model.SourceScope, ref model.ResourceRef, opts model.CaptureOptions) (*model.Snapshot, error) {
-	if err := a.Base.CheckStructureOnly(opts); err != nil {
+	if err := a.CheckStructureOnly(opts); err != nil {
 		return nil, err
 	}
 	structure := map[string]any{"name": ref.ID, "arn": ref.ARN, "tags": []map[string]string{}}
@@ -57,9 +57,11 @@ func (a *Adapter) Capture(ctx context.Context, _ model.SourceScope, ref model.Re
 		}
 		structure["type"] = string(description.Type)
 		structure["role_arn"] = aws.ToString(description.RoleArn)
+		loggingLevel := ""
 		if description.LoggingConfiguration != nil {
-			structure["logging_level"] = string(description.LoggingConfiguration.Level)
+			loggingLevel = string(description.LoggingConfiguration.Level)
 		}
+		structure["logging_level"] = loggingLevel
 		structure["tracing_enabled"] = description.TracingConfiguration != nil && description.TracingConfiguration.Enabled
 		tags, err := a.client.ListTagsForResource(ctx, &awsSfn.ListTagsForResourceInput{ResourceArn: aws.String(ref.ARN)})
 		if err != nil {
@@ -72,5 +74,5 @@ func (a *Adapter) Capture(ctx context.Context, _ model.SourceScope, ref model.Re
 		sort.Slice(values, func(i, j int) bool { return values[i]["key"] < values[j]["key"] })
 		structure["tags"] = values
 	}
-	return a.Base.Snapshot(ref, structure)
+	return a.Snapshot(ref, structure)
 }

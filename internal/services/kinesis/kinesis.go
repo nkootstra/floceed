@@ -194,6 +194,10 @@ func captureRecords(ctx context.Context, client RecordClient, ref model.Resource
 				break
 			}
 			for _, record := range out.Records {
+				if err := ctx.Err(); err != nil {
+					writer.Abort()
+					return model.ArtifactRef{}, 0, 0, err
+				}
 				encoded, err := json.Marshal(map[string]any{"partition_key": aws.ToString(record.PartitionKey), "sequence_number": aws.ToString(record.SequenceNumber), "data_base64": base64.StdEncoding.EncodeToString(record.Data)})
 				if err != nil {
 					writer.Abort()
@@ -219,6 +223,10 @@ func captureRecords(ctx context.Context, client RecordClient, ref model.Resource
 			}
 			iterator.ShardIterator = out.NextShardIterator
 		}
+	}
+	if err := ctx.Err(); err != nil {
+		writer.Abort()
+		return model.ArtifactRef{}, 0, 0, err
 	}
 	artifact, err := writer.Commit()
 	if err != nil {

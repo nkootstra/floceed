@@ -903,7 +903,7 @@ func loadS3Checkpoint(path, bucket string, opts model.CaptureOptions, prefixes [
 	}
 	var cp s3Checkpoint
 	if err = json.Unmarshal(b, &cp); err != nil {
-		return cp, false, err
+		return cp, false, fmt.Errorf("%w: %v", ErrCheckpointCorrupt, err)
 	}
 	if cp.Version != s3CheckpointVersion || cp.Bucket != bucket || !s3CaptureIdentityMatches(cp, opts, prefixes) {
 		return cp, false, ErrCheckpointIncompatible

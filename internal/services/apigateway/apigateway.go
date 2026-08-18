@@ -46,7 +46,7 @@ func New(client ...Client) *Adapter {
 }
 
 func (a *Adapter) Capture(ctx context.Context, _ model.SourceScope, ref model.ResourceRef, opts model.CaptureOptions) (*model.Snapshot, error) {
-	if err := a.Base.CheckStructureOnly(opts); err != nil {
+	if err := a.CheckStructureOnly(opts); err != nil {
 		return nil, err
 	}
 	structure := map[string]any{"name": ref.ID, "arn": ref.ARN, "routes": []any{}, "integrations": []any{}}
@@ -71,7 +71,7 @@ func (a *Adapter) Capture(ctx context.Context, _ model.SourceScope, ref model.Re
 		sort.Slice(integrations, func(i, j int) bool { return integrations[i].ID < integrations[j].ID })
 		structure["integrations"] = integrations
 	}
-	return a.Base.Snapshot(ref, structure)
+	return a.Snapshot(ref, structure)
 }
 
 type route struct {

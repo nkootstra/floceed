@@ -43,7 +43,7 @@ func New(client ...Client) *Adapter {
 }
 
 func (a *Adapter) Capture(ctx context.Context, _ model.SourceScope, ref model.ResourceRef, opts model.CaptureOptions) (*model.Snapshot, error) {
-	if err := a.Base.CheckStructureOnly(opts); err != nil {
+	if err := a.CheckStructureOnly(opts); err != nil {
 		return nil, err
 	}
 	structure := map[string]any{"name": ref.ID, "arn": ref.ARN}
@@ -65,5 +65,5 @@ func (a *Adapter) Capture(ctx context.Context, _ model.SourceScope, ref model.Re
 		}
 		structure["subscriptions"] = subscriptions
 	}
-	return a.Base.Snapshot(ref, structure)
+	return a.Snapshot(ref, structure)
 }

@@ -12,8 +12,13 @@ import (
 
 func fixtureCommand() *cobra.Command {
 	root := &cobra.Command{Use: "fixture", Short: "Verify and admit local CI fixtures"}
-	var input, output, policyPath string
-	verify := &cobra.Command{Use: "verify", Short: "Verify a generated fixture without AWS access", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, args []string) error {
+	root.AddCommand(verifyFixtureCommand(), admitFixtureCommand(), packFixtureCommand(), unpackFixtureCommand())
+	return root
+}
+
+func verifyFixtureCommand() *cobra.Command {
+	var input, output string
+	cmd := &cobra.Command{Use: "verify", Short: "Verify a generated fixture without AWS access", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, args []string) error {
 		format, err := validateOutput(output)
 		if err != nil {
 			return err
@@ -27,10 +32,14 @@ func fixtureCommand() *cobra.Command {
 		}
 		return emit(cmd, "fixture verify", format, result, nil)
 	}}
-	verify.Flags().StringVar(&input, "input", "", "generated fixture directory")
-	verify.Flags().StringVar(&output, "output", "text", "output format: text or json")
-	root.AddCommand(verify)
-	admit := &cobra.Command{Use: "admit", Short: "Evaluate a verified fixture against a local admission policy", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, args []string) error {
+	cmd.Flags().StringVar(&input, "input", "", "generated fixture directory")
+	cmd.Flags().StringVar(&output, "output", "text", "output format: text or json")
+	return cmd
+}
+
+func admitFixtureCommand() *cobra.Command {
+	var input, output, policyPath string
+	cmd := &cobra.Command{Use: "admit", Short: "Evaluate a verified fixture against a local admission policy", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, args []string) error {
 		format, err := validateOutput(output)
 		if err != nil {
 			return err
@@ -63,36 +72,50 @@ func fixtureCommand() *cobra.Command {
 		}
 		return emit(cmd, "fixture admit", format, decision, nil)
 	}}
-	admit.Flags().StringVar(&input, "input", "", "generated fixture directory")
-	admit.Flags().StringVar(&policyPath, "policy", "", "admission policy file")
-	admit.Flags().StringVar(&output, "output", "text", "output format: text or json")
-	root.AddCommand(admit)
-	var archive, target string
-	pack := &cobra.Command{Use: "pack", Short: "Pack a verified fixture into a deterministic archive", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, args []string) error {
+	cmd.Flags().StringVar(&input, "input", "", "generated fixture directory")
+	cmd.Flags().StringVar(&policyPath, "policy", "", "admission policy file")
+	cmd.Flags().StringVar(&output, "output", "text", "output format: text or json")
+	return cmd
+}
+
+func packFixtureCommand() *cobra.Command {
+	var input, output, archive string
+	cmd := &cobra.Command{Use: "pack", Short: "Pack a verified fixture into a deterministic archive", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, args []string) error {
+		format, err := validateOutput(output)
+		if err != nil {
+			return err
+		}
 		if strings.TrimSpace(input) == "" || strings.TrimSpace(archive) == "" {
 			return usage("FIXTURE_PATH_REQUIRED", "--input and --archive are required")
 		}
 		if err := bundle.PackFixture(cmd.Context(), input, archive); err != nil {
 			return &CommandError{Kind: KindFilesystem, Code: "FIXTURE_PACK_FAILED", Message: err.Error()}
 		}
-		return emit(cmd, "fixture pack", output, map[string]any{"archive": archive}, nil)
+		return emit(cmd, "fixture pack", format, map[string]any{"archive": archive}, nil)
 	}}
-	pack.Flags().StringVar(&input, "input", "", "verified fixture directory")
-	pack.Flags().StringVar(&archive, "archive", "", "output archive path")
-	pack.Flags().StringVar(&output, "output", "text", "output format: text or json")
-	root.AddCommand(pack)
-	unpack := &cobra.Command{Use: "unpack", Short: "Safely unpack a fixture archive", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, args []string) error {
+	cmd.Flags().StringVar(&input, "input", "", "verified fixture directory")
+	cmd.Flags().StringVar(&archive, "archive", "", "output archive path")
+	cmd.Flags().StringVar(&output, "output", "text", "output format: text or json")
+	return cmd
+}
+
+func unpackFixtureCommand() *cobra.Command {
+	var output, archive, target string
+	cmd := &cobra.Command{Use: "unpack", Short: "Safely unpack a fixture archive", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, args []string) error {
+		format, err := validateOutput(output)
+		if err != nil {
+			return err
+		}
 		if strings.TrimSpace(archive) == "" || strings.TrimSpace(target) == "" {
 			return usage("FIXTURE_PATH_REQUIRED", "--archive and --target are required")
 		}
 		if err := bundle.UnpackFixture(cmd.Context(), archive, target); err != nil {
 			return &CommandError{Kind: KindFilesystem, Code: "FIXTURE_UNPACK_FAILED", Message: err.Error()}
 		}
-		return emit(cmd, "fixture unpack", output, map[string]any{"target": target}, nil)
+		return emit(cmd, "fixture unpack", format, map[string]any{"target": target}, nil)
 	}}
-	unpack.Flags().StringVar(&archive, "archive", "", "input archive path")
-	unpack.Flags().StringVar(&target, "target", "", "output fixture directory")
-	unpack.Flags().StringVar(&output, "output", "text", "output format: text or json")
-	root.AddCommand(unpack)
-	return root
+	cmd.Flags().StringVar(&archive, "archive", "", "input archive path")
+	cmd.Flags().StringVar(&target, "target", "", "output fixture directory")
+	cmd.Flags().StringVar(&output, "output", "text", "output format: text or json")
+	return cmd
 }

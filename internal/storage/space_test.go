@@ -11,9 +11,12 @@ func TestRequireAvailableAcceptsZeroAndModeratePayloads(t *testing.T) {
 	if err := RequireAvailable(dir, 0, 1); err != nil {
 		t.Fatalf("zero payload must be accepted: %v", err)
 	}
-	// 1 MiB is far below the 1 GiB headroom floor on any real filesystem.
-	if err := RequireAvailable(dir, 1<<20, 1); err != nil {
-		t.Fatalf("moderate payload rejected: %v", err)
+	// 1 MiB needs roughly 1 GiB of headroom. On a nearly-full filesystem the
+	// correct outcome is an insufficient-space error, not a pass; accept both.
+	err := RequireAvailable(dir, 1<<20, 1)
+	var insufficient *InsufficientSpaceError
+	if err != nil && !errors.As(err, &insufficient) {
+		t.Fatalf("moderate payload error = %v, want nil or *InsufficientSpaceError", err)
 	}
 }
 

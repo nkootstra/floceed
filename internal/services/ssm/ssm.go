@@ -45,7 +45,7 @@ func New(client ...Client) *Adapter {
 }
 
 func (a *Adapter) Capture(ctx context.Context, _ model.SourceScope, ref model.ResourceRef, opts model.CaptureOptions) (*model.Snapshot, error) {
-	if err := a.Base.CheckStructureOnly(opts); err != nil {
+	if err := a.CheckStructureOnly(opts); err != nil {
 		return nil, err
 	}
 	structure := map[string]any{"name": ref.ID, "arn": ref.ARN, "value_captured": false}
@@ -55,7 +55,7 @@ func (a *Adapter) Capture(ctx context.Context, _ model.SourceScope, ref model.Re
 			return nil, err
 		}
 		if len(out.Parameters) == 0 {
-			return nil, fmt.Errorf("SSM parameter %q was not found", ref.ID)
+			return nil, fmt.Errorf("SSM parameter %q was not found: %w", ref.ID, model.ErrValidation)
 		}
 		parameter := out.Parameters[0]
 		structure["type"] = string(parameter.Type)
@@ -64,5 +64,5 @@ func (a *Adapter) Capture(ctx context.Context, _ model.SourceScope, ref model.Re
 		structure["last_modified_date"] = parameter.LastModifiedDate
 		structure["tier"] = string(parameter.Tier)
 	}
-	return a.Base.Snapshot(ref, structure)
+	return a.Snapshot(ref, structure)
 }

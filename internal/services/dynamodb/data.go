@@ -678,7 +678,7 @@ func loadCheckpoint(path, table string, opts model.CaptureOptions) (captureCheck
 	}
 	var cp captureCheckpoint
 	if err = json.Unmarshal(b, &cp); err != nil {
-		return cp, false, err
+		return cp, false, fmt.Errorf("%w: %v", ErrCheckpointCorrupt, err)
 	}
 	if cp.Version != captureCheckpointVersion || cp.Table != table || !captureIdentityMatches(cp, opts) {
 		return cp, false, ErrCheckpointIncompatible

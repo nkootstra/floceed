@@ -249,7 +249,7 @@ func loadPullBaseline(ctx context.Context, target string) (BaselineState, inspec
 		}
 		return BaselinePresent, projection, nil
 	} else if !errors.Is(statErr, os.ErrNotExist) {
-		return BaselineAbsent, inspection.Projection{}, inspectError(statErr)
+		return BaselineAbsent, inspection.Projection{}, filesystemError(statErr)
 	}
 	return BaselineAbsent, inspection.Projection{}, nil
 }

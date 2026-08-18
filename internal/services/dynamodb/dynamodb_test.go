@@ -340,6 +340,20 @@ func TestGovernedCohortRejectsCorruptCheckpointSelection(t *testing.T) {
 	}
 }
 
+func TestLoadCheckpointRejectsMalformedJSONAsCorrupt(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "checkpoint.json")
+	if err := os.WriteFile(path, []byte("{this is not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err := loadCheckpoint(path, "orders", model.CaptureOptions{})
+	if !errors.Is(err, ErrCheckpointCorrupt) {
+		t.Fatalf("loadCheckpoint error = %v, want ErrCheckpointCorrupt", err)
+	}
+	if err == nil || !strings.Contains(err.Error(), "invalid character") {
+		t.Fatalf("loadCheckpoint error = %v, want the JSON parse error preserved", err)
+	}
+}
+
 func TestFullCaptureResumesFinalizationWithoutAnotherScan(t *testing.T) {
 	root := t.TempDir()
 	f := &fakeClient{scans: []*dynamodb.ScanOutput{{Items: []map[string]types.AttributeValue{{"pk": &types.AttributeValueMemberS{Value: "a"}}}}}}

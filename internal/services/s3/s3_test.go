@@ -570,6 +570,20 @@ func TestGovernedS3CaptureCheckpointIncludesPolicyIdentity(t *testing.T) {
 	}
 }
 
+func TestLoadS3CheckpointRejectsMalformedJSONAsCorrupt(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "checkpoint.json")
+	if err := os.WriteFile(path, []byte("{this is not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err := loadS3Checkpoint(path, "assets", model.CaptureOptions{}, nil)
+	if !errors.Is(err, ErrCheckpointCorrupt) {
+		t.Fatalf("loadS3Checkpoint error = %v, want ErrCheckpointCorrupt", err)
+	}
+	if err == nil || !strings.Contains(err.Error(), "invalid character") {
+		t.Fatalf("loadS3Checkpoint error = %v, want the JSON parse error preserved", err)
+	}
+}
+
 func TestGovernedS3CaptureScansCredentialsAfterBodyTransformation(t *testing.T) {
 	const credential = "AKIAIOSFODNN7EXAMPLE"
 	newPolicy := func(replacement string) *governance.EffectivePolicy {

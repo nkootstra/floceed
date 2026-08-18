@@ -59,7 +59,9 @@ func TestCaptureWithoutLoggingConfiguration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := structure["logging_level"]; ok {
-		t.Fatal("logging_level must be absent when the state machine has no logging configuration")
+	// logging_level must be present and empty (not absent) so every snapshot of
+	// this resource type has the same structure shape.
+	if got := structure["logging_level"]; got != "" {
+		t.Fatalf("logging_level = %#v, want empty string when the state machine has no logging configuration", got)
 	}
 }

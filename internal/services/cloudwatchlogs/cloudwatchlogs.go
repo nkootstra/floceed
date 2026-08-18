@@ -47,7 +47,7 @@ func New(client ...Client) *Adapter {
 }
 
 func (a *Adapter) Capture(ctx context.Context, _ model.SourceScope, ref model.ResourceRef, opts model.CaptureOptions) (*model.Snapshot, error) {
-	if err := a.Base.CheckStructureOnly(opts); err != nil {
+	if err := a.CheckStructureOnly(opts); err != nil {
 		return nil, err
 	}
 	structure := map[string]any{"name": ref.ID, "arn": ref.ARN, "tags": map[string]string{}}
@@ -77,7 +77,7 @@ func (a *Adapter) Capture(ctx context.Context, _ model.SourceScope, ref model.Re
 		}
 		structure["tags"] = ordered
 	}
-	return a.Base.Snapshot(ref, structure)
+	return a.Snapshot(ref, structure)
 }
 
 // findGroup returns the exact log group by name. DescribeLogGroups pages at
@@ -96,5 +96,5 @@ func (a *Adapter) findGroup(ctx context.Context, name string) (*types.LogGroup, 
 			}
 		}
 	}
-	return nil, fmt.Errorf("CloudWatch Logs group %q was not found", name)
+	return nil, fmt.Errorf("CloudWatch Logs group %q was not found: %w", name, model.ErrValidation)
 }

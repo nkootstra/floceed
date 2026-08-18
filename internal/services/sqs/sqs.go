@@ -92,6 +92,10 @@ func (a *Adapter) Capture(ctx context.Context, _ model.SourceScope, ref model.Re
 	}
 	var count int64
 	for _, message := range messages.Messages {
+		if err := ctx.Err(); err != nil {
+			writer.Abort()
+			return nil, err
+		}
 		body := []byte("")
 		if message.Body != nil {
 			body = []byte(*message.Body)
@@ -113,6 +117,10 @@ func (a *Adapter) Capture(ctx context.Context, _ model.SourceScope, ref model.Re
 		if opts.Progress != nil {
 			opts.Progress(model.ProgressEvent{Operation: "pull", Phase: "capture", Service: "sqs", Resource: ref.ID, CompletedRecords: count, CompletedBytes: writer.Size(), TotalRecords: int64(opts.Limits.MaxItems), TotalBytes: opts.Limits.MaxTotalBytes, TotalPrecision: "unknown"})
 		}
+	}
+	if err := ctx.Err(); err != nil {
+		writer.Abort()
+		return nil, err
 	}
 	artifact, err := writer.Commit()
 	if err != nil {

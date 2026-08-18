@@ -54,6 +54,9 @@ func TestValidateSecretsManagerARN(t *testing.T) {
 	if err := valid("arn:aws:secretsmanager:eu-west-1:123456789012:secret:db"); err != nil {
 		t.Fatalf("valid Secrets Manager ARN without suffix rejected: %v", err)
 	}
+	if err := valid("arn:aws-cn:secretsmanager:cn-north-1:123456789012:secret:db-AbCdEf"); err != nil {
+		t.Fatalf("valid China-partition Secrets Manager ARN rejected: %v", err)
+	}
 	for _, arn := range []string{
 		"arn:aws:secretsmanager:eu-west-1:123456789012:secret:users",
 		"arn:aws:secretsmanager:eu-west-1:123456789012:other:db",
@@ -61,6 +64,8 @@ func TestValidateSecretsManagerARN(t *testing.T) {
 		"arn:aws:secretsmanager:eu-west-1:123456789012:secret:db-secret-LongName",
 		"arn:aws:secretsmanager:eu-west-1:123456789012:secret:db-too-long-suffix-xyz",
 		"arn:aws:secretsmanager:eu-west-1:123456789012:secret:db-Xy!",
+		"arn:aws-unknown:secretsmanager:eu-west-1:123456789012:secret:db",
+		"arn:aws:secretsmanager::123456789012:secret:db",
 	} {
 		if err := valid(arn); err == nil {
 			t.Fatalf("mismatched Secrets Manager ARN accepted: %s", arn)
