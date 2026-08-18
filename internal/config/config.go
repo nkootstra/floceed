@@ -124,6 +124,7 @@ type Resources struct {
 	Lambda      []LambdaResource      `yaml:"lambda,omitempty" json:"lambda"`
 	Secrets     []SecretResource      `yaml:"secrets,omitempty" json:"secrets"`
 	Parameters  []ParameterResource   `yaml:"parameters,omitempty" json:"parameters"`
+	APIs        []APIResource         `yaml:"api_gateway,omitempty" json:"api_gateway"`
 }
 type S3Resource struct {
 	Name string        `yaml:"name" json:"name"`
@@ -173,6 +174,10 @@ type ParameterResource struct {
 	Name           string `yaml:"name" json:"name"`
 	ARN            string `yaml:"arn" json:"arn"`
 	WithDecryption bool   `yaml:"with_decryption,omitempty" json:"with_decryption"`
+}
+type APIResource struct {
+	Name string `yaml:"name" json:"name"`
+	ARN  string `yaml:"arn" json:"arn"`
 }
 type DynamoDBDataPolicy struct {
 	Enabled  bool     `yaml:"enabled" json:"enabled"`
@@ -473,6 +478,9 @@ func (p Project) Validate() error {
 	if err := validateParameterResources(p.Resources.Parameters); err != nil {
 		return err
 	}
+	if err := validateAPIResources(p.Resources.APIs); err != nil {
+		return err
+	}
 	if hasFullData(p) && p.Target.HookTimeoutSeconds <= DefaultHookTimeoutSeconds {
 		return fmt.Errorf("full data mode requires target.hook_timeout_seconds greater than %d: %w", DefaultHookTimeoutSeconds, ErrValidation)
 	}
@@ -602,6 +610,20 @@ func validateNamedARN(service, name, arn string) error {
 		return fmt.Errorf("ARN %q does not match %s resource name: %w", arn, service, ErrValidation)
 	}
 	return nil
+}
+
+func validateAPIResources(resources []APIResource) error {
+	names := make([]string, len(resources))
+	for i, resource := range resources {
+		names[i] = resource.Name
+		if resource.Name == "" || len(resource.Name) > 128 {
+			return fmt.Errorf("API Gateway resource %q has invalid name: %w", resource.Name, ErrValidation)
+		}
+		if resource.ARN == "" || !strings.Contains(resource.ARN, ":apigateway:") {
+			return fmt.Errorf("API Gateway resource %q has invalid ARN: %w", resource.Name, ErrValidation)
+		}
+	}
+	return validateResourceNames("API Gateway", names)
 }
 
 func validDependencyName(name string, max int) bool {

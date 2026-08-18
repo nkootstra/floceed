@@ -44,6 +44,7 @@ func Current(toolVersion string) Report {
 			{Service: "lambda", Support: "structure_only", DataModes: []string{"structure"}},
 			{Service: "secretsmanager", Support: "structure_only", DataModes: []string{"structure"}},
 			{Service: "ssm", Support: "structure_only", DataModes: []string{"structure"}},
+			{Service: "apigateway", Support: "structure_only", DataModes: []string{"structure"}},
 		},
 	}
 }
