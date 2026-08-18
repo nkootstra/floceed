@@ -15,6 +15,7 @@ import (
 
 	"github.com/nkootstra/floceed/internal/app"
 	"github.com/nkootstra/floceed/internal/bundle"
+	"github.com/nkootstra/floceed/internal/capabilities"
 	"github.com/nkootstra/floceed/internal/config"
 	inspection "github.com/nkootstra/floceed/internal/inspect"
 	"github.com/nkootstra/floceed/internal/model"
@@ -66,7 +67,7 @@ func New(options Options) *cobra.Command {
 	root.SetErr(options.Stderr)
 	root.PersistentFlags().BoolVar(&noColor, "no-color", false, "disable colored output")
 	root.Flags().StringVar(&fixtureProfile, "fixture-profile", "", "select fixture governance profile in interactive mode")
-	root.AddCommand(scanCommand(options.App), planCommand(options.App), pullCommand(options.App), renderCommand(options.App), inspectCommand(options.App), statusCommand(options.App), logsCommand(options.App), downCommand(options.App), resetCommand(options.App), doctorCommand(options.App), upCommand(options.App), fixtureCommand())
+	root.AddCommand(scanCommand(options.App), planCommand(options.App), pullCommand(options.App), renderCommand(options.App), inspectCommand(options.App), statusCommand(options.App), logsCommand(options.App), downCommand(options.App), resetCommand(options.App), doctorCommand(options.App), upCommand(options.App), capabilitiesCommand(options.Version), fixtureCommand())
 	root.AddCommand(&cobra.Command{Use: "version", Short: "Print version information", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, args []string) error {
 		version := options.Version
 		if version == "" {
@@ -82,6 +83,39 @@ func New(options Options) *cobra.Command {
 		return cmd.Help()
 	}
 	return root
+}
+
+func capabilitiesCommand(version string) *cobra.Command {
+	var output string
+	cmd := &cobra.Command{Use: "capabilities", Short: "Show supported Floci and capture capabilities", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+		format, err := validateOutput(output)
+		if err != nil {
+			return err
+		}
+		report := capabilities.Current(version)
+		if format == "json" {
+			return emit(cmd, "capabilities", format, report, nil)
+		}
+		if _, err := fmt.Fprintf(cmd.OutOrStdout(), "Floci %s\nTool: %s\nManifest schemas: %s\nCompatibility: %s\n\nServices\n", report.FlociVersion, report.ToolVersion, joinInts(report.ManifestSchemas), report.CompatibilityCommitment); err != nil {
+			return err
+		}
+		for _, service := range report.Services {
+			if _, err := fmt.Fprintf(cmd.OutOrStdout(), "%s: %s (%s)\n", service.Service, service.Support, strings.Join(service.DataModes, ", ")); err != nil {
+				return err
+			}
+		}
+		return nil
+	}}
+	cmd.Flags().StringVar(&output, "output", "text", "output format: text or json")
+	return cmd
+}
+
+func joinInts(values []int) string {
+	parts := make([]string, len(values))
+	for i, value := range values {
+		parts[i] = fmt.Sprint(value)
+	}
+	return strings.Join(parts, ", ")
 }
 
 func fixtureCommand() *cobra.Command {
