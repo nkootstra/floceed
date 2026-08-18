@@ -8,7 +8,7 @@ import (
 func TestCurrentIsStableAndSorted(t *testing.T) {
 	one := Current("")
 	two := Current("v0.11.0")
-	if one.SchemaVersion != 1 || one.ToolVersion != "dev" || len(one.Services) != 11 {
+	if one.SchemaVersion != 1 || one.ToolVersion != "dev" || len(one.Services) != 12 {
 		t.Fatalf("report = %#v", one)
 	}
 	if !reflect.DeepEqual(one.Services[0].Service, "dynamodb") || one.ManifestSchemas[0] != 1 || one.ManifestSchemas[len(one.ManifestSchemas)-1] != 3 {

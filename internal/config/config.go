@@ -126,6 +126,7 @@ type Resources struct {
 	Parameters    []ParameterResource    `yaml:"parameters,omitempty" json:"parameters"`
 	APIs          []APIResource          `yaml:"api_gateway,omitempty" json:"api_gateway"`
 	StateMachines []StateMachineResource `yaml:"step_functions,omitempty" json:"step_functions"`
+	LogGroups     []LogGroupResource     `yaml:"cloudwatch_logs,omitempty" json:"cloudwatch_logs"`
 }
 type S3Resource struct {
 	Name string        `yaml:"name" json:"name"`
@@ -181,6 +182,10 @@ type APIResource struct {
 	ARN  string `yaml:"arn" json:"arn"`
 }
 type StateMachineResource struct {
+	Name string `yaml:"name" json:"name"`
+	ARN  string `yaml:"arn" json:"arn"`
+}
+type LogGroupResource struct {
 	Name string `yaml:"name" json:"name"`
 	ARN  string `yaml:"arn" json:"arn"`
 }
@@ -489,6 +494,9 @@ func (p Project) Validate() error {
 	if err := validateStateMachineResources(p.Resources.StateMachines); err != nil {
 		return err
 	}
+	if err := validateLogGroupResources(p.Resources.LogGroups); err != nil {
+		return err
+	}
 	if hasFullData(p) && p.Target.HookTimeoutSeconds <= DefaultHookTimeoutSeconds {
 		return fmt.Errorf("full data mode requires target.hook_timeout_seconds greater than %d: %w", DefaultHookTimeoutSeconds, ErrValidation)
 	}
@@ -646,6 +654,20 @@ func validateStateMachineResources(resources []StateMachineResource) error {
 		}
 	}
 	return validateResourceNames("Step Functions", names)
+}
+
+func validateLogGroupResources(resources []LogGroupResource) error {
+	names := make([]string, len(resources))
+	for i, resource := range resources {
+		names[i] = resource.Name
+		if resource.Name == "" || len(resource.Name) > 512 {
+			return fmt.Errorf("CloudWatch Logs resource %q has invalid name: %w", resource.Name, ErrValidation)
+		}
+		if resource.ARN == "" || !strings.Contains(resource.ARN, ":logs:") || !strings.Contains(resource.ARN, ":log-group:") {
+			return fmt.Errorf("CloudWatch Logs resource %q has invalid ARN: %w", resource.Name, ErrValidation)
+		}
+	}
+	return validateResourceNames("CloudWatch Logs", names)
 }
 
 func validDependencyName(name string, max int) bool {

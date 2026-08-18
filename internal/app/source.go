@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"github.com/aws/aws-sdk-go-v2/service/apigatewayv2"
+	"github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/eventbridge"
 	"github.com/aws/aws-sdk-go-v2/service/kinesis"
@@ -22,6 +23,7 @@ import (
 	"github.com/nkootstra/floceed/internal/catalog"
 	"github.com/nkootstra/floceed/internal/model"
 	apigatewayservice "github.com/nkootstra/floceed/internal/services/apigateway"
+	cloudwatchlogsservice "github.com/nkootstra/floceed/internal/services/cloudwatchlogs"
 	ddbservice "github.com/nkootstra/floceed/internal/services/dynamodb"
 	eventbridgeservice "github.com/nkootstra/floceed/internal/services/eventbridge"
 	kinesisservice "github.com/nkootstra/floceed/internal/services/kinesis"
@@ -73,15 +75,16 @@ func (AWSFactory) Open(ctx context.Context, req SourceRequest) (Source, error) {
 	ssmClient := ssm.NewFromConfig(cfg)
 	apiClient := apigatewayv2.NewFromConfig(cfg)
 	stepFunctionsClient := sfn.NewFromConfig(cfg)
-	registry, err := newAWSRegistry(s3client, ddbclient, kinesisClient, sqsClient, snsClient, eventsClient, lambdaClient, secretsClient, ssmClient, apiClient, stepFunctionsClient, req.S3Names)
+	logsClient := cloudwatchlogs.NewFromConfig(cfg)
+	registry, err := newAWSRegistry(s3client, ddbclient, kinesisClient, sqsClient, snsClient, eventsClient, lambdaClient, secretsClient, ssmClient, apiClient, stepFunctionsClient, logsClient, req.S3Names)
 	if err != nil {
 		return Source{}, err
 	}
 	return Source{Scope: model.SourceScope{Profile: req.Profile, AccountID: identity.AccountID, Region: req.Region}, Identity: identity, Registry: registry}, nil
 }
 
-func newAWSRegistry(s3client s3service.Client, ddbclient ddbservice.Client, kinesisClient kinesisservice.Client, sqsClient sqsservice.Client, snsClient snsservice.Client, eventsClient *eventbridge.Client, lambdaClient *lambda.Client, secretsClient *secretsmanager.Client, ssmClient *ssm.Client, apiClient *apigatewayv2.Client, stepFunctionsClient *sfn.Client, s3Names []string) (*catalog.Registry, error) {
-	return catalog.New(s3service.NewFiltered(s3client, s3Names), ddbservice.New(ddbclient), sqsservice.New(sqsClient), snsservice.New(snsClient), kinesisservice.New(kinesisClient), eventbridgeservice.New(eventsClient), lambdaservice.New(lambdaClient), secretsservice.New(secretsClient), ssmservice.New(ssmClient), apigatewayservice.New(apiClient), stepfunctionsservice.New(stepFunctionsClient))
+func newAWSRegistry(s3client s3service.Client, ddbclient ddbservice.Client, kinesisClient kinesisservice.Client, sqsClient sqsservice.Client, snsClient snsservice.Client, eventsClient *eventbridge.Client, lambdaClient *lambda.Client, secretsClient *secretsmanager.Client, ssmClient *ssm.Client, apiClient *apigatewayv2.Client, stepFunctionsClient *sfn.Client, logsClient *cloudwatchlogs.Client, s3Names []string) (*catalog.Registry, error) {
+	return catalog.New(s3service.NewFiltered(s3client, s3Names), ddbservice.New(ddbclient), sqsservice.New(sqsClient), snsservice.New(snsClient), kinesisservice.New(kinesisClient), eventbridgeservice.New(eventsClient), lambdaservice.New(lambdaClient), secretsservice.New(secretsClient), ssmservice.New(ssmClient), apigatewayservice.New(apiClient), stepfunctionsservice.New(stepFunctionsClient), cloudwatchlogsservice.New(logsClient))
 }
 
 // Identity resolves the standard AWS configuration chain and confirms the

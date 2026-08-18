@@ -187,6 +187,13 @@ def validate_snapshots(snapshots: list, manifest_version: int = 1) -> None:
             arn = structure["arn"].split(":")
             if len(arn) != 7 or arn[2] != "states" or arn[5] != "stateMachine" or arn[6] != resource.get("id"):
                 fail(f"snapshot {index} Step Functions structure ARN must match resource identity")
+        elif service == "logs":
+            if not isinstance(structure.get("arn"), str) or not structure["arn"].startswith("arn:"):
+                fail(f"snapshot {index} CloudWatch Logs structure requires arn")
+            arn = structure["arn"].split(":")
+            log_group = ":".join(arn[5:]) if len(arn) >= 6 else ""
+            if len(arn) < 7 or arn[2] != "logs" or not log_group.startswith("log-group:" + resource.get("id", "")):
+                fail(f"snapshot {index} CloudWatch Logs structure ARN must match resource identity")
         else:
             fail(f"snapshot {index} service {service!r} is unsupported")
         if manifest_version >= 2:

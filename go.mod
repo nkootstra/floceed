@@ -10,6 +10,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/config v1.32.36
 	github.com/aws/aws-sdk-go-v2/credentials v1.19.35
 	github.com/aws/aws-sdk-go-v2/service/apigatewayv2 v1.37.6
+	github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs v1.82.2
 	github.com/aws/aws-sdk-go-v2/service/dynamodb v1.63.2
 	github.com/aws/aws-sdk-go-v2/service/eventbridge v1.48.6
 	github.com/aws/aws-sdk-go-v2/service/kinesis v1.46.6

@@ -361,6 +361,11 @@ machine definitions, executions, inputs, outputs, and execution history are
 not captured or replayed; definitions may contain application data and remain
 outside the safe topology contract.
 
+Explicitly selected CloudWatch Logs groups support structure-only capture of
+retention, storage class, approximate stored bytes, and tags. Log events,
+subscription delivery, metric filters, and historical log data are not
+captured or replayed in this release.
+
 Secrets Manager and SSM Parameter Store support is metadata-only. Floceed
 records names, ARNs, and non-sensitive metadata, never calls a value-fetching
 API, and never writes secret or parameter values to bundles, checkpoints, or

@@ -121,6 +121,8 @@ func (m Model) Project() config.Project {
 			p.Resources.APIs = append(p.Resources.APIs, config.APIResource{Name: r.Ref.ID, ARN: r.Ref.ARN})
 		case "stepfunctions":
 			p.Resources.StateMachines = append(p.Resources.StateMachines, config.StateMachineResource{Name: r.Ref.ID, ARN: r.Ref.ARN})
+		case "logs":
+			p.Resources.LogGroups = append(p.Resources.LogGroups, config.LogGroupResource{Name: r.Ref.ID, ARN: r.Ref.ARN})
 		}
 	}
 	return p
