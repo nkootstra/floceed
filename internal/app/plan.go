@@ -18,6 +18,8 @@ import (
 	"github.com/nkootstra/floceed/internal/config"
 	"github.com/nkootstra/floceed/internal/governance"
 	"github.com/nkootstra/floceed/internal/model"
+	"github.com/nkootstra/floceed/internal/services/dynamodb"
+	"github.com/nkootstra/floceed/internal/services/s3"
 	"github.com/nkootstra/floceed/internal/storage"
 )
 
@@ -125,7 +127,7 @@ func (a *Application) capture(ctx context.Context, req captureRequest) (captureR
 		if errors.As(captureErr, &diskErr) {
 			return captureResult{}, &Error{Kind: ErrorFilesystem, Code: "DISK_SPACE_INSUFFICIENT", Message: diskErr.Error(), Remediation: "Free disk space, choose a larger --work-dir, or reduce the capture scope.", Err: captureErr}
 		}
-		return captureResult{}, sourceError(captureErr)
+		return captureResult{}, captureError(captureErr)
 	}
 
 	captured := captureResult{Plan: result}
@@ -331,6 +333,24 @@ func firstCaptureError(outcomes []captureOutcome) error {
 		}
 	}
 	return captureErr
+}
+
+// captureError classifies an adapter failure. Checkpoint corruption and
+// incompatibility are distinct, recoverable conditions with a known
+// remediation, so they get their own codes instead of collapsing into
+// AWS_SOURCE_FAILED where an agent cannot branch on them.
+func captureError(err error) error {
+	var appError *Error
+	if errors.As(err, &appError) {
+		return err
+	}
+	if errors.Is(err, dynamodb.ErrCheckpointCorrupt) || errors.Is(err, s3.ErrCheckpointCorrupt) {
+		return &Error{Kind: ErrorFilesystem, Code: "CHECKPOINT_CORRUPT", Message: err.Error(), Remediation: "restart the capture (--restart) or use a different --work-dir", Err: err}
+	}
+	if errors.Is(err, dynamodb.ErrCheckpointIncompatible) || errors.Is(err, s3.ErrCheckpointIncompatible) {
+		return &Error{Kind: ErrorFilesystem, Code: "CHECKPOINT_INCOMPATIBLE", Message: err.Error(), Remediation: "restart the capture (--restart) or use a different --work-dir", Err: err}
+	}
+	return sourceError(err)
 }
 
 func validateDependencyGraph(bySnapshot [][]model.Dependency, snapshots []model.Snapshot, selected map[string]model.ResourceRef) error {

@@ -156,13 +156,15 @@ Structure-only projects can omit `s3:GetObject`, `s3:GetObjectTagging`,
 `kinesis:GetRecords`, `sqs:GetQueueUrl`, and `sqs:ReceiveMessage`. Those are
 only required when fixture data is enabled for the corresponding resource.
 `apigateway:GET` is the read action AWS maps every API Gateway v2 read call to;
-its ARN pattern is the regional API Gateway `execute-api` resource.
+its ARN pattern is the API Gateway v2 control-plane resource, not the
+`execute-api` invocation resource.
 
 An optional configuration permission denied for one resource is reported as a
-finding instead of hiding that resource. The Kinesis, SQS, Lambda, SNS,
-EventBridge, Secrets Manager, SSM, Step Functions, API Gateway, and CloudWatch
-Logs statements above cover structure-only topology capture; remove the
-statements for services you do not select.
+finding instead of hiding that resource. The Kinesis, Lambda, SNS, EventBridge,
+Secrets Manager, SSM, Step Functions, API Gateway, and CloudWatch Logs
+statements above cover structure-only topology capture; the SQS statement is
+required only when SQS message capture is enabled. Remove the statements for
+services you do not select.
 
 Completed S3 reuse evaluates freshness with `ListObjectsV2`, which AWS
 authorizes through the existing `s3:ListBucket` action in `ReadSelectedS3`.

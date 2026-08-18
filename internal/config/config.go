@@ -600,12 +600,41 @@ func validateSecretResources(resources []SecretResource) error {
 		parts := strings.Split(resource.ARN, ":")
 		// Secrets Manager ARNs carry the resource as `secret:<name>-<suffix>`,
 		// which splits into two segments: "secret" and the name with its random
-		// suffix. The name must be a prefix of the resource part.
-		if len(parts) != 7 || parts[0] != "arn" || parts[2] != "secretsmanager" || !accountID.MatchString(parts[4]) || parts[5] != "secret" || !strings.HasPrefix(parts[6], resource.Name) {
+		// suffix. Accept only the bare name or the name plus AWS's fixed
+		// `-XXXXXX` suffix, so a different secret whose name merely starts with
+		// this one cannot pass.
+		if len(parts) != 7 || parts[0] != "arn" || parts[2] != "secretsmanager" || !accountID.MatchString(parts[4]) || parts[5] != "secret" || !secretResourceMatchesName(parts[6], resource.Name) {
 			return fmt.Errorf("Secrets Manager resource %q has invalid ARN: %w", resource.Name, ErrValidation)
 		}
 	}
 	return validateResourceNames("Secrets Manager", names)
+}
+
+// secretResourceMatchesName reports whether the resource part of a Secrets
+// Manager ARN names the configured secret. AWS appends a random `-XXXXXX`
+// suffix to the secret name, so the bare name and the name plus that exact
+// suffix are accepted, but a name that merely shares a prefix is not.
+func secretResourceMatchesName(resource, name string) bool {
+	if resource == name {
+		return true
+	}
+	if !strings.HasPrefix(resource, name+"-") {
+		return false
+	}
+	suffix := strings.TrimPrefix(resource, name+"-")
+	if len(suffix) != 6 {
+		return false
+	}
+	for _, r := range suffix {
+		if !alphanumeric(r) {
+			return false
+		}
+	}
+	return true
+}
+
+func alphanumeric(r rune) bool {
+	return 'a' <= r && r <= 'z' || 'A' <= r && r <= 'Z' || '0' <= r && r <= '9'
 }
 
 func validateParameterResources(resources []ParameterResource) error {

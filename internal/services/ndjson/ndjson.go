@@ -37,7 +37,7 @@ type Writer struct {
 // 0 or negative disables the bound.
 func Create(artifactRoot, name string, maxBytes int64) (*Writer, error) {
 	clean := filepath.Clean(filepath.FromSlash(name))
-	if filepath.IsAbs(clean) || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+	if filepath.IsAbs(clean) || clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
 		return nil, fmt.Errorf("unsafe artifact path %q: %w", name, model.ErrValidation)
 	}
 	destination := filepath.Join(artifactRoot, clean)

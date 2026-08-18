@@ -23,25 +23,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.busy = false
 		honorResult := m.screen == m.pending
 		m.pending = ""
+		if !honorResult {
+			return m, nil
+		}
 		m.err = msg.err
 		if msg.err == nil {
 			m.mergeResources(msg.result.Resources)
 			m.findings = slices.Clone(msg.result.Findings)
-			if honorResult {
-				m.screen, m.cursor = ScreenResources, 0
-			}
+			m.screen, m.cursor = ScreenResources, 0
 		}
 		return m, nil
 	case planFinishedMsg:
 		m.busy = false
 		honorResult := m.screen == m.pending
 		m.pending = ""
+		if !honorResult {
+			return m, nil
+		}
 		m.err, m.plan = msg.err, msg.plan
 		if msg.err == nil {
 			m.findings = slices.Clone(msg.plan.Findings)
-			if honorResult {
-				m.screen, m.cursor = ScreenReview, 0
-			}
+			m.screen, m.cursor = ScreenReview, 0
 		}
 		return m, nil
 	case pullFinishedMsg:

@@ -58,6 +58,9 @@ func TestValidateSecretsManagerARN(t *testing.T) {
 		"arn:aws:secretsmanager:eu-west-1:123456789012:secret:users",
 		"arn:aws:secretsmanager:eu-west-1:123456789012:other:db",
 		"arn:aws:secretsmanager:eu-west-1:123456789012:db",
+		"arn:aws:secretsmanager:eu-west-1:123456789012:secret:db-secret-LongName",
+		"arn:aws:secretsmanager:eu-west-1:123456789012:secret:db-too-long-suffix-xyz",
+		"arn:aws:secretsmanager:eu-west-1:123456789012:secret:db-Xy!",
 	} {
 		if err := valid(arn); err == nil {
 			t.Fatalf("mismatched Secrets Manager ARN accepted: %s", arn)

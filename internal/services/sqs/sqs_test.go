@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -34,6 +35,18 @@ func TestPlanCaptureAndDiscoverAreMetadataOnly(t *testing.T) {
 	discovery, err := adapter.Discover(context.Background(), model.SourceScope{})
 	if err != nil || len(discovery.Resources) != 0 || len(adapter.Dependencies(snapshot)) != 0 {
 		t.Fatalf("discovery/dependencies = %#v, %v", discovery, err)
+	}
+}
+
+func TestPlanIncludesDataIAMActionsWhenMessageCaptureEnabled(t *testing.T) {
+	adapter := New()
+	project := config.Project{Resources: config.Resources{SQS: []config.SQSResource{{Name: "jobs", ARN: "arn:aws:sqs:eu-west-1:123456789012:jobs", Data: &config.SQSDataPolicy{Enabled: true, Mode: config.DataModeBounded}}}}}
+	contribution := adapter.Plan(project, false)
+	if !slices.Contains(contribution.RequiredIAMActions, "sqs:GetQueueUrl") || !slices.Contains(contribution.RequiredIAMActions, "sqs:ReceiveMessage") {
+		t.Fatalf("data-enabled plan must require message actions regardless of run flag: %#v", contribution.RequiredIAMActions)
+	}
+	if !contribution.Selections[0].Options.IncludeData {
+		t.Fatal("data-enabled selection must carry IncludeData")
 	}
 }
 

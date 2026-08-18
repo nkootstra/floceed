@@ -49,6 +49,36 @@ func TestManifestValidateRejectsUnsupportedSnapshotContracts(t *testing.T) {
 	}
 }
 
+func TestManifestValidateCloudWatchLogsARNIgnoresStarSuffix(t *testing.T) {
+	snapshot := func(resource ResourceRef, arn string) Snapshot {
+		structure, err := json.Marshal(map[string]string{"name": resource.ID, "arn": arn})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return Snapshot{Resource: resource, Service: "logs", StructureVersion: CurrentSnapshotStructureVersion, Structure: structure}
+	}
+	base := ResourceRef{Service: "logs", ID: "/app/orders"}
+	cases := []struct {
+		name string
+		item Snapshot
+		ok   bool
+	}{
+		{"bare configured ARN, API returns :* suffix", snapshot(base, "arn:aws:logs:eu-west-1:123456789012:log-group:/app/orders:*"), true},
+		{"configured and API ARN both bare", snapshot(ResourceRef{Service: "logs", ID: "/app/orders", ARN: "arn:aws:logs:eu-west-1:123456789012:log-group:/app/orders"}, "arn:aws:logs:eu-west-1:123456789012:log-group:/app/orders"), true},
+		{"different log group rejected", snapshot(base, "arn:aws:logs:eu-west-1:123456789012:log-group:/app/other:*"), false},
+		{"wrong account in configured ARN rejected", snapshot(ResourceRef{Service: "logs", ID: "/app/orders", ARN: "arn:aws:logs:eu-west-1:999999999999:log-group:/app/orders:*"}, "arn:aws:logs:eu-west-1:123456789012:log-group:/app/orders:*"), false},
+		{"configured ARN with suffix matches API ARN with suffix", snapshot(ResourceRef{Service: "logs", ID: "/app/orders", ARN: "arn:aws:logs:eu-west-1:123456789012:log-group:/app/orders:*"}, "arn:aws:logs:eu-west-1:123456789012:log-group:/app/orders:*"), true},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			err := (Manifest{SchemaVersion: CurrentManifestSchemaVersion, Snapshots: []Snapshot{tt.item}}).Validate()
+			if (err == nil) != tt.ok {
+				t.Fatalf("Validate() error = %v, valid = %v", err, tt.ok)
+			}
+		})
+	}
+}
+
 func TestManifestValidateEventDependencySnapshotARN(t *testing.T) {
 	valid := func(resource ResourceRef, service, arn string) Snapshot {
 		structure, err := json.Marshal(map[string]string{"name": resource.ID, "arn": arn})

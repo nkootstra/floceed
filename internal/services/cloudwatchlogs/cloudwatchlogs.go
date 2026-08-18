@@ -3,6 +3,7 @@ package cloudwatchlogs
 
 import (
 	"context"
+	"fmt"
 	"sort"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -95,5 +96,5 @@ func (a *Adapter) findGroup(ctx context.Context, name string) (*types.LogGroup, 
 			}
 		}
 	}
-	return nil, model.ErrValidation
+	return nil, fmt.Errorf("CloudWatch Logs group %q was not found", name)
 }

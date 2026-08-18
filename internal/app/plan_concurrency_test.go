@@ -11,6 +11,8 @@ import (
 	"github.com/nkootstra/floceed/internal/catalog"
 	"github.com/nkootstra/floceed/internal/config"
 	"github.com/nkootstra/floceed/internal/model"
+	"github.com/nkootstra/floceed/internal/services/dynamodb"
+	"github.com/nkootstra/floceed/internal/services/s3"
 )
 
 type captureTestAdapter struct {
@@ -223,5 +225,28 @@ func TestCaptureReturnsLowestSelectionFailure(t *testing.T) {
 	var appErr *Error
 	if !errors.As(err, &appErr) || appErr.Kind != ErrorSource || appErr.Code != "AWS_SOURCE_FAILED" {
 		t.Fatalf("capture error = %#v, want mapped source error", err)
+	}
+}
+
+func TestCaptureErrorMapsCheckpointSentinelsToDistinctCodes(t *testing.T) {
+	// The sentinel errors are package-level and only reachable through real
+	// adapters; drive captureError directly to pin the code mapping.
+	for _, tt := range []struct {
+		err  error
+		code string
+	}{
+		{errors.New("aws exploded"), "AWS_SOURCE_FAILED"},
+		{fmt.Errorf("wrap: %w", dynamodb.ErrCheckpointCorrupt), "CHECKPOINT_CORRUPT"},
+		{fmt.Errorf("wrap: %w", dynamodb.ErrCheckpointIncompatible), "CHECKPOINT_INCOMPATIBLE"},
+		{fmt.Errorf("wrap: %w", s3.ErrCheckpointCorrupt), "CHECKPOINT_CORRUPT"},
+		{fmt.Errorf("wrap: %w", s3.ErrCheckpointIncompatible), "CHECKPOINT_INCOMPATIBLE"},
+	} {
+		var appErr *Error
+		if !errors.As(captureError(tt.err), &appErr) {
+			t.Fatalf("captureError(%v) = %T, want *Error", tt.err, captureError(tt.err))
+		}
+		if appErr.Code != tt.code {
+			t.Fatalf("captureError(%v) code = %q, want %q", tt.err, appErr.Code, tt.code)
+		}
 	}
 }

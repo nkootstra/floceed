@@ -35,13 +35,18 @@ func (*Adapter) Service() model.ServiceDescriptor {
 	return model.ServiceDescriptor{Name: "sqs", DisplayName: "SQS", Support: model.SupportPartial}
 }
 
-func (*Adapter) Plan(project config.Project, includeData bool) catalog.PlanContribution {
+func (*Adapter) Plan(project config.Project, _ bool) catalog.PlanContribution {
 	contribution := catalog.PlanContribution{Selections: make([]catalog.Selection, 0, len(project.Resources.SQS))}
 	messageCapture := false
 	for _, resource := range project.Resources.SQS {
 		selection := catalog.Selection{Resource: model.ResourceRef{Service: "sqs", Type: "queue", ID: resource.Name, ARN: resource.ARN}}
 		if resource.Data != nil {
-			messageCapture = messageCapture || includeData && resource.Data.Enabled
+			// Gate the data actions on the project configuration so a plan
+			// reports the same RequiredIAMActions a subsequent pull needs;
+			// the run-level includeData flag is enforced separately in
+			// buildCaptureJobs, which forces IncludeData off for
+			// structure-only pulls.
+			messageCapture = messageCapture || resource.Data.Enabled
 			selection.Options.IncludeData = resource.Data.Enabled
 			selection.Options.Mode = string(resource.Data.Mode)
 			selection.Options.Limits.MaxItems = resource.Data.MaxMessages

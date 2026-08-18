@@ -491,7 +491,7 @@ func validateSnapshot(snapshot Snapshot) error {
 		if snapshot.Service == "ssm" {
 			valid = len(parts) == 6 && parts[0] == "arn" && parts[2] == "ssm" && snapshotAccountID.MatchString(parts[4]) && parts[5] == "parameter"+snapshot.Resource.ID
 		} else {
-			valid = len(parts) == 7 && parts[0] == "arn" && parts[2] == "secretsmanager" && snapshotAccountID.MatchString(parts[4]) && parts[5] == "secret" && strings.HasPrefix(parts[6], snapshot.Resource.ID)
+			valid = len(parts) == 7 && parts[0] == "arn" && parts[2] == "secretsmanager" && snapshotAccountID.MatchString(parts[4]) && parts[5] == "secret" && secretResourceMatchesName(parts[6], snapshot.Resource.ID)
 		}
 		if !valid {
 			return fmt.Errorf("%s structure ARN must match resource identity: %w", snapshot.Service, ErrValidation)
@@ -538,7 +538,11 @@ func validateSnapshot(snapshot Snapshot) error {
 		if len(parts) < 7 || parts[0] != "arn" || parts[2] != "logs" || !snapshotAccountID.MatchString(parts[4]) || resourcePart == "" || !strings.HasPrefix(resourcePart, snapshot.Resource.ID) {
 			return fmt.Errorf("CloudWatch Logs structure ARN must match resource identity: %w", ErrValidation)
 		}
-		if snapshot.Resource.ARN != "" && snapshot.Resource.ARN != value.ARN {
+		// DescribeLogGroups returns the ARN with a trailing ":*" for log
+		// groups created after AWS's 2019 ARN format change; configured ARNs
+		// may or may not carry it. Compare identity only so a suffix
+		// difference cannot fail an otherwise valid manifest.
+		if snapshot.Resource.ARN != "" && trimLogGroupARNSuffix(snapshot.Resource.ARN) != trimLogGroupARNSuffix(value.ARN) {
 			return fmt.Errorf("CloudWatch Logs structure must match resource ARN: %w", ErrValidation)
 		}
 	default:
@@ -550,3 +554,37 @@ func validateSnapshot(snapshot Snapshot) error {
 var ErrSchema = errors.New("schema version error")
 var ErrValidation = errors.New("validation error")
 var snapshotAccountID = regexp.MustCompile(`^[0-9]{12}$`)
+
+// trimLogGroupARNSuffix strips the trailing ":*" that DescribeLogGroups appends
+// to log group ARNs created after AWS's 2019 ARN format change, so configured
+// and live ARNs compare on identity alone.
+func trimLogGroupARNSuffix(arn string) string {
+	return strings.TrimSuffix(arn, ":*")
+}
+
+// secretResourceMatchesName reports whether the resource part of a Secrets
+// Manager ARN names the configured secret. AWS appends a random `-XXXXXX`
+// suffix to the secret name, so the bare name and the name plus that exact
+// suffix are accepted, but a name that merely shares a prefix is not.
+func secretResourceMatchesName(resource, name string) bool {
+	if resource == name {
+		return true
+	}
+	if !strings.HasPrefix(resource, name+"-") {
+		return false
+	}
+	suffix := strings.TrimPrefix(resource, name+"-")
+	if len(suffix) != 6 {
+		return false
+	}
+	for _, r := range suffix {
+		if !alphanumeric(r) {
+			return false
+		}
+	}
+	return true
+}
+
+func alphanumeric(r rune) bool {
+	return 'a' <= r && r <= 'z' || 'A' <= r && r <= 'Z' || '0' <= r && r <= '9'
+}

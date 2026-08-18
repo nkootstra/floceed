@@ -46,13 +46,18 @@ func (*Adapter) Service() model.ServiceDescriptor {
 	return model.ServiceDescriptor{Name: "kinesis", DisplayName: "Kinesis", Support: model.SupportPartial}
 }
 
-func (*Adapter) Plan(project config.Project, includeData bool) catalog.PlanContribution {
+func (*Adapter) Plan(project config.Project, _ bool) catalog.PlanContribution {
 	contribution := catalog.PlanContribution{Selections: make([]catalog.Selection, 0, len(project.Resources.Kinesis))}
 	dataCapture := false
 	for _, resource := range project.Resources.Kinesis {
 		selection := catalog.Selection{Resource: model.ResourceRef{Service: "kinesis", Type: "stream", ID: resource.Name, ARN: resource.ARN}}
 		if resource.Data != nil {
-			dataCapture = dataCapture || includeData && resource.Data.Enabled
+			// Gate the data actions on the project configuration so a plan
+			// reports the same RequiredIAMActions a subsequent pull needs;
+			// the run-level includeData flag is enforced separately in
+			// buildCaptureJobs, which forces IncludeData off for
+			// structure-only pulls.
+			dataCapture = dataCapture || resource.Data.Enabled
 			selection.Options.IncludeData = resource.Data.Enabled
 			selection.Options.Mode = string(resource.Data.Mode)
 			selection.Options.Limits.MaxItems = resource.Data.MaxRecords
