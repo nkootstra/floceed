@@ -152,6 +152,8 @@ data:
 The equivalent full-mode policies deliberately omit bounded limits:
 
 ```yaml
+target:
+  hook_timeout_seconds: 3600
 resources:
   dynamodb:
     - name: staging-records

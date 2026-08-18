@@ -64,7 +64,10 @@ func TestInitRefusesOverwriteUnlessForced(t *testing.T) {
 	if err == nil || ExitCode(err) != 6 || !strings.Contains(err.Error(), "file exists") {
 		t.Fatalf("overwrite error = %v", err)
 	}
-	got, _ := os.ReadFile(path)
+	got, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
 	if !bytes.Equal(got, original) {
 		t.Fatal("existing project changed without --force")
 	}
@@ -73,7 +76,11 @@ func TestInitRefusesOverwriteUnlessForced(t *testing.T) {
 	if err := cmd.ExecuteContext(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if got, _ := os.ReadFile(path); bytes.Equal(got, original) {
+	got, readErr = os.ReadFile(path)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if bytes.Equal(got, original) {
 		t.Fatal("--force did not replace project")
 	}
 }

@@ -5,12 +5,15 @@ structure-only service entries. Replace the profile, expected account ID, and
 resource names before running it.
 
 ```bash
-floceed init --region eu-west-1
 floceed plan --project floceed.yaml
 floceed pull --project floceed.yaml
 floceed inspect --project floceed.yaml
 floceed up --project floceed.yaml
 ```
+
+The included `floceed.yaml` is the project file for this example. For a new
+directory without a project file, use `floceed init --region eu-west-1` as a
+separate setup workflow.
 
 `floceed doctor` defaults to `./floceed.yaml`; use `--project` when the file is
 elsewhere. See [the configuration reference](../../docs/configuration.md) for
