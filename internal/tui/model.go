@@ -112,8 +112,10 @@ func NewModel(backend Backend, opts Options) Model {
 			{Name: "kinesis", DisplayName: "Amazon Kinesis", Support: model.SupportStructureOnly},
 			{Name: "events", DisplayName: "Amazon EventBridge", Support: model.SupportStructureOnly},
 			{Name: "lambda", DisplayName: "AWS Lambda", Support: model.SupportStructureOnly},
+			{Name: "secretsmanager", DisplayName: "AWS Secrets Manager", Support: model.SupportStructureOnly},
+			{Name: "ssm", DisplayName: "AWS SSM Parameter Store", Support: model.SupportStructureOnly},
 		},
-		serviceSelected: map[string]bool{"s3": true, "dynamodb": true, "kinesis": false, "events": false, "lambda": false}, selected: map[string]bool{},
+		serviceSelected: map[string]bool{"s3": true, "dynamodb": true, "kinesis": false, "events": false, "lambda": false, "secretsmanager": false, "ssm": false}, selected: map[string]bool{},
 		dataEnabled: map[string]bool{}, dataMode: map[string]config.DataMode{}, filter: filter, regionInput: region,
 	}
 }

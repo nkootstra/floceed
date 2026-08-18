@@ -122,6 +122,8 @@ type Resources struct {
 	Kinesis     []KinesisResource     `yaml:"kinesis,omitempty" json:"kinesis"`
 	EventBridge []EventBridgeResource `yaml:"eventbridge,omitempty" json:"eventbridge"`
 	Lambda      []LambdaResource      `yaml:"lambda,omitempty" json:"lambda"`
+	Secrets     []SecretResource      `yaml:"secrets,omitempty" json:"secrets"`
+	Parameters  []ParameterResource   `yaml:"parameters,omitempty" json:"parameters"`
 }
 type S3Resource struct {
 	Name string        `yaml:"name" json:"name"`
@@ -162,6 +164,15 @@ type EventBridgeResource struct {
 type LambdaResource struct {
 	Name string `yaml:"name" json:"name"`
 	ARN  string `yaml:"arn" json:"arn"`
+}
+type SecretResource struct {
+	Name string `yaml:"name" json:"name"`
+	ARN  string `yaml:"arn" json:"arn"`
+}
+type ParameterResource struct {
+	Name           string `yaml:"name" json:"name"`
+	ARN            string `yaml:"arn" json:"arn"`
+	WithDecryption bool   `yaml:"with_decryption,omitempty" json:"with_decryption"`
 }
 type DynamoDBDataPolicy struct {
 	Enabled  bool     `yaml:"enabled" json:"enabled"`
@@ -456,6 +467,12 @@ func (p Project) Validate() error {
 	if err := validateLambdaResources(p.Resources.Lambda); err != nil {
 		return err
 	}
+	if err := validateSecretResources(p.Resources.Secrets); err != nil {
+		return err
+	}
+	if err := validateParameterResources(p.Resources.Parameters); err != nil {
+		return err
+	}
 	if hasFullData(p) && p.Target.HookTimeoutSeconds <= DefaultHookTimeoutSeconds {
 		return fmt.Errorf("full data mode requires target.hook_timeout_seconds greater than %d: %w", DefaultHookTimeoutSeconds, ErrValidation)
 	}
@@ -547,6 +564,44 @@ func validateLambdaResources(resources []LambdaResource) error {
 		}
 	}
 	return validateResourceNames("Lambda", names)
+}
+
+func validateSecretResources(resources []SecretResource) error {
+	names := make([]string, len(resources))
+	for i, resource := range resources {
+		names[i] = resource.Name
+		if resource.Name == "" || len(resource.Name) > 512 {
+			return fmt.Errorf("Secrets Manager resource %q has invalid name: %w", resource.Name, ErrValidation)
+		}
+		parts := strings.Split(resource.ARN, ":")
+		if len(parts) != 6 || parts[2] != "secretsmanager" || parts[5] == "" || !accountID.MatchString(parts[4]) {
+			return fmt.Errorf("Secrets Manager resource %q has invalid ARN: %w", resource.Name, ErrValidation)
+		}
+	}
+	return validateResourceNames("Secrets Manager", names)
+}
+
+func validateParameterResources(resources []ParameterResource) error {
+	names := make([]string, len(resources))
+	for i, resource := range resources {
+		names[i] = resource.Name
+		if resource.Name == "" || len(resource.Name) > 2048 || !strings.HasPrefix(resource.Name, "/") {
+			return fmt.Errorf("SSM parameter %q has invalid name: %w", resource.Name, ErrValidation)
+		}
+		parts := strings.Split(resource.ARN, ":")
+		if len(parts) != 6 || parts[2] != "ssm" || parts[5] != "parameter"+resource.Name || !accountID.MatchString(parts[4]) {
+			return fmt.Errorf("SSM parameter %q has invalid ARN: %w", resource.Name, ErrValidation)
+		}
+	}
+	return validateResourceNames("SSM parameters", names)
+}
+
+func validateNamedARN(service, name, arn string) error {
+	parts := strings.Split(arn, ":")
+	if len(parts) != 6 || parts[0] != "arn" || !arnPartition.MatchString(parts[1]) || parts[2] != service || parts[3] == "" || !accountID.MatchString(parts[4]) || parts[5] != name {
+		return fmt.Errorf("ARN %q does not match %s resource name: %w", arn, service, ErrValidation)
+	}
+	return nil
 }
 
 func validDependencyName(name string, max int) bool {

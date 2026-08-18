@@ -349,6 +349,12 @@ versions' deployment packages, and invocation history are not copied or
 executed by replay; use this support to document topology and dependencies
 until a safe executable-package contract is available.
 
+Secrets Manager and SSM Parameter Store support is metadata-only. Floceed
+records names, ARNs, and non-sensitive metadata, never calls a value-fetching
+API, and never writes secret or parameter values to bundles, checkpoints, or
+logs. Replay does not create or populate protected values; provide those
+through the target environment's own secret management.
+
 Existing tables with incompatible keys or indexes and buckets with incompatible
 immutable object-lock state fail without replacement. Floceed does not rewrite
 arbitrary strings that look like ARNs.
