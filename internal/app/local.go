@@ -2,6 +2,7 @@ package app
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -24,6 +25,7 @@ import (
 
 const defaultDockerProbeTimeout = 10 * time.Second
 const defaultReadyPollInterval = 500 * time.Millisecond
+const maxComposeLogBytes = 4 << 20
 
 type httpDoer interface {
 	Do(*http.Request) (*http.Response, error)
@@ -47,6 +49,7 @@ type UpOptions struct {
 type dockerLocalRuntime struct {
 	lookPath      func(string) (string, error)
 	dockerCommand func(context.Context, ...string) ([]byte, error)
+	composeLogs   func(context.Context, string, string, int) ([]byte, error)
 	httpClient    httpDoer
 	probeTimeout  time.Duration
 	pollInterval  time.Duration
@@ -56,6 +59,7 @@ func newDockerLocalRuntime() *dockerLocalRuntime {
 	return &dockerLocalRuntime{
 		lookPath:      exec.LookPath,
 		dockerCommand: runDockerCommand,
+		composeLogs:   runComposeLogs,
 		httpClient:    &http.Client{Timeout: 2 * time.Second},
 		probeTimeout:  defaultDockerProbeTimeout,
 		pollInterval:  defaultReadyPollInterval,
@@ -152,14 +156,37 @@ func (r *dockerLocalRuntime) Start(ctx context.Context, target, composeFile stri
 }
 
 func (r *dockerLocalRuntime) Logs(ctx context.Context, target, composeFile string, tail int) ([]byte, error) {
+	return r.composeLogs(ctx, target, composeFile, tail)
+}
+
+type cappedBuffer struct {
+	bytes.Buffer
+	limit int
+}
+
+func (b *cappedBuffer) Write(p []byte) (int, error) {
+	written := len(p)
+	remaining := b.limit - b.Len()
+	if remaining > 0 {
+		if len(p) > remaining {
+			p = p[:remaining]
+		}
+		_, _ = b.Buffer.Write(p)
+	}
+	return written, nil
+}
+
+func runComposeLogs(ctx context.Context, target, composeFile string, tail int) ([]byte, error) {
 	if tail <= 0 || tail > 10000 {
 		tail = 200
 	}
-	output, err := r.dockerCommand(ctx, "compose", "-f", composeFile, "logs", "--no-color", "--tail", fmt.Sprintf("%d", tail))
-	if len(output) > 4<<20 {
-		output = output[:4<<20]
-	}
-	return output, err
+	cmd := exec.CommandContext(ctx, "docker", "compose", "-f", composeFile, "logs", "--no-color", "--tail", fmt.Sprintf("%d", tail))
+	cmd.Dir = target
+	output := &cappedBuffer{limit: maxComposeLogBytes}
+	cmd.Stdout = output
+	cmd.Stderr = output
+	err := cmd.Run()
+	return output.Bytes(), err
 }
 
 type initStatus struct {

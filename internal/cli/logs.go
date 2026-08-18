@@ -18,6 +18,7 @@ func logsCommand(service Service) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			tail = normalizeLogTail(tail)
 			logs, err := service.Logs(cmd.Context(), definition, dir, tail)
 			if err != nil {
 				return convert(err)
@@ -32,4 +33,11 @@ func logsCommand(service Service) *cobra.Command {
 	project.bind(cmd)
 	cmd.Flags().IntVar(&tail, "tail", 200, "maximum log lines to return")
 	return cmd
+}
+
+func normalizeLogTail(tail int) int {
+	if tail <= 0 || tail > 10000 {
+		return 200
+	}
+	return tail
 }

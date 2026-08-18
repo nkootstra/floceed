@@ -926,6 +926,16 @@ func TestDoctorOrchestratesAllChecksWithoutExternalCommands(t *testing.T) {
 	}
 }
 
+func TestCappedBufferBoundsComposeLogs(t *testing.T) {
+	buffer := &cappedBuffer{limit: 4}
+	if _, err := buffer.Write([]byte("123456")); err != nil {
+		t.Fatal(err)
+	}
+	if got := buffer.String(); got != "1234" {
+		t.Fatalf("capped logs = %q", got)
+	}
+}
+
 func TestDoctorReturnsTypedFailureAndRetainsCheckResults(t *testing.T) {
 	p := testProject()
 	service := New("test")
