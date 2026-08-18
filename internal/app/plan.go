@@ -271,6 +271,9 @@ func (a *Application) capture(ctx context.Context, req captureRequest) (captureR
 	for _, selection := range selections {
 		selected[resourceIdentityKey(selection.Resource.Service, selection.Resource.Type, selection.Resource.ID)] = selection.Resource
 	}
+	if err := validateDependencyGraph(dependenciesBySnapshot, snapshots, selected); err != nil {
+		return captureResult{}, &Error{Kind: ErrorPlan, Code: "DEPENDENCY_CYCLE", Message: err.Error(), Remediation: "Remove the cyclic dependency or capture only one side of the relationship.", Err: err}
+	}
 	for i := range snapshots {
 		adapter := jobs[i].adapter
 		var resolved, unresolved []model.Dependency
@@ -298,6 +301,49 @@ func (a *Application) capture(ctx context.Context, req captureRequest) (captureR
 	captured.Plan = result
 	captured.Snapshots = snapshots
 	return captured, nil
+}
+
+func validateDependencyGraph(bySnapshot [][]model.Dependency, snapshots []model.Snapshot, selected map[string]model.ResourceRef) error {
+	graph := make(map[string][]string)
+	for i, dependencies := range bySnapshot {
+		from := resourceIdentityKey(snapshots[i].Resource.Service, snapshots[i].Resource.Type, snapshots[i].Resource.ID)
+		for _, dependency := range dependencies {
+			if !dependency.Required || !dependencyResolved(dependency, selected) {
+				continue
+			}
+			to := resourceIdentityKey(dependency.To.Service, dependency.To.Type, dependency.To.ID)
+			graph[from] = append(graph[from], to)
+		}
+	}
+	state := make(map[string]uint8)
+	var visit func(string) bool
+	visit = func(node string) bool {
+		if state[node] == 1 {
+			return true
+		}
+		if state[node] == 2 {
+			return false
+		}
+		state[node] = 1
+		for _, next := range graph[node] {
+			if visit(next) {
+				return true
+			}
+		}
+		state[node] = 2
+		return false
+	}
+	keys := make([]string, 0, len(graph))
+	for key := range graph {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		if visit(key) {
+			return fmt.Errorf("required dependency graph contains a cycle involving %q", key)
+		}
+	}
+	return nil
 }
 
 func dependencyResolved(dependency model.Dependency, selected map[string]model.ResourceRef) bool {
