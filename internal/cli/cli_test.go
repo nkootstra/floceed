@@ -455,6 +455,12 @@ func TestPullPlainProgressMarksEstimatesAndOmitsEmptyFields(t *testing.T) {
 	}
 }
 
+func TestProgressBytesLabelScalesLargeCaptures(t *testing.T) {
+	if got := progressBytesLabel(2 << 30); got != "2.0 GiB" {
+		t.Fatalf("progressBytesLabel() = %q, want 2.0 GiB", got)
+	}
+}
+
 func (f *fakeService) Scan(context.Context, app.ScanRequest) (app.ScanResult, error) {
 	return app.ScanResult{}, nil
 }

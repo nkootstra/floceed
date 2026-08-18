@@ -377,7 +377,10 @@ func progressBytesLabel(n int64) string {
 	if n < 1<<20 {
 		return fmt.Sprintf("%.1f KiB", float64(n)/(1<<10))
 	}
-	return fmt.Sprintf("%.1f MiB", float64(n)/(1<<20))
+	if n < 1<<30 {
+		return fmt.Sprintf("%.1f MiB", float64(n)/(1<<20))
+	}
+	return fmt.Sprintf("%.1f GiB", float64(n)/(1<<30))
 }
 
 func renderCommand(service Service) *cobra.Command {
