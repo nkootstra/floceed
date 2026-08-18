@@ -349,6 +349,12 @@ versions' deployment packages, and invocation history are not copied or
 executed by replay; use this support to document topology and dependencies
 until a safe executable-package contract is available.
 
+Explicitly selected API Gateway APIs support structure-only capture of API
+metadata, routes, and integrations. Floceed does not capture request traffic,
+deployments, stages, custom domains, authorizers, or API exports yet; replay
+keeps this topology available for local dependency documentation without
+pretending to reproduce the live gateway.
+
 Secrets Manager and SSM Parameter Store support is metadata-only. Floceed
 records names, ARNs, and non-sensitive metadata, never calls a value-fetching
 API, and never writes secret or parameter values to bundles, checkpoints, or

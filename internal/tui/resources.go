@@ -117,6 +117,8 @@ func (m Model) Project() config.Project {
 			p.Resources.Secrets = append(p.Resources.Secrets, config.SecretResource{Name: r.Ref.ID, ARN: r.Ref.ARN})
 		case "ssm":
 			p.Resources.Parameters = append(p.Resources.Parameters, config.ParameterResource{Name: r.Ref.ID, ARN: r.Ref.ARN})
+		case "apigateway":
+			p.Resources.APIs = append(p.Resources.APIs, config.APIResource{Name: r.Ref.ID, ARN: r.Ref.ARN})
 		}
 	}
 	return p

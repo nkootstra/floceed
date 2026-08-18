@@ -176,6 +176,11 @@ def validate_snapshots(snapshots: list, manifest_version: int = 1) -> None:
             expected = resource.get("id") if service == "secretsmanager" else "parameter" + resource.get("id")
             if len(arn) != 6 or arn[0] != "arn" or arn[2] != service or (service == "ssm" and arn[5] != expected) or (service == "secretsmanager" and not arn[5].startswith(expected)):
                 fail(f"snapshot {index} {service} structure ARN must match resource identity")
+        elif service == "apigateway":
+            if not isinstance(structure.get("arn"), str) or ":apigateway:" not in structure["arn"]:
+                fail(f"snapshot {index} API Gateway structure requires arn")
+            if not structure["arn"].endswith(resource.get("id", "")):
+                fail(f"snapshot {index} API Gateway structure ARN must match resource identity")
         else:
             fail(f"snapshot {index} service {service!r} is unsupported")
         if manifest_version >= 2:

@@ -178,6 +178,15 @@ class ReplayValidationTests(unittest.TestCase):
         self.write_json("bundle/manifest.json", self.manifest)
         self.assertEqual("lambda", replay.validate_bundle()["snapshots"][0]["service"])
 
+    def test_accepts_api_gateway_topology(self):
+        self.manifest["snapshots"] = [{
+            "resource": {"service": "apigateway", "type": "api", "id": "api-1"},
+            "service": "apigateway", "structure_version": 1,
+            "structure": {"name": "api-1", "arn": "arn:aws:apigateway:eu-west-1::/apis/api-1", "routes": [], "integrations": []},
+        }]
+        self.write_json("bundle/manifest.json", self.manifest)
+        self.assertEqual("apigateway", replay.validate_bundle()["snapshots"][0]["service"])
+
     def test_accepts_redacted_secret_and_parameter_metadata(self):
         self.manifest["snapshots"] = [
             {"resource": {"service": "secretsmanager", "type": "secret", "id": "prod/app"}, "service": "secretsmanager", "structure_version": 1, "structure": {"name": "prod/app", "arn": "arn:aws:secretsmanager:eu-west-1:123456789012:prod/app", "value_captured": False}},

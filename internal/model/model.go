@@ -497,6 +497,16 @@ func validateSnapshot(snapshot Snapshot) error {
 		if snapshot.Resource.ARN != "" && snapshot.Resource.ARN != value.ARN {
 			return fmt.Errorf("%s structure must match resource ARN: %w", snapshot.Service, ErrValidation)
 		}
+	case "apigateway":
+		var value struct {
+			ARN string `json:"arn"`
+		}
+		if err := json.Unmarshal(snapshot.Structure, &value); err != nil || value.ARN == "" || !strings.Contains(value.ARN, ":apigateway:") {
+			return fmt.Errorf("API Gateway structure requires arn: %w", ErrValidation)
+		}
+		if snapshot.Resource.ARN != "" && snapshot.Resource.ARN != value.ARN {
+			return fmt.Errorf("API Gateway structure must match resource ARN: %w", ErrValidation)
+		}
 	default:
 		return fmt.Errorf("unsupported snapshot service %q: %w", snapshot.Service, ErrValidation)
 	}
