@@ -229,17 +229,9 @@ func (a *Application) Up(ctx context.Context, p config.Project, projectDir strin
 }
 
 func (a *Application) Logs(ctx context.Context, p config.Project, projectDir string, tail int) ([]byte, error) {
-	target := filepath.Join(projectDir, p.Output.Directory)
-	composeFile := filepath.Join(target, bundle.ComposeFile)
-	info, err := os.Lstat(composeFile)
+	target, composeFile, err := composeEntry(p, projectDir)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, &Error{Kind: ErrorFilesystem, Code: "BUNDLE_MISSING", Message: fmt.Sprintf("generated Compose file not found: %s", composeFile), Remediation: "Run floceed render if a valid local manifest exists; otherwise run floceed pull for this project."}
-		}
-		return nil, filesystemError(err)
-	}
-	if !info.Mode().IsRegular() {
-		return nil, &Error{Kind: ErrorFilesystem, Code: "BUNDLE_INVALID", Message: fmt.Sprintf("generated Compose path is not a regular file: %s", composeFile), Remediation: "Run floceed render if a valid local manifest exists; otherwise run floceed pull for this project."}
+		return nil, err
 	}
 	output, err := a.localRuntime.Logs(ctx, target, composeFile, tail)
 	if err != nil {
@@ -252,17 +244,9 @@ func (a *Application) Logs(ctx context.Context, p config.Project, projectDir str
 }
 
 func (a *Application) Down(ctx context.Context, p config.Project, projectDir string) error {
-	target := filepath.Join(projectDir, p.Output.Directory)
-	composeFile := filepath.Join(target, bundle.ComposeFile)
-	info, err := os.Lstat(composeFile)
+	target, composeFile, err := composeEntry(p, projectDir)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return &Error{Kind: ErrorFilesystem, Code: "BUNDLE_MISSING", Message: fmt.Sprintf("generated Compose file not found: %s", composeFile), Remediation: "Run floceed render if a valid local manifest exists; otherwise run floceed pull for this project."}
-		}
-		return filesystemError(err)
-	}
-	if !info.Mode().IsRegular() {
-		return &Error{Kind: ErrorFilesystem, Code: "BUNDLE_INVALID", Message: fmt.Sprintf("generated Compose path is not a regular file: %s", composeFile), Remediation: "Run floceed render if a valid local manifest exists; otherwise run floceed pull for this project."}
+		return err
 	}
 	output, err := a.localRuntime.Stop(ctx, target, composeFile)
 	if err != nil {
@@ -275,17 +259,9 @@ func (a *Application) Down(ctx context.Context, p config.Project, projectDir str
 }
 
 func (a *Application) Reset(ctx context.Context, p config.Project, projectDir string) error {
-	target := filepath.Join(projectDir, p.Output.Directory)
-	composeFile := filepath.Join(target, bundle.ComposeFile)
-	info, err := os.Lstat(composeFile)
+	target, composeFile, err := composeEntry(p, projectDir)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return &Error{Kind: ErrorFilesystem, Code: "BUNDLE_MISSING", Message: fmt.Sprintf("generated Compose file not found: %s", composeFile), Remediation: "Run floceed render if a valid local manifest exists; otherwise run floceed pull for this project."}
-		}
-		return filesystemError(err)
-	}
-	if !info.Mode().IsRegular() {
-		return &Error{Kind: ErrorFilesystem, Code: "BUNDLE_INVALID", Message: fmt.Sprintf("generated Compose path is not a regular file: %s", composeFile), Remediation: "Run floceed render if a valid local manifest exists; otherwise run floceed pull for this project."}
+		return err
 	}
 	output, err := a.localRuntime.Reset(ctx, target, composeFile)
 	if err != nil {
@@ -297,38 +273,36 @@ func (a *Application) Reset(ctx context.Context, p config.Project, projectDir st
 	return nil
 }
 
+// composeEntry resolves the generated output directory and its Compose entry.
+// The bundle is installed atomically by render/pull, so a regular Compose entry
+// implies the rest of the bundle exists; gating on it before invoking Docker
+// fails fast with actionable remediation. These structural errors intentionally
+// carry no wrapped cause; the message includes the offending path. Lstat (not
+// Stat) so a symlink cannot masquerade as a rendered entry.
+func composeEntry(p config.Project, projectDir string) (target, composeFile string, err error) {
+	target = filepath.Join(projectDir, p.Output.Directory)
+	composeFile = filepath.Join(target, bundle.ComposeFile)
+	info, err := os.Lstat(composeFile)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "", "", &Error{Kind: ErrorFilesystem, Code: "BUNDLE_MISSING", Message: fmt.Sprintf("generated Compose file not found: %s", composeFile), Remediation: "Run floceed render if a valid local manifest exists; otherwise run floceed pull for this project."}
+		}
+		return "", "", filesystemError(err)
+	}
+	if !info.Mode().IsRegular() {
+		return "", "", &Error{Kind: ErrorFilesystem, Code: "BUNDLE_INVALID", Message: fmt.Sprintf("generated Compose path is not a regular file: %s", composeFile), Remediation: "Run floceed render if a valid local manifest exists; otherwise run floceed pull for this project."}
+	}
+	return target, composeFile, nil
+}
+
 func (a *Application) UpWithOptions(ctx context.Context, p config.Project, projectDir string, options UpOptions) error {
 	wait := options.Wait
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	target := filepath.Join(projectDir, p.Output.Directory)
-	composeFile := filepath.Join(target, bundle.ComposeFile)
-	// The bundle is installed atomically by render/pull, so a regular
-	// Compose entry implies the rest of the bundle exists. Gate on it
-	// before invoking Docker to fail fast with actionable remediation.
-	// These structural errors intentionally carry no wrapped cause; the
-	// message includes the offending path. Lstat (not Stat) so a symlink
-	// cannot masquerade as a rendered entry.
-	info, err := os.Lstat(composeFile)
+	target, composeFile, err := composeEntry(p, projectDir)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return &Error{
-				Kind:        ErrorFilesystem,
-				Code:        "BUNDLE_MISSING",
-				Message:     fmt.Sprintf("generated Compose file not found: %s", composeFile),
-				Remediation: "Run floceed render if a valid local manifest exists; otherwise run floceed pull for this project.",
-			}
-		}
-		return filesystemError(err)
-	}
-	if !info.Mode().IsRegular() {
-		return &Error{
-			Kind:        ErrorFilesystem,
-			Code:        "BUNDLE_INVALID",
-			Message:     fmt.Sprintf("generated Compose path is not a regular file: %s", composeFile),
-			Remediation: "Run floceed render if a valid local manifest exists; otherwise run floceed pull for this project.",
-		}
+		return err
 	}
 	if wait <= 0 {
 		wait = time.Duration(p.Target.HookTimeoutSeconds+30) * time.Second

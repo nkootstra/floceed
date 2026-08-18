@@ -157,6 +157,15 @@ type STSAPI interface {
 }
 type Identity struct{ AccountID, ARN, UserID string }
 
+// StringOrNil converts an empty string to a nil *string for optional SDK input
+// fields that reject empty values.
+func StringOrNil(value string) *string {
+	if value == "" {
+		return nil
+	}
+	return &value
+}
+
 func CallerIdentity(ctx context.Context, client STSAPI, profile string) (Identity, error) {
 	o, err := client.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
 	if err != nil {

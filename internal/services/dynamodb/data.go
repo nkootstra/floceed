@@ -11,6 +11,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -28,6 +29,15 @@ import (
 	"github.com/nkootstra/floceed/internal/governance"
 	"github.com/nkootstra/floceed/internal/model"
 	"github.com/nkootstra/floceed/internal/storage"
+)
+
+var (
+	// ErrCheckpointCorrupt reports that a captured checkpoint fails integrity
+	// verification and cannot be resumed.
+	ErrCheckpointCorrupt = errors.New("corrupt DynamoDB capture checkpoint; restart the capture")
+	// ErrCheckpointIncompatible reports that a checkpoint was written by a
+	// different capture configuration or tool version.
+	ErrCheckpointIncompatible = errors.New("incompatible DynamoDB capture checkpoint; restart the capture (--restart) or use a different --work-dir")
 )
 
 func dynamoCaptureDefinition(scope model.SourceScope, ref model.ResourceRef, opts model.CaptureOptions) (string, error) {
@@ -220,7 +230,7 @@ func (a *Adapter) captureData(ctx context.Context, table string, opts model.Capt
 		var state governedResumeState
 		state, restoredSelection, err = loadGovernedState(work, cp, opts)
 		if err != nil {
-			return DataResult{}, fmt.Errorf("corrupt DynamoDB capture checkpoint; restart the capture")
+			return DataResult{}, ErrCheckpointCorrupt
 		}
 		applyGovernedState(&cp, state)
 	}
@@ -297,7 +307,7 @@ func (a *Adapter) captureData(ctx context.Context, table string, opts model.Capt
 		selection = ranker.NewSelection(nil)
 		for _, candidate := range restoredSelection {
 			if err = selection.RestoreOwned(candidate.Rank, candidate.Value); err != nil {
-				return r, fmt.Errorf("corrupt DynamoDB capture checkpoint; restart the capture")
+				return r, ErrCheckpointCorrupt
 			}
 		}
 	}
@@ -671,20 +681,20 @@ func loadCheckpoint(path, table string, opts model.CaptureOptions) (captureCheck
 		return cp, false, err
 	}
 	if cp.Version != captureCheckpointVersion || cp.Table != table || !captureIdentityMatches(cp, opts) {
-		return cp, false, fmt.Errorf("incompatible DynamoDB capture checkpoint; restart the capture (--restart) or use a different --work-dir")
+		return cp, false, ErrCheckpointIncompatible
 	}
 	for _, run := range cp.Runs {
 		if info, e := os.Stat(run.Path); e != nil || !info.Mode().IsRegular() {
-			return cp, false, fmt.Errorf("corrupt DynamoDB capture checkpoint; restart the capture")
+			return cp, false, ErrCheckpointCorrupt
 		}
 		got, e := sumRun(run.Path)
 		if e != nil || got.SHA256 != run.SHA256 || got.Size != run.Size {
-			return cp, false, fmt.Errorf("corrupt DynamoDB capture checkpoint; restart the capture")
+			return cp, false, ErrCheckpointCorrupt
 		}
 	}
 	if opts.Governance != nil {
 		if len(cp.LastKey) != 0 || len(cp.ProtectedLastKey) != 0 || cp.ScanComplete || len(cp.Runs) != 0 || len(cp.CohortSelection) != 0 || cp.Items != 0 || cp.Pages != 0 || cp.Truncated || cp.SourceBytes != 0 || cp.ConsumedCapacity != 0 || len(cp.GovernanceCounts) != 0 || cp.ScannedItems != 0 || cp.ProtectedState == nil {
-			return cp, false, fmt.Errorf("corrupt DynamoDB capture checkpoint; restart the capture")
+			return cp, false, ErrCheckpointCorrupt
 		}
 	}
 	return cp, true, nil

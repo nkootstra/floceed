@@ -9,47 +9,42 @@ import (
 	"github.com/nkootstra/floceed/internal/catalog"
 	"github.com/nkootstra/floceed/internal/config"
 	"github.com/nkootstra/floceed/internal/model"
+	"github.com/nkootstra/floceed/internal/services/structureonly"
 )
 
 type Client interface {
 	ListSubscriptionsByTopic(context.Context, *awsSNS.ListSubscriptionsByTopicInput, ...func(*awsSNS.Options)) (*awsSNS.ListSubscriptionsByTopicOutput, error)
 }
 
-type Adapter struct{ client Client }
+type Adapter struct {
+	structureonly.Base
+	client Client
+}
+
+var _ catalog.Adapter = (*Adapter)(nil)
 
 func New(client ...Client) *Adapter {
 	var c Client
 	if len(client) > 0 {
 		c = client[0]
 	}
-	return &Adapter{client: c}
-}
-
-func (*Adapter) Service() model.ServiceDescriptor {
-	return model.ServiceDescriptor{Name: "sns", DisplayName: "SNS", Support: model.SupportStructureOnly}
-}
-
-func (*Adapter) Plan(project config.Project, _ bool) catalog.PlanContribution {
-	contribution := catalog.PlanContribution{Selections: make([]catalog.Selection, 0, len(project.Resources.SNS))}
-	for _, resource := range project.Resources.SNS {
-		contribution.Selections = append(contribution.Selections, catalog.Selection{
-			Resource: model.ResourceRef{Service: "sns", Type: "topic", ID: resource.Name, ARN: resource.ARN},
-		})
+	return &Adapter{
+		Base: structureonly.New(structureonly.Descriptor{
+			ServiceName:  "sns",
+			DisplayName:  "SNS",
+			ResourceType: "topic",
+			IAMActions:   []string{"sns:ListSubscriptionsByTopic"},
+			Resources: func(project config.Project) []structureonly.Named {
+				return structureonly.Select(project.Resources.SNS, func(r config.SNSResource) (string, string) { return r.Name, r.ARN })
+			},
+		}),
+		client: c,
 	}
-	return contribution
-}
-
-func (*Adapter) FinalizePlanning(*model.Snapshot, []model.Dependency) ([]model.Finding, error) {
-	return nil, nil
-}
-
-func (*Adapter) Discover(context.Context, model.SourceScope) (model.DiscoveryResult, error) {
-	return model.DiscoveryResult{}, nil
 }
 
 func (a *Adapter) Capture(ctx context.Context, _ model.SourceScope, ref model.ResourceRef, opts model.CaptureOptions) (*model.Snapshot, error) {
-	if opts.IncludeData {
-		return nil, model.ErrValidation
+	if err := a.Base.CheckStructureOnly(opts); err != nil {
+		return nil, err
 	}
 	structure := map[string]any{"name": ref.ID, "arn": ref.ARN}
 	if a.client != nil {
@@ -70,9 +65,5 @@ func (a *Adapter) Capture(ctx context.Context, _ model.SourceScope, ref model.Re
 		}
 		structure["subscriptions"] = subscriptions
 	}
-	return model.NewSnapshot(ref, "sns", structure)
+	return a.Base.Snapshot(ref, structure)
 }
-
-func (*Adapter) Dependencies(*model.Snapshot) []model.Dependency { return nil }
-
-func (*Adapter) Validate(*model.Snapshot, model.Capabilities) []model.Finding { return nil }

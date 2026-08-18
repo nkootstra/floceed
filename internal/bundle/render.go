@@ -50,10 +50,7 @@ func Render(ctx context.Context, target string, project config.Project, manifest
 
 func renderStage(stage string, project config.Project, manifest model.Manifest, artifactRoot string) error {
 	sortManifest(&manifest)
-	files := map[string]struct {
-		data []byte
-		mode os.FileMode
-	}{}
+	files := map[string]generatedFile{}
 	manifestJSON, err := CanonicalJSON(manifest)
 	if err != nil {
 		return err
@@ -62,23 +59,11 @@ func renderStage(stage string, project config.Project, manifest model.Manifest, 
 	if err != nil {
 		return err
 	}
-	files["bundle/manifest.json"] = struct {
-		data []byte
-		mode os.FileMode
-	}{manifestJSON, 0o600}
-	files[ComposeFile] = struct {
-		data []byte
-		mode os.FileMode
-	}{composeYAML, 0o600}
-	files["runtime/replay.py"] = struct {
-		data []byte
-		mode os.FileMode
-	}{replayruntime.ReplayPython, 0o500}
+	files["bundle/manifest.json"] = generatedFile{manifestJSON, 0o600}
+	files[ComposeFile] = generatedFile{composeYAML, 0o600}
+	files["runtime/replay.py"] = generatedFile{replayruntime.ReplayPython, 0o500}
 	files["init/ready.d/10-replay.py"] = wrapper("all")
-	files[".gitignore"] = struct {
-		data []byte
-		mode os.FileMode
-	}{[]byte("bundle/data/\n"), 0o600}
+	files[".gitignore"] = generatedFile{[]byte("bundle/data/\n"), 0o600}
 	for name, file := range files {
 		if err := write(stage, name, file.data, file.mode); err != nil {
 			return err
@@ -118,14 +103,14 @@ func renderStage(stage string, project config.Project, manifest model.Manifest, 
 	return write(stage, "checksums.json", b, 0o600)
 }
 
-func wrapper(stage string) struct {
+// generatedFile is a deterministic file written into a staged bundle.
+type generatedFile struct {
 	data []byte
 	mode os.FileMode
-} {
-	return struct {
-		data []byte
-		mode os.FileMode
-	}{[]byte("#!/usr/bin/env python3\nimport runpy, sys\nsys.argv = [\"replay.py\", \"" + stage + "\"]\nrunpy.run_path(\"/floceed/runtime/replay.py\", run_name=\"__main__\")\n"), 0o500}
+}
+
+func wrapper(stage string) generatedFile {
+	return generatedFile{[]byte("#!/usr/bin/env python3\nimport runpy, sys\nsys.argv = [\"replay.py\", \"" + stage + "\"]\nrunpy.run_path(\"/floceed/runtime/replay.py\", run_name=\"__main__\")\n"), 0o500}
 }
 
 func write(root, name string, data []byte, mode os.FileMode) error {
@@ -259,19 +244,6 @@ func verifyAndScan(filename string, expected Checksum) error {
 	}
 	if n != expected.Size || hex.EncodeToString(h.Sum(nil)) != expected.SHA256 {
 		return fmt.Errorf("checksum mismatch")
-	}
-	return detector.Err()
-}
-
-func scanCredentials(filename string) error {
-	f, err := os.Open(filename)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	detector := NewCredentialDetector()
-	if _, err = io.Copy(detector, f); err != nil {
-		return err
 	}
 	return detector.Err()
 }

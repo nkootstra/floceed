@@ -305,7 +305,7 @@ func TestGovernedCheckpointEncryptsResumeKeyAndRejectsTampering(t *testing.T) {
 	if err := os.WriteFile(statePath, state, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := New(client).captureData(context.Background(), "orders", opts, directoryWriter{root: opts.ArtifactDirectory}); err == nil || !strings.Contains(err.Error(), "corrupt DynamoDB capture checkpoint") || strings.Contains(err.Error(), "cipher") {
+	if _, err := New(client).captureData(context.Background(), "orders", opts, directoryWriter{root: opts.ArtifactDirectory}); err == nil || !errors.Is(err, ErrCheckpointCorrupt) || strings.Contains(err.Error(), "cipher") {
 		t.Fatalf("tamper error = %v", err)
 	}
 }
@@ -335,7 +335,7 @@ func TestGovernedCohortRejectsCorruptCheckpointSelection(t *testing.T) {
 	if err := os.WriteFile(statePath, state[:len(state)-1], 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := New(client).captureData(context.Background(), "orders", opts, directoryWriter{root: opts.ArtifactDirectory}); err == nil || !strings.Contains(err.Error(), "corrupt DynamoDB capture checkpoint") {
+	if _, err := New(client).captureData(context.Background(), "orders", opts, directoryWriter{root: opts.ArtifactDirectory}); err == nil || !errors.Is(err, ErrCheckpointCorrupt) {
 		t.Fatalf("corruption error = %v", err)
 	}
 }
@@ -489,7 +489,7 @@ func TestFullCaptureRejectsCorruptCheckpointRun(t *testing.T) {
 	if err := os.WriteFile(run, []byte("changed\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := adapter.captureData(context.Background(), "orders", opts, directoryWriter{root: opts.ArtifactDirectory}); err == nil || !strings.Contains(err.Error(), "corrupt DynamoDB capture checkpoint") {
+	if _, err := adapter.captureData(context.Background(), "orders", opts, directoryWriter{root: opts.ArtifactDirectory}); err == nil || !errors.Is(err, ErrCheckpointCorrupt) {
 		t.Fatalf("error = %v", err)
 	}
 }
@@ -503,7 +503,7 @@ func TestFullCaptureRejectsChangedMode(t *testing.T) {
 		t.Fatalf("first capture error = %v", err)
 	}
 	boundedOpts := model.CaptureOptions{Mode: "bounded", Limits: model.DataLimits{MaxItems: 1, MaxPages: 1}, ArtifactDirectory: fullOpts.ArtifactDirectory, CheckpointDirectory: fullOpts.CheckpointDirectory}
-	if _, err := adapter.captureData(context.Background(), "orders", boundedOpts, directoryWriter{root: boundedOpts.ArtifactDirectory}); err == nil || !strings.Contains(err.Error(), "incompatible DynamoDB capture checkpoint") {
+	if _, err := adapter.captureData(context.Background(), "orders", boundedOpts, directoryWriter{root: boundedOpts.ArtifactDirectory}); err == nil || !errors.Is(err, ErrCheckpointIncompatible) {
 		t.Fatalf("changed-options error = %v", err)
 	}
 }
@@ -760,7 +760,7 @@ func TestGovernedCaptureRejectsResumeAfterSecretRotation(t *testing.T) {
 		t.Fatalf("first capture error = %v", err)
 	}
 	opts.Governance = makePolicy(2)
-	if _, err := New(client).captureData(context.Background(), "orders", opts, directoryWriter{root: opts.ArtifactDirectory}); err == nil || !strings.Contains(err.Error(), "incompatible DynamoDB capture checkpoint") {
+	if _, err := New(client).captureData(context.Background(), "orders", opts, directoryWriter{root: opts.ArtifactDirectory}); err == nil || !errors.Is(err, ErrCheckpointIncompatible) {
 		t.Fatalf("rotation error = %v", err)
 	}
 }

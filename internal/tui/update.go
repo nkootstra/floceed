@@ -20,18 +20,28 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.busy, m.err, m.identity = false, msg.err, msg.identity
 		return m, nil
 	case scanFinishedMsg:
-		m.busy, m.err = false, msg.err
+		m.busy = false
+		honorResult := m.screen == m.pending
+		m.pending = ""
+		m.err = msg.err
 		if msg.err == nil {
 			m.mergeResources(msg.result.Resources)
 			m.findings = slices.Clone(msg.result.Findings)
-			m.screen, m.cursor = ScreenResources, 0
+			if honorResult {
+				m.screen, m.cursor = ScreenResources, 0
+			}
 		}
 		return m, nil
 	case planFinishedMsg:
-		m.busy, m.err, m.plan = false, msg.err, msg.plan
+		m.busy = false
+		honorResult := m.screen == m.pending
+		m.pending = ""
+		m.err, m.plan = msg.err, msg.plan
 		if msg.err == nil {
 			m.findings = slices.Clone(msg.plan.Findings)
-			m.screen, m.cursor = ScreenReview, 0
+			if honorResult {
+				m.screen, m.cursor = ScreenReview, 0
+			}
 		}
 		return m, nil
 	case pullFinishedMsg:
@@ -147,14 +157,14 @@ func (m *Model) advance() (tea.Model, tea.Cmd) {
 			m.screen, m.cursor = ScreenServices, 0
 		}
 	case ScreenServices:
-		m.busy = true
+		m.busy, m.pending = true, ScreenServices
 		return *m, m.scan()
 	case ScreenResources:
 		if len(m.selected) > 0 {
 			m.screen, m.cursor = ScreenOptions, 0
 		}
 	case ScreenOptions:
-		m.busy = true
+		m.busy, m.pending = true, ScreenOptions
 		return *m, m.makePlan()
 	case ScreenReview:
 		m.screen = ScreenSummary
@@ -170,6 +180,7 @@ func (m *Model) advance() (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) back() {
+	m.pending = ""
 	switch m.screen {
 	case ScreenRegion:
 		m.screen = ScreenProfiles

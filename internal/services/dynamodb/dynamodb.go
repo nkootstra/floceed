@@ -27,6 +27,8 @@ type Client interface {
 }
 type Adapter struct{ client Client }
 
+var _ catalog.Adapter = (*Adapter)(nil)
+
 func New(client Client) *Adapter { return &Adapter{client: client} }
 func (a *Adapter) Service() model.ServiceDescriptor {
 	return model.ServiceDescriptor{Name: "dynamodb", DisplayName: "DynamoDB", Support: model.SupportPartial}

@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"strings"
+	"unicode"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -83,7 +84,7 @@ func (m Model) View() tea.View {
 			if m.progress.TotalPrecision != "" && m.progress.TotalPrecision != "exact" {
 				approx = "~"
 			}
-			fmt.Fprintf(&b, "%s %s %s", strings.Title(m.progress.Phase), m.progress.Service, m.progress.Resource)
+			fmt.Fprintf(&b, "%s %s %s", titleCase(m.progress.Phase), m.progress.Service, m.progress.Resource)
 			if m.progress.TotalRecords > 0 {
 				remaining := m.progress.RemainingRecords
 				if remaining == 0 {
@@ -189,5 +190,18 @@ func bytesLabel(n int64) string {
 	if n < 1<<20 {
 		return fmt.Sprintf("%.1f KiB", float64(n)/(1<<10))
 	}
-	return fmt.Sprintf("%.1f MiB", float64(n)/(1<<20))
+	if n < 1<<30 {
+		return fmt.Sprintf("%.1f MiB", float64(n)/(1<<20))
+	}
+	return fmt.Sprintf("%.1f GiB", float64(n)/(1<<30))
+}
+
+// titleCase capitalizes the first rune of value; strings.Title is deprecated.
+func titleCase(value string) string {
+	if value == "" {
+		return value
+	}
+	r := []rune(value)
+	r[0] = unicode.ToUpper(r[0])
+	return string(r)
 }

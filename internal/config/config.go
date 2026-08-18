@@ -286,7 +286,7 @@ func (p Project) ResolveFixtureProfile(name string, getenv func(string) string) 
 	}
 	profile, ok := p.FixtureProfiles[name]
 	if !ok {
-		return nil, fmt.Errorf("unknown fixture profile %q: %w", name, ErrValidation)
+		return nil, fmt.Errorf("%w %q", ErrUnknownFixtureProfile, name)
 	}
 	rules := make([]governance.Rule, len(profile.Rules))
 	keyed := len(profile.Cohorts) != 0
@@ -598,7 +598,10 @@ func validateSecretResources(resources []SecretResource) error {
 			return fmt.Errorf("Secrets Manager resource %q has invalid name: %w", resource.Name, ErrValidation)
 		}
 		parts := strings.Split(resource.ARN, ":")
-		if len(parts) != 6 || parts[2] != "secretsmanager" || parts[5] == "" || !accountID.MatchString(parts[4]) {
+		// Secrets Manager ARNs carry the resource as `secret:<name>-<suffix>`,
+		// which splits into two segments: "secret" and the name with its random
+		// suffix. The name must be a prefix of the resource part.
+		if len(parts) != 7 || parts[0] != "arn" || parts[2] != "secretsmanager" || !accountID.MatchString(parts[4]) || parts[5] != "secret" || !strings.HasPrefix(parts[6], resource.Name) {
 			return fmt.Errorf("Secrets Manager resource %q has invalid ARN: %w", resource.Name, ErrValidation)
 		}
 	}
@@ -618,14 +621,6 @@ func validateParameterResources(resources []ParameterResource) error {
 		}
 	}
 	return validateResourceNames("SSM parameters", names)
-}
-
-func validateNamedARN(service, name, arn string) error {
-	parts := strings.Split(arn, ":")
-	if len(parts) != 6 || parts[0] != "arn" || !arnPartition.MatchString(parts[1]) || parts[2] != service || parts[3] == "" || !accountID.MatchString(parts[4]) || parts[5] != name {
-		return fmt.Errorf("ARN %q does not match %s resource name: %w", arn, service, ErrValidation)
-	}
-	return nil
 }
 
 func validateAPIResources(resources []APIResource) error {
@@ -848,3 +843,4 @@ func validateResourceNames(service string, names []string) error {
 }
 
 var ErrValidation = errors.New("invalid floceed project")
+var ErrUnknownFixtureProfile = errors.New("unknown fixture profile")

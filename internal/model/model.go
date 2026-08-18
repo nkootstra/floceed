@@ -487,11 +487,13 @@ func validateSnapshot(snapshot Snapshot) error {
 			return fmt.Errorf("%s structure requires arn: %w", snapshot.Service, ErrValidation)
 		}
 		parts := strings.Split(value.ARN, ":")
-		expected := snapshot.Resource.ID
+		var valid bool
 		if snapshot.Service == "ssm" {
-			expected = "parameter" + expected
+			valid = len(parts) == 6 && parts[0] == "arn" && parts[2] == "ssm" && snapshotAccountID.MatchString(parts[4]) && parts[5] == "parameter"+snapshot.Resource.ID
+		} else {
+			valid = len(parts) == 7 && parts[0] == "arn" && parts[2] == "secretsmanager" && snapshotAccountID.MatchString(parts[4]) && parts[5] == "secret" && strings.HasPrefix(parts[6], snapshot.Resource.ID)
 		}
-		if len(parts) != 6 || parts[0] != "arn" || parts[2] != snapshot.Service || !snapshotAccountID.MatchString(parts[4]) || (snapshot.Service == "ssm" && parts[5] != expected) || (snapshot.Service == "secretsmanager" && !strings.HasPrefix(parts[5], expected)) {
+		if !valid {
 			return fmt.Errorf("%s structure ARN must match resource identity: %w", snapshot.Service, ErrValidation)
 		}
 		if snapshot.Resource.ARN != "" && snapshot.Resource.ARN != value.ARN {

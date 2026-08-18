@@ -2,25 +2,20 @@
 package kinesis
 
 import (
-	"bufio"
 	"context"
-	"crypto/sha256"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
-	"os"
-	"path/filepath"
 	"sort"
-	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsKinesis "github.com/aws/aws-sdk-go-v2/service/kinesis"
 	"github.com/aws/aws-sdk-go-v2/service/kinesis/types"
+	"github.com/nkootstra/floceed/internal/awsconfig"
 	"github.com/nkootstra/floceed/internal/catalog"
 	"github.com/nkootstra/floceed/internal/config"
 	"github.com/nkootstra/floceed/internal/model"
+	"github.com/nkootstra/floceed/internal/services/ndjson"
 )
 
 type Client interface {
@@ -37,6 +32,8 @@ type RecordClient interface {
 
 type Adapter struct{ client Client }
 
+var _ catalog.Adapter = (*Adapter)(nil)
+
 func New(client ...Client) *Adapter {
 	var c Client
 	if len(client) > 0 {
@@ -49,19 +46,25 @@ func (*Adapter) Service() model.ServiceDescriptor {
 	return model.ServiceDescriptor{Name: "kinesis", DisplayName: "Kinesis", Support: model.SupportPartial}
 }
 
-func (*Adapter) Plan(project config.Project, _ bool) catalog.PlanContribution {
+func (*Adapter) Plan(project config.Project, includeData bool) catalog.PlanContribution {
 	contribution := catalog.PlanContribution{Selections: make([]catalog.Selection, 0, len(project.Resources.Kinesis))}
+	dataCapture := false
 	for _, resource := range project.Resources.Kinesis {
-		contribution.RequiredIAMActions = append(contribution.RequiredIAMActions, "kinesis:ListStreams", "kinesis:DescribeStreamSummary")
 		selection := catalog.Selection{Resource: model.ResourceRef{Service: "kinesis", Type: "stream", ID: resource.Name, ARN: resource.ARN}}
 		if resource.Data != nil {
-			contribution.RequiredIAMActions = append(contribution.RequiredIAMActions, "kinesis:ListShards", "kinesis:GetShardIterator", "kinesis:GetRecords")
+			dataCapture = dataCapture || includeData && resource.Data.Enabled
 			selection.Options.IncludeData = resource.Data.Enabled
 			selection.Options.Mode = string(resource.Data.Mode)
 			selection.Options.Limits.MaxItems = resource.Data.MaxRecords
 			selection.Options.Limits.MaxTotalBytes = resource.Data.MaxBytes
 		}
 		contribution.Selections = append(contribution.Selections, selection)
+	}
+	if len(project.Resources.Kinesis) != 0 {
+		contribution.RequiredIAMActions = []string{"kinesis:ListStreams", "kinesis:DescribeStreamSummary"}
+		if dataCapture {
+			contribution.RequiredIAMActions = append(contribution.RequiredIAMActions, "kinesis:ListShards", "kinesis:GetShardIterator", "kinesis:GetRecords")
+		}
 	}
 	return contribution
 }
@@ -77,7 +80,7 @@ func (a *Adapter) Discover(ctx context.Context, scope model.SourceScope) (model.
 	var result model.DiscoveryResult
 	start := ""
 	for {
-		out, err := a.client.ListStreams(ctx, &awsKinesis.ListStreamsInput{ExclusiveStartStreamName: valueOrNil(start)})
+		out, err := a.client.ListStreams(ctx, &awsKinesis.ListStreamsInput{ExclusiveStartStreamName: awsconfig.StringOrNil(start)})
 		if err != nil {
 			return result, err
 		}
@@ -133,18 +136,11 @@ func (*Adapter) Dependencies(*model.Snapshot) []model.Dependency { return nil }
 
 func (*Adapter) Validate(*model.Snapshot, model.Capabilities) []model.Finding { return nil }
 
-func valueOrNil(value string) *string {
-	if value == "" {
-		return nil
-	}
-	return &value
-}
-
 func (a *Adapter) listShards(ctx context.Context, client RecordClient, ref model.ResourceRef) ([]string, error) {
 	var shards []string
 	var token *string
 	for {
-		out, err := client.ListShards(ctx, &awsKinesis.ListShardsInput{StreamARN: valueOrNil(ref.ARN), NextToken: token})
+		out, err := client.ListShards(ctx, &awsKinesis.ListShardsInput{StreamARN: awsconfig.StringOrNil(ref.ARN), NextToken: token})
 		if err != nil {
 			return nil, err
 		}
@@ -163,21 +159,10 @@ func (a *Adapter) listShards(ctx context.Context, client RecordClient, ref model
 }
 
 func captureRecords(ctx context.Context, client RecordClient, ref model.ResourceRef, shards []string, opts model.CaptureOptions) (model.ArtifactRef, int64, int64, error) {
-	name := "bundle/data/kinesis/" + ref.ID + ".ndjson"
-	clean := filepath.Clean(filepath.FromSlash(name))
-	if filepath.IsAbs(clean) || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
-		return model.ArtifactRef{}, 0, 0, fmt.Errorf("unsafe Kinesis artifact path: %w", model.ErrValidation)
-	}
-	destination := filepath.Join(opts.ArtifactDirectory, clean)
-	if err := os.MkdirAll(filepath.Dir(destination), 0o700); err != nil {
-		return model.ArtifactRef{}, 0, 0, err
-	}
-	file, err := os.OpenFile(destination, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	writer, err := ndjson.Create(opts.ArtifactDirectory, "bundle/data/kinesis/"+ref.ID+".ndjson", opts.Limits.MaxTotalBytes)
 	if err != nil {
 		return model.ArtifactRef{}, 0, 0, err
 	}
-	hash := sha256.New()
-	writer := bufio.NewWriter(io.MultiWriter(file, hash))
 	var records, sourceBytes int64
 	maxRecords, maxBytes := int64(opts.Limits.MaxItems), opts.Limits.MaxTotalBytes
 	limitReached := false
@@ -185,9 +170,9 @@ func captureRecords(ctx context.Context, client RecordClient, ref model.Resource
 		if limitReached || maxRecords > 0 && records >= maxRecords {
 			break
 		}
-		iterator, err := client.GetShardIterator(ctx, &awsKinesis.GetShardIteratorInput{StreamARN: valueOrNil(ref.ARN), ShardId: &shardID, ShardIteratorType: types.ShardIteratorTypeTrimHorizon})
+		iterator, err := client.GetShardIterator(ctx, &awsKinesis.GetShardIteratorInput{StreamARN: awsconfig.StringOrNil(ref.ARN), ShardId: &shardID, ShardIteratorType: types.ShardIteratorTypeTrimHorizon})
 		if err != nil {
-			file.Close()
+			writer.Abort()
 			return model.ArtifactRef{}, 0, 0, err
 		}
 		for iterator != nil && iterator.ShardIterator != nil {
@@ -197,41 +182,42 @@ func captureRecords(ctx context.Context, client RecordClient, ref model.Resource
 			}
 			out, err := client.GetRecords(ctx, &awsKinesis.GetRecordsInput{ShardIterator: iterator.ShardIterator, Limit: &limit})
 			if err != nil {
-				file.Close()
+				writer.Abort()
 				return model.ArtifactRef{}, 0, 0, err
 			}
 			if len(out.Records) == 0 {
 				break
 			}
 			for _, record := range out.Records {
-				encoded, _ := json.Marshal(map[string]any{"partition_key": aws.ToString(record.PartitionKey), "sequence_number": aws.ToString(record.SequenceNumber), "data_base64": base64.StdEncoding.EncodeToString(record.Data)})
-				encoded = append(encoded, '\n')
-				if maxBytes > 0 && sourceBytes+int64(len(encoded)) > maxBytes {
+				encoded, err := json.Marshal(map[string]any{"partition_key": aws.ToString(record.PartitionKey), "sequence_number": aws.ToString(record.SequenceNumber), "data_base64": base64.StdEncoding.EncodeToString(record.Data)})
+				if err != nil {
+					writer.Abort()
+					return model.ArtifactRef{}, 0, 0, err
+				}
+				written, err := writer.Write(encoded)
+				if err != nil {
+					writer.Abort()
+					return model.ArtifactRef{}, 0, 0, err
+				}
+				if !written {
 					limitReached = true
 					break
 				}
-				if _, err := writer.Write(encoded); err != nil {
-					file.Close()
-					return model.ArtifactRef{}, 0, 0, err
-				}
 				records++
-				sourceBytes += int64(len(encoded))
+				sourceBytes = writer.Size()
 				if opts.Progress != nil {
 					opts.Progress(model.ProgressEvent{Operation: "pull", Phase: "capture", Service: "kinesis", Resource: ref.ID, CompletedRecords: records, CompletedBytes: sourceBytes, TotalRecords: maxRecords, TotalBytes: maxBytes, TotalPrecision: "unknown"})
 				}
 			}
-			if limitReached || maxRecords > 0 && records >= maxRecords || maxBytes > 0 && sourceBytes >= maxBytes {
+			if limitReached || maxRecords > 0 && records >= maxRecords {
 				break
 			}
 			iterator.ShardIterator = out.NextShardIterator
 		}
 	}
-	if err := writer.Flush(); err != nil {
-		file.Close()
+	artifact, err := writer.Commit()
+	if err != nil {
 		return model.ArtifactRef{}, 0, 0, err
 	}
-	if err := file.Close(); err != nil {
-		return model.ArtifactRef{}, 0, 0, err
-	}
-	return model.ArtifactRef{Path: filepath.ToSlash(name), SHA256: hex.EncodeToString(hash.Sum(nil)), Size: sourceBytes}, records, sourceBytes, nil
+	return artifact, records, artifact.Size, nil
 }

@@ -135,8 +135,13 @@ func TestPlanIncludesExplicitEventDependencySelectionsWithoutIAM(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(plan.Selected) != 2 || len(plan.RequiredIAMActions) != 1 || plan.RequiredIAMActions[0] != "sts:GetCallerIdentity" {
+	if len(plan.Selected) != 2 || !slices.Contains(plan.RequiredIAMActions, "sts:GetCallerIdentity") {
 		t.Fatalf("plan = %#v", plan)
+	}
+	for _, action := range []string{"sqs:GetQueueUrl", "sqs:ReceiveMessage"} {
+		if slices.Contains(plan.RequiredIAMActions, action) {
+			t.Fatalf("structure-only SQS selection must not require %s: %#v", action, plan.RequiredIAMActions)
+		}
 	}
 }
 
@@ -275,7 +280,7 @@ func TestPlanRejectsUnknownFixtureProfileBeforeOpeningSource(t *testing.T) {
 	p.Source.Region = "eu-west-1"
 
 	_, err := service.PlanWithOptions(context.Background(), p, PlanOptions{FixtureProfile: "missing"})
-	if err == nil || !strings.Contains(err.Error(), "unknown fixture profile") {
+	if !errors.Is(err, config.ErrUnknownFixtureProfile) {
 		t.Fatalf("PlanWithOptions() error = %v", err)
 	}
 	if f.calls != 0 {
@@ -292,7 +297,7 @@ func TestPullRejectsUnknownFixtureProfileBeforeSourceOrCheckpointCreation(t *tes
 	workDir := filepath.Join(t.TempDir(), "captures")
 
 	_, err := service.PullWithOptions(context.Background(), p, t.TempDir(), "", "", PullOptions{WorkDir: workDir, FixtureProfile: "missing"})
-	if err == nil || !strings.Contains(err.Error(), "unknown fixture profile") {
+	if !errors.Is(err, config.ErrUnknownFixtureProfile) {
 		t.Fatalf("PullWithOptions() error = %v", err)
 	}
 	if f.calls != 0 {

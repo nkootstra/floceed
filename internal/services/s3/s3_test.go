@@ -565,7 +565,7 @@ func TestGovernedS3CaptureCheckpointIncludesPolicyIdentity(t *testing.T) {
 	changed := opts
 	changed.Governance = newPolicy("different safe value")
 	err := New(client).captureObjects(context.Background(), "assets", &Bucket{Name: "assets"}, newSnapshot(), changed)
-	if err == nil || !strings.Contains(err.Error(), "incompatible S3 capture checkpoint") {
+	if err == nil || !errors.Is(err, ErrCheckpointIncompatible) {
 		t.Fatalf("changed-policy error = %v", err)
 	}
 }
@@ -710,8 +710,9 @@ func TestUngovernedS3DiskPreflightRejectsSourceSizeBeforeReadingBodies(t *testin
 	}
 	t.Cleanup(func() { requireS3Available = original })
 	err := New(client).captureObjects(context.Background(), "assets", &Bucket{Name: "assets"}, snapshot, opts)
-	if err == nil || !strings.Contains(err.Error(), "insufficient disk space") {
-		t.Fatalf("error = %v, want insufficient disk space", err)
+	var spaceErr *storage.InsufficientSpaceError
+	if !errors.As(err, &spaceErr) {
+		t.Fatalf("error = %v, want an insufficient disk space error", err)
 	}
 	if client.gets != 0 {
 		t.Fatalf("preflight read %d object bodies", client.gets)
@@ -825,7 +826,7 @@ func TestFullS3CaptureRejectsChangedCaptureOptions(t *testing.T) {
 	}
 	boundedOpts := model.CaptureOptions{Mode: "bounded", Limits: model.DataLimits{MaxObjects: 1, MaxObjectBytes: 1, MaxTotalBytes: 1}, ArtifactDirectory: fullOpts.ArtifactDirectory, CheckpointDirectory: fullOpts.CheckpointDirectory, Overwrite: "if-different"}
 	err := New(client).captureObjects(context.Background(), "assets", &bucket, newSnapshot(), boundedOpts)
-	if err == nil || !strings.Contains(err.Error(), "incompatible S3 capture checkpoint") {
+	if err == nil || !errors.Is(err, ErrCheckpointIncompatible) {
 		t.Fatalf("changed-options error = %v", err)
 	}
 }

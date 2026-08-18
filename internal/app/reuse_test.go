@@ -17,6 +17,7 @@ import (
 	"github.com/nkootstra/floceed/internal/captureledger"
 	"github.com/nkootstra/floceed/internal/catalog"
 	"github.com/nkootstra/floceed/internal/config"
+	inspection "github.com/nkootstra/floceed/internal/inspect"
 	"github.com/nkootstra/floceed/internal/model"
 )
 
@@ -160,10 +161,15 @@ func TestPullCombinesReusedAndFreshArtifactsInOneBundle(t *testing.T) {
 	if result.Receipt == nil || len(result.Receipt.Resources) != 2 {
 		t.Fatalf("mixed reuse receipt = %#v", result.Receipt)
 	}
-	if got := result.Receipt.Resources[0].Units; len(got) != 1 || got[0].Outcome != "reused" || got[0].Reason != "reused" || got[0].Generation == "" || got[0].PreviousGeneration == "" {
+	changes := make(map[string]inspection.ResourceChange, len(result.Receipt.Resources))
+	for _, change := range result.Receipt.Resources {
+		key := change.Resource.Service + "/" + change.Resource.ID
+		changes[key] = change
+	}
+	if got := changes["s3/assets"].Units; len(got) != 1 || got[0].Outcome != "reused" || got[0].Reason != "reused" || got[0].Generation == "" || got[0].PreviousGeneration == "" {
 		t.Fatalf("reused unit decisions = %#v", got)
 	}
-	if got := result.Receipt.Resources[1].Units; len(got) != 1 || got[0].Outcome != "refreshed" || got[0].Reason != "source_content_changed" {
+	if got := changes["s3/uploads"].Units; len(got) != 1 || got[0].Outcome != "refreshed" || got[0].Reason != "source_content_changed" {
 		t.Fatalf("refreshed unit decisions = %#v", got)
 	}
 	firstJSON, err := json.Marshal(result.Receipt)

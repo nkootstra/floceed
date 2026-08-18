@@ -4,9 +4,23 @@ import (
 	"context"
 	"testing"
 
+	"github.com/aws/aws-sdk-go-v2/service/sfn"
+	"github.com/aws/aws-sdk-go-v2/service/sfn/types"
 	"github.com/nkootstra/floceed/internal/config"
 	"github.com/nkootstra/floceed/internal/model"
 )
+
+type fakeClient struct {
+	describe func(context.Context, *sfn.DescribeStateMachineInput, ...func(*sfn.Options)) (*sfn.DescribeStateMachineOutput, error)
+}
+
+func (f fakeClient) DescribeStateMachine(ctx context.Context, in *sfn.DescribeStateMachineInput, opts ...func(*sfn.Options)) (*sfn.DescribeStateMachineOutput, error) {
+	return f.describe(ctx, in, opts...)
+}
+
+func (f fakeClient) ListTagsForResource(context.Context, *sfn.ListTagsForResourceInput, ...func(*sfn.Options)) (*sfn.ListTagsForResourceOutput, error) {
+	return &sfn.ListTagsForResourceOutput{}, nil
+}
 
 func TestPlanAndCaptureAreStructureOnly(t *testing.T) {
 	project := config.Project{Resources: config.Resources{StateMachines: []config.StateMachineResource{{Name: "orders", ARN: "arn:aws:states:eu-west-1:123456789012:stateMachine:orders"}}}}
@@ -23,5 +37,29 @@ func TestPlanAndCaptureAreStructureOnly(t *testing.T) {
 	}
 	if err := (model.Manifest{SchemaVersion: model.CurrentManifestSchemaVersion, Snapshots: []model.Snapshot{*snapshot}}).Validate(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestCaptureWithoutLoggingConfiguration guards against a nil-pointer panic:
+// LoggingConfiguration is a pointer and a state machine without logging config
+// must capture its topology without dereferencing it.
+func TestCaptureWithoutLoggingConfiguration(t *testing.T) {
+	ref := model.ResourceRef{Service: "stepfunctions", Type: "state_machine", ID: "orders", ARN: "arn:aws:states:eu-west-1:123456789012:stateMachine:orders"}
+	adapter := New(fakeClient{describe: func(context.Context, *sfn.DescribeStateMachineInput, ...func(*sfn.Options)) (*sfn.DescribeStateMachineOutput, error) {
+		return &sfn.DescribeStateMachineOutput{
+			Type: types.StateMachineTypeStandard,
+			// LoggingConfiguration intentionally left nil.
+		}, nil
+	}})
+	snapshot, err := adapter.Capture(context.Background(), model.SourceScope{}, ref, model.CaptureOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	structure, err := model.DecodeStructure[map[string]any](snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := structure["logging_level"]; ok {
+		t.Fatal("logging_level must be absent when the state machine has no logging configuration")
 	}
 }

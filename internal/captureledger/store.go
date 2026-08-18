@@ -385,26 +385,6 @@ func requireRegularSource(root, relative string) error {
 	return nil
 }
 
-func copyExclusive(dst, src string) error {
-	in, err := openNoFollow(src)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-	out, err := os.OpenFile(dst, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o400)
-	if err != nil {
-		return err
-	}
-	_, copyErr := io.Copy(out, in)
-	syncErr := out.Sync()
-	closeErr := out.Close()
-	if copyErr != nil || syncErr != nil || closeErr != nil {
-		_ = os.Remove(dst)
-		return errors.Join(copyErr, syncErr, closeErr)
-	}
-	return nil
-}
-
 func copyOpenVerified(dst string, in *os.File, expected Artifact) error {
 	out, err := os.OpenFile(dst, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o400)
 	if err != nil {

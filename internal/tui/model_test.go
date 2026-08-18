@@ -121,6 +121,31 @@ func TestEscapingNarrowedResourceFilterClampsCursor(t *testing.T) {
 	}
 }
 
+func TestStaleAsyncResultDoesNotHijackNavigation(t *testing.T) {
+	m := NewModel(fakeBackend{}, Options{})
+	m.profile, m.region, m.identity = "dev", "eu-west-1", awsconfig.Identity{AccountID: "123456789012"}
+	m.screen = ScreenServices
+
+	// Enter starts a scan from ScreenServices; Esc then backs out to Identity
+	// while the scan is still in flight.
+	m = press(t, m, "enter")
+	if m.Screen() != ScreenServices {
+		t.Fatalf("scan did not start from services: screen=%s", m.Screen())
+	}
+	m = press(t, m, "esc")
+	if m.Screen() != ScreenIdentity {
+		t.Fatalf("esc did not leave services: screen=%s", m.Screen())
+	}
+
+	// A stale scan result must not yank the user forward to Resources.
+	m = update(t, m, scanFinishedMsg{result: app.ScanResult{
+		Resources: []model.ResourceSummary{{Ref: model.ResourceRef{Service: "s3", ID: "assets"}, Name: "assets"}},
+	}})
+	if m.Screen() != ScreenIdentity {
+		t.Fatalf("stale scan result hijacked navigation to %s", m.Screen())
+	}
+}
+
 func TestRescanDropsDeselectedServiceStateAndPreservesSelectedServiceResources(t *testing.T) {
 	m := NewModel(fakeBackend{}, Options{})
 	m.screen = ScreenResources
