@@ -112,16 +112,75 @@ reads only the selected bucket's configuration and permitted object data.
 
 ## Data policies
 
-S3, DynamoDB, and Kinesis accept a `data` block with `enabled` and a `mode` of
-`bounded` or `full`. SQS supports `enabled` with `bounded` mode. Bounded policies should set service-specific
-limits such as `max_objects`, `max_items`, `max_records`, or `max_messages`.
-Full mode removes those bounded limits and requires an intentionally increased
-`target.hook_timeout_seconds`.
+Omit `data` to capture structure and service metadata only. When a `data` block
+is present, `enabled: true` requests payload capture; `enabled: false` keeps the
+resource selection but disables payload capture. `mode` defaults to `bounded`.
+Bounded mode requires positive service-specific limits. Full mode removes those
+bounded limits and is available only for S3, DynamoDB, and Kinesis. Any full-mode
+project must set `target.hook_timeout_seconds` above the default because replay
+and readiness can take substantially longer.
 
-S3 additionally supports `prefixes`, `max_object_bytes`, `max_total_bytes`,
-and `overwrite` (`if-different`, `always`, or `never`). DynamoDB supports
-`preserve_provisioned`, `max_items`, `max_pages`, and `gzip`. Kinesis supports
-`max_records` and `max_bytes`; SQS supports `max_messages` and `max_bytes`.
+| Service | `data` fields | Meaning and constraints |
+|---|---|---|
+| S3 | `enabled`, `mode`, `prefixes`, `max_objects`, `max_object_bytes`, `max_total_bytes`, `overwrite` | `prefixes` filters object keys. In bounded mode all three limits are required. `overwrite` is `if-different` (default), `always`, or `never`. In full mode omit the three bounded limits; prefixes and overwrite still apply. |
+| DynamoDB | `enabled`, `mode`, `max_items`, `max_pages`, `gzip` | Bounded mode requires positive item and page limits. Full mode omits `max_items` and `max_pages`. `gzip` controls dataset compression and defaults to enabled. `preserve_provisioned` is a resource field, not part of `data`, and preserves the table's provisioned capacity when true. |
+| Kinesis | `enabled`, `mode`, `max_records`, `max_bytes` | Bounded mode uses both limits. Full mode omits them. Records are captured in deterministic shard order; this does not replay live stream traffic. |
+| SQS | `enabled`, `mode`, `max_messages`, `max_bytes` | Only `bounded` mode is supported. The limits bound the number and total payload size of messages read; historical messages are not a durable queue history and are not replayed as live traffic. |
+| SNS | no `data` fields | Structure-only: topic configuration, subscriptions, and compatibility metadata are captured; published message history is not read. |
+| EventBridge | no `data` fields | Structure-only: event-bus/rule topology and compatibility metadata are captured; event history is not read. |
+| Lambda | no `data` fields | Structure-only: function configuration and compatibility metadata are captured; invocation payloads and logs are not read. |
+| Secrets Manager | no `data` fields | Metadata-only. Secret values are never read. |
+| SSM Parameter Store | `with_decryption` on the resource | Metadata-only. Parameter values are never read; `with_decryption` is retained for configuration compatibility but does not authorize or enable value capture. |
+| API Gateway | no `data` fields | Structure-only: API metadata, routes, and integrations are captured; requests, deployments, stages, domains, authorizers, and exports are not. |
+| Step Functions | no `data` fields | Structure-only: state-machine metadata, logging/tracing settings, and tags are captured; definitions, executions, inputs, outputs, and history are not. |
+| CloudWatch Logs | no `data` fields | Structure-only: log-group retention/class/size metadata and tags are captured; log events, subscriptions, metric filters, and historical data are not. |
+
+For example, a bounded S3 policy with every S3-specific field is:
+
+```yaml
+data:
+  enabled: true
+  mode: bounded
+  prefixes:
+    - fixtures/
+  max_objects: 100
+  max_object_bytes: 10485760
+  max_total_bytes: 104857600
+  overwrite: if-different
+```
+
+The equivalent full-mode policies deliberately omit bounded limits:
+
+```yaml
+resources:
+  dynamodb:
+    - name: staging-records
+      preserve_provisioned: true
+      data:
+        enabled: true
+        mode: full
+        gzip: true
+  kinesis:
+    - name: staging-events
+      arn: arn:aws:kinesis:eu-west-1:123456789012:stream/staging-events
+      data:
+        enabled: true
+        mode: full
+```
+
+For SQS, keep the policy bounded:
+
+```yaml
+resources:
+  sqs:
+    - name: staging-events
+      arn: arn:aws:sqs:eu-west-1:123456789012:staging-events
+      data:
+        enabled: true
+        mode: bounded
+        max_messages: 100
+        max_bytes: 16777216
+```
 
 ## Structure-only examples
 
