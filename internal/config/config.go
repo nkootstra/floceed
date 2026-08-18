@@ -260,6 +260,20 @@ func Decode(r io.Reader) (Project, error) {
 	return p, nil
 }
 
+// Encode serializes a validated project using the canonical YAML contract.
+// Callers should provide a source region before encoding a new project.
+func Encode(project Project) ([]byte, error) {
+	project.applyDefaults()
+	if err := project.Validate(); err != nil {
+		return nil, err
+	}
+	data, err := yaml.Marshal(project)
+	if err != nil {
+		return nil, fmt.Errorf("encode floceed project: %w", err)
+	}
+	return data, nil
+}
+
 func NewProject() Project {
 	return Project{
 		SchemaVersion: CurrentSchemaVersion,

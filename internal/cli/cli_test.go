@@ -29,6 +29,97 @@ func TestRootHelpUsesFloceedName(t *testing.T) {
 	}
 }
 
+func TestInitCreatesMinimalProjectWithoutAWS(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "floceed.yaml")
+	var out bytes.Buffer
+	cmd := New(Options{Stdout: &out, Stderr: &bytes.Buffer{}})
+	cmd.SetArgs([]string{"init", "--project", path, "--region", "eu-west-1"})
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := config.Decode(bytes.NewReader(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if project.Source.Region != "eu-west-1" || project.Target.Port != config.DefaultPort || !strings.Contains(out.String(), path) {
+		t.Fatalf("project/output = %#v, %s", project, out.String())
+	}
+}
+
+func TestInitRefusesOverwriteUnlessForced(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "floceed.yaml")
+	original := []byte("existing\n")
+	if err := os.WriteFile(path, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := New(Options{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}})
+	cmd.SetArgs([]string{"init", "--project", path, "--region", "eu-west-1"})
+	err := cmd.ExecuteContext(context.Background())
+	if err == nil || ExitCode(err) != 6 || !strings.Contains(err.Error(), "file exists") {
+		t.Fatalf("overwrite error = %v", err)
+	}
+	got, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if !bytes.Equal(got, original) {
+		t.Fatal("existing project changed without --force")
+	}
+	cmd = New(Options{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}})
+	cmd.SetArgs([]string{"init", "--project", path, "--region", "eu-west-1", "--force"})
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	got, readErr = os.ReadFile(path)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if bytes.Equal(got, original) {
+		t.Fatal("--force did not replace project")
+	}
+}
+
+func TestInitRequiresRegion(t *testing.T) {
+	cmd := New(Options{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}})
+	cmd.SetArgs([]string{"init"})
+	if err := cmd.ExecuteContext(context.Background()); err == nil || ExitCode(err) != 2 {
+		t.Fatalf("region error = %v", err)
+	}
+}
+
+func TestInitJSONUsesStableEnvelope(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "floceed.yaml")
+	var out bytes.Buffer
+	cmd := New(Options{Stdout: &out, Stderr: &bytes.Buffer{}})
+	cmd.SetArgs([]string{"init", "--project", path, "--region", "eu-west-1", "--output", "json"})
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var envelope Envelope
+	if err := json.Unmarshal(out.Bytes(), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if envelope.Command != "init" || envelope.Status != StatusSuccess {
+		t.Fatalf("envelope = %#v", envelope)
+	}
+}
+
+func TestInitReportsMissingParentDirectory(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "missing", "floceed.yaml")
+	cmd := New(Options{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}})
+	cmd.SetArgs([]string{"init", "--project", path, "--region", "eu-west-1"})
+	if err := cmd.ExecuteContext(context.Background()); err == nil || ExitCode(err) != 6 {
+		t.Fatalf("parent error = %v", err)
+	}
+}
+
 func TestCapabilitiesJSONIsOfflineAndStable(t *testing.T) {
 	var out bytes.Buffer
 	cmd := New(Options{Version: "v0.11.0", Stdout: &out, Stderr: &bytes.Buffer{}})

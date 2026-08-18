@@ -52,6 +52,15 @@ resources:
   sns:
     - name: floceed-example-events
       arn: arn:aws:sns:eu-west-1:123456789012:floceed-example-events
+  api_gateway:
+    - name: floceed-example-api
+      arn: arn:aws:apigateway:eu-west-1::/apis/floceed-example-api
+  step_functions:
+    - name: floceed-example-workflow
+      arn: arn:aws:states:eu-west-1:123456789012:stateMachine:floceed-example-workflow
+  cloudwatch_logs:
+    - name: /floceed/example
+      arn: arn:aws:logs:eu-west-1:123456789012:log-group:/floceed/example:*
 
 capture:
   allow_partial_data: false

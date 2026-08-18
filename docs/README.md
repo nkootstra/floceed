@@ -91,7 +91,8 @@ same secret manager used by your team, not through Git or shell history. See
 
 Use `--output json` for a stable command envelope and `--no-color` (or
 `NO_COLOR=1`) for plain text. Non-terminal stdout never receives TUI control
-sequences. Start from [the complete example project](../examples/basic/floceed.yaml).
+sequences. New projects can start with `floceed init --region eu-west-1`; see
+the [configuration reference](configuration.md) and [complete example project](../examples/basic/floceed.yaml).
 
 `scan` inventories AWS. `plan` reads AWS but neither writes generated files nor
 starts containers. `pull` captures and atomically installs a new bundle.
@@ -168,10 +169,13 @@ check results so consumers can see exactly which prerequisite failed.
 ### Large datasets and progress
 
 Data capture remains bounded by default. Set `data.mode: full` on an individual
-S3 bucket or DynamoDB table to opt into a resumable full export. Full mode
-requires an explicit `target.hook_timeout_seconds` greater than 300 because
-replaying a large bundle can take hours. S3 prefixes and overwrite policies
-still apply; bounded count and byte limits must be omitted in full mode.
+S3 bucket, DynamoDB table, or Kinesis stream to opt into a resumable full
+export. SQS supports bounded capture only. Full mode requires an explicit
+`target.hook_timeout_seconds` greater than 300 because replaying a large bundle
+can take hours. S3 prefixes and overwrite policies still apply; bounded count
+and byte limits must be omitted in full mode. The complete field-by-field
+reference, including `enabled`, every service-specific limit, and the
+structure-only services, is in [`configuration.md`](configuration.md#data-policies).
 
 ```yaml
 target:
