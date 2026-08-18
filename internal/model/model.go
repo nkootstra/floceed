@@ -479,6 +479,24 @@ func validateSnapshot(snapshot Snapshot) error {
 		if snapshot.Resource.ARN != "" && snapshot.Resource.ARN != value.ARN {
 			return fmt.Errorf("Lambda structure must match resource ARN: %w", ErrValidation)
 		}
+	case "secretsmanager", "ssm":
+		var value struct {
+			ARN string `json:"arn"`
+		}
+		if err := json.Unmarshal(snapshot.Structure, &value); err != nil || value.ARN == "" {
+			return fmt.Errorf("%s structure requires arn: %w", snapshot.Service, ErrValidation)
+		}
+		parts := strings.Split(value.ARN, ":")
+		expected := snapshot.Resource.ID
+		if snapshot.Service == "ssm" {
+			expected = "parameter" + expected
+		}
+		if len(parts) != 6 || parts[0] != "arn" || parts[2] != snapshot.Service || !snapshotAccountID.MatchString(parts[4]) || (snapshot.Service == "ssm" && parts[5] != expected) || (snapshot.Service == "secretsmanager" && !strings.HasPrefix(parts[5], expected)) {
+			return fmt.Errorf("%s structure ARN must match resource identity: %w", snapshot.Service, ErrValidation)
+		}
+		if snapshot.Resource.ARN != "" && snapshot.Resource.ARN != value.ARN {
+			return fmt.Errorf("%s structure must match resource ARN: %w", snapshot.Service, ErrValidation)
+		}
 	default:
 		return fmt.Errorf("unsupported snapshot service %q: %w", snapshot.Service, ErrValidation)
 	}

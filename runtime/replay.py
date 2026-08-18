@@ -169,6 +169,13 @@ def validate_snapshots(snapshots: list, manifest_version: int = 1) -> None:
             arn = structure["arn"].split(":")
             if len(arn) != 7 or arn[0] != "arn" or arn[2] != "lambda" or arn[5] != "function" or arn[6] != resource.get("id"):
                 fail(f"snapshot {index} Lambda structure ARN must match resource identity")
+        elif service in {"secretsmanager", "ssm"}:
+            if not isinstance(structure.get("arn"), str) or not structure["arn"]:
+                fail(f"snapshot {index} {service} structure requires arn")
+            arn = structure["arn"].split(":")
+            expected = resource.get("id") if service == "secretsmanager" else "parameter" + resource.get("id")
+            if len(arn) != 6 or arn[0] != "arn" or arn[2] != service or (service == "ssm" and arn[5] != expected) or (service == "secretsmanager" and not arn[5].startswith(expected)):
+                fail(f"snapshot {index} {service} structure ARN must match resource identity")
         else:
             fail(f"snapshot {index} service {service!r} is unsupported")
         if manifest_version >= 2:

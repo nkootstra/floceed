@@ -38,9 +38,11 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/internal/s3shared v1.19.37 // indirect
 	github.com/aws/aws-sdk-go-v2/service/kinesis v1.46.6 // indirect
 	github.com/aws/aws-sdk-go-v2/service/lambda v1.101.4 // indirect
+	github.com/aws/aws-sdk-go-v2/service/secretsmanager v1.44.6 // indirect
 	github.com/aws/aws-sdk-go-v2/service/signin v1.5.5 // indirect
 	github.com/aws/aws-sdk-go-v2/service/sns v1.42.6 // indirect
 	github.com/aws/aws-sdk-go-v2/service/sqs v1.46.6 // indirect
+	github.com/aws/aws-sdk-go-v2/service/ssm v1.73.6 // indirect
 	github.com/aws/aws-sdk-go-v2/service/sso v1.33.5 // indirect
 	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.38.5 // indirect
 	github.com/cenkalti/backoff/v4 v4.3.0 // indirect

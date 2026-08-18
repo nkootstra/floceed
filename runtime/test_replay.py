@@ -178,6 +178,14 @@ class ReplayValidationTests(unittest.TestCase):
         self.write_json("bundle/manifest.json", self.manifest)
         self.assertEqual("lambda", replay.validate_bundle()["snapshots"][0]["service"])
 
+    def test_accepts_redacted_secret_and_parameter_metadata(self):
+        self.manifest["snapshots"] = [
+            {"resource": {"service": "secretsmanager", "type": "secret", "id": "prod/app"}, "service": "secretsmanager", "structure_version": 1, "structure": {"name": "prod/app", "arn": "arn:aws:secretsmanager:eu-west-1:123456789012:prod/app", "value_captured": False}},
+            {"resource": {"service": "ssm", "type": "parameter", "id": "/prod/app/url"}, "service": "ssm", "structure_version": 1, "structure": {"name": "/prod/app/url", "arn": "arn:aws:ssm:eu-west-1:123456789012:parameter/prod/app/url", "value_captured": False}},
+        ]
+        self.write_json("bundle/manifest.json", self.manifest)
+        self.assertEqual(["secretsmanager", "ssm"], [snapshot["service"] for snapshot in replay.validate_bundle()["snapshots"]])
+
     def test_fifo_topic_creation_preserves_fifo_attribute(self):
         class FakeSNS:
             def __init__(self):

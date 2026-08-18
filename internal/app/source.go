@@ -11,8 +11,10 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/kinesis"
 	"github.com/aws/aws-sdk-go-v2/service/lambda"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
 	"github.com/aws/aws-sdk-go-v2/service/sns"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
+	"github.com/aws/aws-sdk-go-v2/service/ssm"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/nkootstra/floceed/internal/awsconfig"
 	"github.com/nkootstra/floceed/internal/catalog"
@@ -22,8 +24,10 @@ import (
 	kinesisservice "github.com/nkootstra/floceed/internal/services/kinesis"
 	lambdaservice "github.com/nkootstra/floceed/internal/services/lambda"
 	s3service "github.com/nkootstra/floceed/internal/services/s3"
+	secretsservice "github.com/nkootstra/floceed/internal/services/secretsmanager"
 	snsservice "github.com/nkootstra/floceed/internal/services/sns"
 	sqsservice "github.com/nkootstra/floceed/internal/services/sqs"
+	ssmservice "github.com/nkootstra/floceed/internal/services/ssm"
 )
 
 type Source struct {
@@ -61,15 +65,17 @@ func (AWSFactory) Open(ctx context.Context, req SourceRequest) (Source, error) {
 	snsClient := sns.NewFromConfig(cfg)
 	eventsClient := eventbridge.NewFromConfig(cfg)
 	lambdaClient := lambda.NewFromConfig(cfg)
-	registry, err := newAWSRegistry(s3client, ddbclient, kinesisClient, sqsClient, snsClient, eventsClient, lambdaClient, req.S3Names)
+	secretsClient := secretsmanager.NewFromConfig(cfg)
+	ssmClient := ssm.NewFromConfig(cfg)
+	registry, err := newAWSRegistry(s3client, ddbclient, kinesisClient, sqsClient, snsClient, eventsClient, lambdaClient, secretsClient, ssmClient, req.S3Names)
 	if err != nil {
 		return Source{}, err
 	}
 	return Source{Scope: model.SourceScope{Profile: req.Profile, AccountID: identity.AccountID, Region: req.Region}, Identity: identity, Registry: registry}, nil
 }
 
-func newAWSRegistry(s3client s3service.Client, ddbclient ddbservice.Client, kinesisClient kinesisservice.Client, sqsClient sqsservice.Client, snsClient snsservice.Client, eventsClient *eventbridge.Client, lambdaClient *lambda.Client, s3Names []string) (*catalog.Registry, error) {
-	return catalog.New(s3service.NewFiltered(s3client, s3Names), ddbservice.New(ddbclient), sqsservice.New(sqsClient), snsservice.New(snsClient), kinesisservice.New(kinesisClient), eventbridgeservice.New(eventsClient), lambdaservice.New(lambdaClient))
+func newAWSRegistry(s3client s3service.Client, ddbclient ddbservice.Client, kinesisClient kinesisservice.Client, sqsClient sqsservice.Client, snsClient snsservice.Client, eventsClient *eventbridge.Client, lambdaClient *lambda.Client, secretsClient *secretsmanager.Client, ssmClient *ssm.Client, s3Names []string) (*catalog.Registry, error) {
+	return catalog.New(s3service.NewFiltered(s3client, s3Names), ddbservice.New(ddbclient), sqsservice.New(sqsClient), snsservice.New(snsClient), kinesisservice.New(kinesisClient), eventbridgeservice.New(eventsClient), lambdaservice.New(lambdaClient), secretsservice.New(secretsClient), ssmservice.New(ssmClient))
 }
 
 // Identity resolves the standard AWS configuration chain and confirms the
