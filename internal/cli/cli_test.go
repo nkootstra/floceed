@@ -61,6 +61,7 @@ type fakeService struct {
 	downCalled     bool
 	downDir        string
 	downErr        error
+	resetCalled    bool
 }
 
 func (f *fakeService) InspectWithOptions(_ context.Context, _ config.Project, _ string, options app.InspectOptions) (inspection.Inspection, error) {
@@ -142,6 +143,14 @@ func TestDownDelegatesAfterConfirmation(t *testing.T) {
 	}
 	if !fake.downCalled || fake.downDir != filepath.Dir(projectFile) || !strings.Contains(out.String(), "preserved_data") {
 		t.Fatalf("down delegation/output: called=%v dir=%q output=%q", fake.downCalled, fake.downDir, out.String())
+	}
+}
+
+func TestResetRequiresExplicitConfirmation(t *testing.T) {
+	cmd := New(Options{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}, App: &fakeService{}})
+	cmd.SetArgs([]string{"reset", "--project", writeProject(t)})
+	if err := cmd.ExecuteContext(context.Background()); err == nil || !strings.Contains(err.Error(), "--yes") {
+		t.Fatalf("reset without confirmation error = %v", err)
 	}
 }
 
@@ -544,6 +553,10 @@ func (f *fakeService) Down(_ context.Context, _ config.Project, dir string) erro
 	f.downCalled = true
 	f.downDir = dir
 	return f.downErr
+}
+func (f *fakeService) Reset(context.Context, config.Project, string) error {
+	f.resetCalled = true
+	return nil
 }
 
 func writeProject(t *testing.T) string {
