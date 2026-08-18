@@ -1,6 +1,9 @@
 package capabilities
 
-import "github.com/nkootstra/floceed/internal/model"
+import (
+	"github.com/nkootstra/floceed/internal/config"
+	"github.com/nkootstra/floceed/internal/model"
+)
 
 const SchemaVersion = 1
 
@@ -28,7 +31,7 @@ func Current(toolVersion string) Report {
 		manifestSchemas = append(manifestSchemas, schema)
 	}
 	return Report{
-		SchemaVersion: SchemaVersion, ToolVersion: toolVersion, FlociVersion: "1.6.0",
+		SchemaVersion: SchemaVersion, ToolVersion: toolVersion, FlociVersion: config.DefaultFlociVersion,
 		ManifestSchemas:         manifestSchemas,
 		CompatibilityCommitment: "pre-1.0; schema and CLI contracts may evolve with release notes",
 		Services: []ServiceCapability{
