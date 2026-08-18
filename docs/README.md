@@ -355,6 +355,12 @@ deployments, stages, custom domains, authorizers, or API exports yet; replay
 keeps this topology available for local dependency documentation without
 pretending to reproduce the live gateway.
 
+Explicitly selected Step Functions state machines support structure-only
+capture of state-machine metadata, logging/tracing settings, and tags. State
+machine definitions, executions, inputs, outputs, and execution history are
+not captured or replayed; definitions may contain application data and remain
+outside the safe topology contract.
+
 Secrets Manager and SSM Parameter Store support is metadata-only. Floceed
 records names, ARNs, and non-sensitive metadata, never calls a value-fetching
 API, and never writes secret or parameter values to bundles, checkpoints, or

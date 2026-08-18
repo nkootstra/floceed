@@ -115,8 +115,9 @@ func NewModel(backend Backend, opts Options) Model {
 			{Name: "secretsmanager", DisplayName: "AWS Secrets Manager", Support: model.SupportStructureOnly},
 			{Name: "ssm", DisplayName: "AWS SSM Parameter Store", Support: model.SupportStructureOnly},
 			{Name: "apigateway", DisplayName: "Amazon API Gateway", Support: model.SupportStructureOnly},
+			{Name: "stepfunctions", DisplayName: "AWS Step Functions", Support: model.SupportStructureOnly},
 		},
-		serviceSelected: map[string]bool{"s3": true, "dynamodb": true, "kinesis": false, "events": false, "lambda": false, "secretsmanager": false, "ssm": false, "apigateway": false}, selected: map[string]bool{},
+		serviceSelected: map[string]bool{"s3": true, "dynamodb": true, "kinesis": false, "events": false, "lambda": false, "secretsmanager": false, "ssm": false, "apigateway": false, "stepfunctions": false}, selected: map[string]bool{},
 		dataEnabled: map[string]bool{}, dataMode: map[string]config.DataMode{}, filter: filter, regionInput: region,
 	}
 }
