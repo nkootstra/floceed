@@ -31,6 +31,17 @@ func TestValidateRejectsParentOutputDirectory(t *testing.T) {
 	}
 }
 
+func TestValidateKinesisStreamARN(t *testing.T) {
+	project := Project{SchemaVersion: CurrentSchemaVersion, Source: Source{Region: "eu-west-1"}, Resources: Resources{Kinesis: []KinesisResource{{Name: "events", ARN: "arn:aws:kinesis:eu-west-1:123456789012:stream/events"}}}}
+	if err := project.Validate(); err != nil {
+		t.Fatalf("valid Kinesis stream rejected: %v", err)
+	}
+	project.Resources.Kinesis[0].ARN = "arn:aws:kinesis:eu-west-1:123456789012:stream/other"
+	if err := project.Validate(); err == nil {
+		t.Fatal("mismatched Kinesis stream ARN accepted")
+	}
+}
+
 func TestValidateRejectsOutputDirectoryResolvingToProjectRoot(t *testing.T) {
 	for _, directory := range []string{".", "./", "subdir/.."} {
 		c := Project{SchemaVersion: 1, Source: Source{Region: "eu-west-1"}, Output: Output{Directory: directory}}

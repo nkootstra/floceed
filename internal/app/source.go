@@ -7,12 +7,14 @@ import (
 	"sync"
 
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	"github.com/aws/aws-sdk-go-v2/service/kinesis"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/nkootstra/floceed/internal/awsconfig"
 	"github.com/nkootstra/floceed/internal/catalog"
 	"github.com/nkootstra/floceed/internal/model"
 	ddbservice "github.com/nkootstra/floceed/internal/services/dynamodb"
+	kinesisservice "github.com/nkootstra/floceed/internal/services/kinesis"
 	s3service "github.com/nkootstra/floceed/internal/services/s3"
 	snsservice "github.com/nkootstra/floceed/internal/services/sns"
 	sqsservice "github.com/nkootstra/floceed/internal/services/sqs"
@@ -48,15 +50,16 @@ func (AWSFactory) Open(ctx context.Context, req SourceRequest) (Source, error) {
 	}
 	s3client := s3.NewFromConfig(cfg)
 	ddbclient := dynamodb.NewFromConfig(cfg)
-	registry, err := newAWSRegistry(s3client, ddbclient, req.S3Names)
+	kinesisClient := kinesis.NewFromConfig(cfg)
+	registry, err := newAWSRegistry(s3client, ddbclient, kinesisClient, req.S3Names)
 	if err != nil {
 		return Source{}, err
 	}
 	return Source{Scope: model.SourceScope{Profile: req.Profile, AccountID: identity.AccountID, Region: req.Region}, Identity: identity, Registry: registry}, nil
 }
 
-func newAWSRegistry(s3client s3service.Client, ddbclient ddbservice.Client, s3Names []string) (*catalog.Registry, error) {
-	return catalog.New(s3service.NewFiltered(s3client, s3Names), ddbservice.New(ddbclient), sqsservice.New(), snsservice.New())
+func newAWSRegistry(s3client s3service.Client, ddbclient ddbservice.Client, kinesisClient kinesisservice.Client, s3Names []string) (*catalog.Registry, error) {
+	return catalog.New(s3service.NewFiltered(s3client, s3Names), ddbservice.New(ddbclient), sqsservice.New(), snsservice.New(), kinesisservice.New(kinesisClient))
 }
 
 // Identity resolves the standard AWS configuration chain and confirms the

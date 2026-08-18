@@ -109,8 +109,9 @@ func NewModel(backend Backend, opts Options) Model {
 		profile: opts.Profile, region: opts.Region, services: []model.ServiceDescriptor{
 			{Name: "s3", DisplayName: "Amazon S3", Support: model.SupportPartial},
 			{Name: "dynamodb", DisplayName: "Amazon DynamoDB", Support: model.SupportPartial},
+			{Name: "kinesis", DisplayName: "Amazon Kinesis", Support: model.SupportStructureOnly},
 		},
-		serviceSelected: map[string]bool{"s3": true, "dynamodb": true}, selected: map[string]bool{},
+		serviceSelected: map[string]bool{"s3": true, "dynamodb": true, "kinesis": false}, selected: map[string]bool{},
 		dataEnabled: map[string]bool{}, dataMode: map[string]config.DataMode{}, filter: filter, regionInput: region,
 	}
 }
