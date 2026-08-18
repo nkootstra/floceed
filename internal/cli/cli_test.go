@@ -97,7 +97,7 @@ func TestStatusUsesRuntimeInspectionAndStableText(t *testing.T) {
 	if err := cmd.ExecuteContext(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if !fake.inspected || !fake.inspectOptions.Runtime || !strings.Contains(out.String(), "Runtime: ready") {
+	if !fake.inspected || !fake.inspectOptions.Runtime || !strings.Contains(out.String(), "Bundle: valid") || !strings.Contains(out.String(), "Runtime: ready") {
 		t.Fatalf("status output = %q, options = %#v", out.String(), fake.inspectOptions)
 	}
 }

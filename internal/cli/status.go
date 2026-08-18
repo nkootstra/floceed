@@ -1,12 +1,7 @@
 package cli
 
 import (
-	"fmt"
-	"io"
-	"strings"
-
 	"github.com/nkootstra/floceed/internal/app"
-	inspection "github.com/nkootstra/floceed/internal/inspect"
 	"github.com/spf13/cobra"
 )
 
@@ -26,26 +21,11 @@ func statusCommand(service Service) *cobra.Command {
 				return convert(err)
 			}
 			if format == "json" {
-				return emit(cmd, "status", format, result.Runtime, nil)
+				return emit(cmd, "status", format, result, result.Findings)
 			}
-			return writeStatusText(cmd.OutOrStdout(), result.Runtime)
+			return writeInspectionText(cmd.OutOrStdout(), result)
 		},
 	}
 	project.bind(cmd)
 	return cmd
-}
-
-func writeStatusText(w io.Writer, status inspection.Runtime) error {
-	if _, err := fmt.Fprintf(w, "Runtime: %s\n", strings.ReplaceAll(string(status.State), "_", " ")); err != nil {
-		return err
-	}
-	if status.Diagnostic != "" {
-		_, err := fmt.Fprintf(w, "Diagnostic: %s\n", terminalSafe(status.Diagnostic))
-		return err
-	}
-	if len(status.FailedScripts) > 0 {
-		_, err := fmt.Fprintf(w, "Failed scripts: %s\n", joinSafe(status.FailedScripts))
-		return err
-	}
-	return nil
 }
