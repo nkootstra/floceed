@@ -91,6 +91,25 @@ Structure-only and metadata-only services do not fetch historical payloads.
 They preserve topology and compatibility information; they do not imply that
 Floci will recreate live traffic or executions.
 
+Multiple resources of the same service are expressed as additional list items:
+
+```yaml
+resources:
+  s3:
+    - name: orders-assets
+      data:
+        enabled: true
+        mode: bounded
+        prefixes: [fixtures/]
+        max_objects: 100
+    - name: payments-assets
+      # Omit data for structure-only bucket metadata.
+```
+
+The same list-item pattern applies to every resource key. S3 bucket entries
+use bucket names rather than ARNs; Floceed resolves the bucket region and
+reads only the selected bucket's configuration and permitted object data.
+
 ## Data policies
 
 S3, DynamoDB, and Kinesis accept a `data` block with `enabled` and a `mode` of
