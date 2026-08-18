@@ -507,6 +507,20 @@ func validateSnapshot(snapshot Snapshot) error {
 		if snapshot.Resource.ARN != "" && snapshot.Resource.ARN != value.ARN {
 			return fmt.Errorf("API Gateway structure must match resource ARN: %w", ErrValidation)
 		}
+	case "stepfunctions":
+		var value struct {
+			ARN string `json:"arn"`
+		}
+		if err := json.Unmarshal(snapshot.Structure, &value); err != nil || value.ARN == "" {
+			return fmt.Errorf("Step Functions structure requires arn: %w", ErrValidation)
+		}
+		parts := strings.Split(value.ARN, ":")
+		if len(parts) != 7 || parts[0] != "arn" || parts[2] != "states" || parts[5] != "stateMachine" || parts[6] != snapshot.Resource.ID || !snapshotAccountID.MatchString(parts[4]) {
+			return fmt.Errorf("Step Functions structure ARN must match resource identity: %w", ErrValidation)
+		}
+		if snapshot.Resource.ARN != "" && snapshot.Resource.ARN != value.ARN {
+			return fmt.Errorf("Step Functions structure must match resource ARN: %w", ErrValidation)
+		}
 	default:
 		return fmt.Errorf("unsupported snapshot service %q: %w", snapshot.Service, ErrValidation)
 	}

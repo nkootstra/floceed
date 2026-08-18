@@ -181,6 +181,12 @@ def validate_snapshots(snapshots: list, manifest_version: int = 1) -> None:
                 fail(f"snapshot {index} API Gateway structure requires arn")
             if not structure["arn"].endswith(resource.get("id", "")):
                 fail(f"snapshot {index} API Gateway structure ARN must match resource identity")
+        elif service == "stepfunctions":
+            if not isinstance(structure.get("arn"), str) or not structure["arn"].startswith("arn:"):
+                fail(f"snapshot {index} Step Functions structure requires arn")
+            arn = structure["arn"].split(":")
+            if len(arn) != 7 or arn[2] != "states" or arn[5] != "stateMachine" or arn[6] != resource.get("id"):
+                fail(f"snapshot {index} Step Functions structure ARN must match resource identity")
         else:
             fail(f"snapshot {index} service {service!r} is unsupported")
         if manifest_version >= 2:
