@@ -3,6 +3,7 @@ package ssm
 
 import (
 	"context"
+	"fmt"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsSSM "github.com/aws/aws-sdk-go-v2/service/ssm"
 	"github.com/aws/aws-sdk-go-v2/service/ssm/types"
@@ -58,6 +59,9 @@ func (a *Adapter) Capture(ctx context.Context, _ model.SourceScope, ref model.Re
 			structure["version"] = parameter.Version
 			structure["last_modified_date"] = parameter.LastModifiedDate
 			structure["tier"] = string(parameter.Tier)
+		}
+		if len(out.Parameters) == 0 {
+			return nil, fmt.Errorf("SSM parameter %q was not found", ref.ID)
 		}
 	}
 	return model.NewSnapshot(ref, "ssm", structure)
