@@ -1,14 +1,20 @@
 # Basic project
 
-This example selects one bucket and one DynamoDB table. Replace the profile,
-expected account ID, and resource names before running it.
+This example selects one bucket and one DynamoDB table plus fictional
+structure-only service entries. Replace the profile, expected account ID, and
+resource names before running it.
 
 ```bash
+floceed init --region eu-west-1
 floceed plan --project floceed.yaml
 floceed pull --project floceed.yaml
 floceed inspect --project floceed.yaml
 floceed up --project floceed.yaml
 ```
+
+`floceed doctor` defaults to `./floceed.yaml`; use `--project` when the file is
+elsewhere. See [the configuration reference](../../docs/configuration.md) for
+all supported YAML fields and service boundaries.
 
 `pull` creates `.floceed/compose.generated.yaml`, the `ready.d` hooks,
 `runtime/replay.py`, `bundle/manifest.json`, bounded fixture data, and

@@ -91,7 +91,8 @@ same secret manager used by your team, not through Git or shell history. See
 
 Use `--output json` for a stable command envelope and `--no-color` (or
 `NO_COLOR=1`) for plain text. Non-terminal stdout never receives TUI control
-sequences. Start from [the complete example project](../examples/basic/floceed.yaml).
+sequences. New projects can start with `floceed init --region eu-west-1`; see
+the [configuration reference](configuration.md) and [complete example project](../examples/basic/floceed.yaml).
 
 `scan` inventories AWS. `plan` reads AWS but neither writes generated files nor
 starts containers. `pull` captures and atomically installs a new bundle.

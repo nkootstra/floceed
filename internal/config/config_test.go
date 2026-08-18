@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 
@@ -535,5 +536,51 @@ func TestFullDataModeRequiresExplicitReplayTimeoutAndNoBoundedLimits(t *testing.
 	project.Resources.DynamoDB[0].Data.MaxItems = 1
 	if err := project.Validate(); err == nil || !strings.Contains(err.Error(), "cannot set bounded limits") {
 		t.Fatalf("limit error = %v", err)
+	}
+}
+
+func TestEncodeProjectIsStableAndRoundTrips(t *testing.T) {
+	project := NewProject()
+	project.Source.Region = "eu-west-1"
+	project.Source.Profile = "development"
+	first, err := Encode(project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := Encode(project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(first, second) {
+		t.Fatal("encoding the same project changed bytes")
+	}
+	decoded, err := Decode(bytes.NewReader(first))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.SchemaVersion != CurrentSchemaVersion || decoded.Source.Region != project.Source.Region || decoded.Target.Port != DefaultPort || decoded.Output.Directory != ".floceed" {
+		t.Fatalf("decoded project = %#v", decoded)
+	}
+	if strings.Contains(string(first), "FLOCEED_GOVERNANCE_SECRET") {
+		t.Fatal("encoded project contains governance secret material")
+	}
+}
+
+func TestBasicExampleAndConfigurationReferenceStayValid(t *testing.T) {
+	example, err := os.ReadFile("../../examples/basic/floceed.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Decode(bytes.NewReader(example)); err != nil {
+		t.Fatalf("basic example is invalid: %v", err)
+	}
+	reference, err := os.ReadFile("../../docs/configuration.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"s3", "dynamodb", "sqs", "sns", "kinesis", "eventbridge", "lambda", "secrets", "parameters", "api_gateway", "step_functions", "cloudwatch_logs"} {
+		if !strings.Contains(string(reference), "| `"+key+"` |") {
+			t.Fatalf("configuration reference omits resource key %q", key)
+		}
 	}
 }
