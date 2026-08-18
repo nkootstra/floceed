@@ -31,6 +31,7 @@ type Service interface {
 	Doctor(context.Context, config.Project, string, string, string) (app.DoctorResult, error)
 	Up(context.Context, config.Project, string, time.Duration) error
 	Down(context.Context, config.Project, string) error
+	Reset(context.Context, config.Project, string) error
 	Logs(context.Context, config.Project, string, int) ([]byte, error)
 	InspectWithOptions(context.Context, config.Project, string, app.InspectOptions) (inspection.Inspection, error)
 }
@@ -65,7 +66,7 @@ func New(options Options) *cobra.Command {
 	root.SetErr(options.Stderr)
 	root.PersistentFlags().BoolVar(&noColor, "no-color", false, "disable colored output")
 	root.Flags().StringVar(&fixtureProfile, "fixture-profile", "", "select fixture governance profile in interactive mode")
-	root.AddCommand(scanCommand(options.App), planCommand(options.App), pullCommand(options.App), renderCommand(options.App), inspectCommand(options.App), statusCommand(options.App), logsCommand(options.App), downCommand(options.App), doctorCommand(options.App), upCommand(options.App), fixtureCommand())
+	root.AddCommand(scanCommand(options.App), planCommand(options.App), pullCommand(options.App), renderCommand(options.App), inspectCommand(options.App), statusCommand(options.App), logsCommand(options.App), downCommand(options.App), resetCommand(options.App), doctorCommand(options.App), upCommand(options.App), fixtureCommand())
 	root.AddCommand(&cobra.Command{Use: "version", Short: "Print version information", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, args []string) error {
 		version := options.Version
 		if version == "" {

@@ -36,6 +36,9 @@ func (panicInspectRuntime) Start(context.Context, string, string) ([]byte, error
 func (panicInspectRuntime) Stop(context.Context, string, string) ([]byte, error) {
 	panic("inspect must not call Docker")
 }
+func (panicInspectRuntime) Reset(context.Context, string, string) ([]byte, error) {
+	panic("inspect must not call Docker")
+}
 func (panicInspectRuntime) WaitReady(context.Context, string, time.Duration) error {
 	panic("inspect must not call runtime readiness")
 }
@@ -56,6 +59,7 @@ type inspectRuntimeStub struct {
 func (r *inspectRuntimeStub) DoctorChecks(context.Context) []Check                   { return nil }
 func (r *inspectRuntimeStub) Start(context.Context, string, string) ([]byte, error)  { return nil, nil }
 func (r *inspectRuntimeStub) Stop(context.Context, string, string) ([]byte, error)   { return nil, nil }
+func (r *inspectRuntimeStub) Reset(context.Context, string, string) ([]byte, error)  { return nil, nil }
 func (r *inspectRuntimeStub) WaitReady(context.Context, string, time.Duration) error { return nil }
 func (r *inspectRuntimeStub) InspectStatus(_ context.Context, url string, _ time.Duration) (inspection.Runtime, error) {
 	r.calls++

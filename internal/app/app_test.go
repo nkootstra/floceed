@@ -874,7 +874,8 @@ func (f *fakeLocalRuntime) Start(ctx context.Context, target, composeFile string
 	return f.start(ctx, target, composeFile)
 }
 
-func (f *fakeLocalRuntime) Stop(context.Context, string, string) ([]byte, error) { return nil, nil }
+func (f *fakeLocalRuntime) Stop(context.Context, string, string) ([]byte, error)  { return nil, nil }
+func (f *fakeLocalRuntime) Reset(context.Context, string, string) ([]byte, error) { return nil, nil }
 
 func (f *fakeLocalRuntime) WaitReady(ctx context.Context, url string, wait time.Duration) error {
 	return f.waitReady(ctx, url, wait)

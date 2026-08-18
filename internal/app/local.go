@@ -35,6 +35,7 @@ type localRuntime interface {
 	DoctorChecks(context.Context) []Check
 	Start(context.Context, string, string) ([]byte, error)
 	Stop(context.Context, string, string) ([]byte, error)
+	Reset(context.Context, string, string) ([]byte, error)
 	WaitReady(context.Context, string, time.Duration) error
 	InspectStatus(context.Context, string, time.Duration) (inspection.Runtime, error)
 	Logs(context.Context, string, string, int) ([]byte, error)
@@ -166,6 +167,16 @@ func (r *dockerLocalRuntime) Stop(ctx context.Context, target, composeFile strin
 	return runComposeDown(ctx, target, composeFile)
 }
 
+func runComposeReset(ctx context.Context, target, composeFile string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, "docker", "compose", "-f", composeFile, "down", "--volumes")
+	cmd.Dir = target
+	return cmd.CombinedOutput()
+}
+
+func (r *dockerLocalRuntime) Reset(ctx context.Context, target, composeFile string) ([]byte, error) {
+	return runComposeReset(ctx, target, composeFile)
+}
+
 func (r *dockerLocalRuntime) Logs(ctx context.Context, target, composeFile string, tail int) ([]byte, error) {
 	return r.composeLogs(ctx, target, composeFile, tail)
 }
@@ -259,6 +270,29 @@ func (a *Application) Down(ctx context.Context, p config.Project, projectDir str
 			return ctx.Err()
 		}
 		return &Error{Kind: ErrorLocal, Code: "COMPOSE_DOWN_FAILED", Message: fmt.Sprintf("docker compose down failed: %s", output), Err: err}
+	}
+	return nil
+}
+
+func (a *Application) Reset(ctx context.Context, p config.Project, projectDir string) error {
+	target := filepath.Join(projectDir, p.Output.Directory)
+	composeFile := filepath.Join(target, bundle.ComposeFile)
+	info, err := os.Lstat(composeFile)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return &Error{Kind: ErrorFilesystem, Code: "BUNDLE_MISSING", Message: fmt.Sprintf("generated Compose file not found: %s", composeFile), Remediation: "Run floceed render if a valid local manifest exists; otherwise run floceed pull for this project."}
+		}
+		return filesystemError(err)
+	}
+	if !info.Mode().IsRegular() {
+		return &Error{Kind: ErrorFilesystem, Code: "BUNDLE_INVALID", Message: fmt.Sprintf("generated Compose path is not a regular file: %s", composeFile), Remediation: "Run floceed render if a valid local manifest exists; otherwise run floceed pull for this project."}
+	}
+	output, err := a.localRuntime.Reset(ctx, target, composeFile)
+	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return &Error{Kind: ErrorLocal, Code: "COMPOSE_RESET_FAILED", Message: fmt.Sprintf("docker compose reset failed: %s", output), Err: err}
 	}
 	return nil
 }
