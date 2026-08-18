@@ -169,10 +169,6 @@ func assertEventTargets(t *testing.T, ctx context.Context, endpoint string) {
 		t.Fatalf("get replayed queue attributes: %v", err)
 	}
 	queueARN := queueAttributes.Attributes[string(sqstypes.QueueAttributeNameQueueArn)]
-	topic, err := snsClient.CreateTopic(ctx, &sns.CreateTopicInput{Name: aws.String(eventTopic)})
-	if err != nil {
-		t.Fatalf("get replayed topic: %v", err)
-	}
 	notifications, err := s3Client.GetBucketNotificationConfiguration(ctx, &s3.GetBucketNotificationConfigurationInput{Bucket: aws.String(bucket)})
 	if err != nil {
 		t.Fatalf("get replayed notifications: %v", err)
@@ -180,8 +176,12 @@ func assertEventTargets(t *testing.T, ctx context.Context, endpoint string) {
 	if len(notifications.QueueConfigurations) != 1 || aws.ToString(notifications.QueueConfigurations[0].QueueArn) != queueARN {
 		t.Fatalf("replayed queue notification = %#v", notifications.QueueConfigurations)
 	}
-	if len(notifications.TopicConfigurations) != 1 || aws.ToString(notifications.TopicConfigurations[0].TopicArn) != aws.ToString(topic.TopicArn) {
+	if len(notifications.TopicConfigurations) != 1 || aws.ToString(notifications.TopicConfigurations[0].TopicArn) == "" {
 		t.Fatalf("replayed topic notification = %#v", notifications.TopicConfigurations)
+	}
+	topicARN := aws.ToString(notifications.TopicConfigurations[0].TopicArn)
+	if _, err := snsClient.GetTopicAttributes(ctx, &sns.GetTopicAttributesInput{TopicArn: aws.String(topicARN)}); err != nil {
+		t.Fatalf("get replayed topic attributes: %v", err)
 	}
 	filter := notifications.QueueConfigurations[0].Filter
 	if filter == nil || filter.Key == nil || len(filter.Key.FilterRules) != 1 || aws.ToString(filter.Key.FilterRules[0].Value) != "incoming/" {

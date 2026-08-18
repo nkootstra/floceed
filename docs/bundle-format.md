@@ -54,7 +54,8 @@ Replay creates selected queues and topics during the base stage, records their
 local ARNs, and substitutes those ARNs only in typed S3 queue/topic notification
 fields during the links stage. Notification events and key filters are retained;
 messages, subscriptions, policies, and delivery settings are outside the bundle
-contract. FIFO queue/topic names retain their FIFO creation attributes.
+contract. FIFO queue/topic names retain their FIFO mode flag; other FIFO
+attributes, such as content-based deduplication, are not captured.
 
 ## Integrity, inspection, and semantic receipts
 
