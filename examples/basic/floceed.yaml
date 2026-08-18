@@ -33,6 +33,14 @@ resources:
         enabled: true
         mode: full
         gzip: true
+  kinesis:
+    - name: floceed-example-stream
+      arn: arn:aws:kinesis:eu-west-1:123456789012:stream/floceed-example-stream
+      data:
+        enabled: true
+        mode: bounded
+        max_records: 100
+        max_bytes: 10485760
 
 capture:
   allow_partial_data: false

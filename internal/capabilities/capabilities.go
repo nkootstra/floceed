@@ -36,7 +36,7 @@ func Current(toolVersion string) Report {
 		CompatibilityCommitment: "pre-1.0; schema and CLI contracts may evolve with release notes",
 		Services: []ServiceCapability{
 			{Service: "dynamodb", Support: "partial", DataModes: []string{"bounded", "full"}},
-			{Service: "kinesis", Support: "structure_only", DataModes: []string{"structure"}},
+			{Service: "kinesis", Support: "partial", DataModes: []string{"bounded", "full"}},
 			{Service: "s3", Support: "partial", DataModes: []string{"bounded", "full"}},
 			{Service: "sns", Support: "structure_only", DataModes: []string{"structure"}},
 			{Service: "sqs", Support: "structure_only", DataModes: []string{"structure"}},

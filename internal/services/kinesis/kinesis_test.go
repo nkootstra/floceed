@@ -2,6 +2,8 @@ package kinesis
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -18,6 +20,18 @@ func (discoveryClient) ListStreams(context.Context, *awsKinesis.ListStreamsInput
 }
 func (discoveryClient) DescribeStreamSummary(context.Context, *awsKinesis.DescribeStreamSummaryInput, ...func(*awsKinesis.Options)) (*awsKinesis.DescribeStreamSummaryOutput, error) {
 	return &awsKinesis.DescribeStreamSummaryOutput{StreamDescriptionSummary: &types.StreamDescriptionSummary{StreamARN: aws.String("arn:aws:kinesis:eu-west-1:123456789012:stream/events")}}, nil
+}
+
+type recordClient struct{ discoveryClient }
+
+func (recordClient) ListShards(context.Context, *awsKinesis.ListShardsInput, ...func(*awsKinesis.Options)) (*awsKinesis.ListShardsOutput, error) {
+	return &awsKinesis.ListShardsOutput{Shards: []types.Shard{{ShardId: aws.String("shard-1")}}}, nil
+}
+func (recordClient) GetShardIterator(context.Context, *awsKinesis.GetShardIteratorInput, ...func(*awsKinesis.Options)) (*awsKinesis.GetShardIteratorOutput, error) {
+	return &awsKinesis.GetShardIteratorOutput{ShardIterator: aws.String("iterator")}, nil
+}
+func (recordClient) GetRecords(context.Context, *awsKinesis.GetRecordsInput, ...func(*awsKinesis.Options)) (*awsKinesis.GetRecordsOutput, error) {
+	return &awsKinesis.GetRecordsOutput{Records: []types.Record{{PartitionKey: aws.String("partition"), SequenceNumber: aws.String("1"), Data: []byte("hello")}}}, nil
 }
 
 func TestDiscoverReturnsStreamsForTUISelection(t *testing.T) {
@@ -43,9 +57,24 @@ func TestMetadataOnlyStreamCapture(t *testing.T) {
 	}
 }
 
-func TestCaptureRejectsData(t *testing.T) {
-	_, err := New().Capture(context.Background(), model.SourceScope{}, model.ResourceRef{Service: "kinesis", Type: "stream", ID: "events", ARN: "arn:aws:kinesis:eu-west-1:123456789012:stream/events"}, model.CaptureOptions{IncludeData: true})
-	if err == nil {
-		t.Fatal("expected data capture to be rejected")
+func TestCapturesBoundedRecords(t *testing.T) {
+	root := t.TempDir()
+	project := config.Project{Resources: config.Resources{Kinesis: []config.KinesisResource{{Name: "events", ARN: "arn:aws:kinesis:eu-west-1:123456789012:stream/events", Data: &config.KinesisDataPolicy{Enabled: true, Mode: config.DataModeBounded, MaxRecords: 10}}}}}
+	selection := New(recordClient{}).Plan(project, true).Selections[0]
+	selection.Options.ArtifactDirectory = root
+	snapshot, err := New(recordClient{}).Capture(context.Background(), model.SourceScope{}, selection.Resource, selection.Options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Dataset == nil || snapshot.Dataset.Records != 1 || snapshot.Dataset.Format != "kinesis-records-ndjson-v1" {
+		t.Fatalf("unexpected dataset: %#v", snapshot.Dataset)
+	}
+	path := filepath.Join(root, filepath.FromSlash(snapshot.Dataset.Chunks[0].Data.Path))
+	data, err := os.ReadFile(path)
+	if err != nil || len(data) == 0 {
+		t.Fatalf("record artifact: %v, %q", err, data)
+	}
+	if err := (model.Manifest{SchemaVersion: model.CurrentManifestSchemaVersion, Snapshots: []model.Snapshot{*snapshot}}).Validate(); err != nil {
+		t.Fatal(err)
 	}
 }
