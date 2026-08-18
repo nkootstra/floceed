@@ -120,6 +120,14 @@ func TestLogsForwardsTailAndWritesOutput(t *testing.T) {
 	}
 }
 
+func TestDownRequiresExplicitConfirmation(t *testing.T) {
+	cmd := New(Options{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}, App: &fakeService{}})
+	cmd.SetArgs([]string{"down", "--project", writeProject(t)})
+	if err := cmd.ExecuteContext(context.Background()); err == nil || !strings.Contains(err.Error(), "--yes") {
+		t.Fatalf("down without confirmation error = %v", err)
+	}
+}
+
 func TestInspectTextIsConciseDeterministicAndHasNoANSI(t *testing.T) {
 	fake := &fakeService{inspectResult: inspection.Inspection{
 		SchemaVersion: 1, Valid: true, ManifestSchema: 3, BundleIdentity: "sha256:current", SelectedResources: 1,
@@ -514,6 +522,8 @@ func (f *fakeService) Up(_ context.Context, _ config.Project, _ string, wait tim
 	f.wait = wait
 	return nil
 }
+
+func (f *fakeService) Down(context.Context, config.Project, string) error { return nil }
 
 func writeProject(t *testing.T) string {
 	t.Helper()
