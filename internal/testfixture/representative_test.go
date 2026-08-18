@@ -36,11 +36,11 @@ func TestGenerateRepresentativeBundleIncludesDataAndStructureOnlyServices(t *tes
 	if err := manifest.Validate(); err != nil {
 		t.Fatalf("generated manifest is invalid: %v", err)
 	}
-	if len(manifest.Selected) != 5 || len(manifest.Snapshots) != 5 {
-		t.Fatalf("generated manifest selected=%d snapshots=%d, want five each", len(manifest.Selected), len(manifest.Snapshots))
+	if len(manifest.Selected) != 4 || len(manifest.Snapshots) != 4 {
+		t.Fatalf("generated manifest selected=%d snapshots=%d, want four each", len(manifest.Selected), len(manifest.Snapshots))
 	}
 	for _, snapshot := range manifest.Snapshots {
-		if (snapshot.Service == "kinesis" || snapshot.Service == "sns" || snapshot.Service == "sqs") && snapshot.Dataset != nil {
+		if (snapshot.Service == "sns" || snapshot.Service == "sqs") && snapshot.Dataset != nil {
 			t.Fatalf("structure-only %s snapshot unexpectedly contains dataset", snapshot.Service)
 		}
 	}

@@ -24,15 +24,19 @@ const (
 )
 
 // GenerateRepresentativeBundle writes a small, deterministic bundle that
-// exercises every currently advertised service. S3 and DynamoDB include data;
-// Kinesis, SNS, and SQS intentionally contain structure/topology only.
+// exercises every currently replayable service. S3 and DynamoDB include data;
+// SNS and SQS contain structure/topology. Kinesis remains discovery-only until
+// record replay is implemented.
 func GenerateRepresentativeBundle(root string) error {
 	artifacts := root
 	if err := os.MkdirAll(artifacts, 0o700); err != nil {
 		return err
 	}
 	object := []byte("representative floceed fixture\n")
-	item, err := json.Marshal(map[string]any{"id": "fixture-1", "name": "representative"})
+	item, err := json.Marshal(map[string]any{
+		"id":   map[string]any{"S": "fixture-1"},
+		"name": map[string]any{"S": "representative"},
+	})
 	if err != nil {
 		return err
 	}
@@ -59,7 +63,6 @@ func GenerateRepresentativeBundle(root string) error {
 	bucketARN := "arn:aws:s3:::floceed-example-assets"
 	selected := []model.ResourceRef{
 		{Service: "dynamodb", Type: "table", ID: "floceed-example-items"},
-		{Service: "kinesis", Type: "stream", ID: "floceed-example-stream", ARN: "arn:aws:kinesis:" + representativeRegion + ":" + representativeAccount + ":stream/floceed-example-stream"},
 		{Service: "s3", Type: "bucket", ID: "floceed-example-assets", ARN: bucketARN},
 		{Service: "sns", Type: "topic", ID: "floceed-example-events", ARN: topicARN},
 		{Service: "sqs", Type: "queue", ID: "floceed-example-events", ARN: queueARN},
@@ -72,7 +75,7 @@ func GenerateRepresentativeBundle(root string) error {
 		return err
 	}
 	dynamo.Dataset = &model.Dataset{Format: "dynamodb-ndjson-v1", Records: 1, SourceBytes: int64(len(item)), Consistency: "best_effort", Chunks: []model.DataChunk{{Data: itemRef, Records: 1, SourceBytes: int64(len(item))}}}
-	s3, err := model.NewSnapshot(selected[2], "s3", map[string]any{
+	s3, err := model.NewSnapshot(selected[1], "s3", map[string]any{
 		"name": "floceed-example-assets", "region": representativeRegion,
 		"notifications": map[string]any{"QueueConfigurations": []map[string]any{{"Id": "events", "QueueArn": queueARN, "Events": []string{"s3:ObjectCreated:*"}}}, "TopicConfigurations": []map[string]any{{"Id": "events", "TopicArn": topicARN, "Events": []string{"s3:ObjectCreated:Put"}}}},
 	})
@@ -80,15 +83,11 @@ func GenerateRepresentativeBundle(root string) error {
 		return err
 	}
 	s3.Dataset = &model.Dataset{Format: "s3-tar-gzip-v1", Records: 1, SourceBytes: int64(len(object)), Consistency: "best_effort", Chunks: []model.DataChunk{{Data: objectRef, Index: &indexRef, Records: 1, SourceBytes: int64(len(object))}}}
-	stream, err := model.NewSnapshot(selected[1], "kinesis", map[string]any{"name": selected[1].ID, "arn": selected[1].ARN})
+	queue, err := model.NewSnapshot(selected[3], "sqs", map[string]any{"name": selected[3].ID, "arn": queueARN})
 	if err != nil {
 		return err
 	}
-	queue, err := model.NewSnapshot(selected[4], "sqs", map[string]any{"name": selected[4].ID, "arn": queueARN})
-	if err != nil {
-		return err
-	}
-	topic, err := model.NewSnapshot(selected[3], "sns", map[string]any{"name": selected[3].ID, "arn": topicARN})
+	topic, err := model.NewSnapshot(selected[2], "sns", map[string]any{"name": selected[2].ID, "arn": topicARN})
 	if err != nil {
 		return err
 	}
@@ -98,7 +97,7 @@ func GenerateRepresentativeBundle(root string) error {
 		Target:        model.TargetMetadata{FlociVersion: config.DefaultFlociVersion, Image: compose.Image},
 		Source:        model.SourceMetadata{AccountID: representativeAccount, Region: representativeRegion},
 		Capture:       model.CaptureMetadata{CapturedAt: time.Date(2026, 8, 18, 0, 0, 0, 0, time.UTC)},
-		Selected:      selected, Snapshots: []model.Snapshot{*dynamo, *stream, *s3, *topic, *queue},
+		Selected:      selected, Snapshots: []model.Snapshot{*dynamo, *s3, *topic, *queue},
 		Operations: []model.Operation{{ID: "base:dynamodb:floceed-example-items", Stage: model.StageBase, Service: "dynamodb", ResourceID: "floceed-example-items", Action: "ensure"}},
 	}
 	project := config.Project{SchemaVersion: config.CurrentSchemaVersion, Source: config.Source{Region: representativeRegion, ExpectedAccountID: representativeAccount}, Target: config.Target{FlociVersion: config.DefaultFlociVersion, Port: config.DefaultPort, HookTimeoutSeconds: config.DefaultHookTimeoutSeconds}, Output: config.Output{Directory: ".floceed"}}

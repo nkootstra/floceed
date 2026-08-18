@@ -68,10 +68,11 @@ go run ./internal/testfixture/cmd/generate-bundle \
   -output /tmp/floceed-representative
 ```
 
-The generated bundle contains one S3 object and one DynamoDB item, plus
-Kinesis, SNS, and SQS structure/topology. It does not claim to contain
-Kinesis records or queued/published messages because those services are
-currently structure-only.
+The generated bundle contains one S3 object and one DynamoDB item, plus SNS
+and SQS structure/topology. Kinesis is intentionally excluded until record
+replay is implemented; the generated output must remain fully replayable.
+SNS and SQS contain no queued or published messages because they are currently
+structure-only.
 
 Deterministic cohorts require `full` data mode because Floceed must inspect the
 complete table. `max_retained_bytes` limits the protected candidate state kept
