@@ -882,6 +882,10 @@ func (f *fakeLocalRuntime) InspectStatus(context.Context, string, time.Duration)
 	return inspection.Runtime{State: inspection.RuntimeNotRequested}, nil
 }
 
+func (f *fakeLocalRuntime) Logs(context.Context, string, string, int) ([]byte, error) {
+	return nil, nil
+}
+
 func TestDoctorOrchestratesAllChecksWithoutExternalCommands(t *testing.T) {
 	p := testProject()
 	service := New("test")

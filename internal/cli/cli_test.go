@@ -57,12 +57,17 @@ type fakeService struct {
 	inspectErr     error
 	inspectOptions app.InspectOptions
 	inspected      bool
+	logs           []byte
 }
 
 func (f *fakeService) InspectWithOptions(_ context.Context, _ config.Project, _ string, options app.InspectOptions) (inspection.Inspection, error) {
 	f.inspected = true
 	f.inspectOptions = options
 	return f.inspectResult, f.inspectErr
+}
+
+func (f *fakeService) Logs(context.Context, config.Project, string, int) ([]byte, error) {
+	return f.logs, nil
 }
 
 func TestInspectJSONUsesOneStableEnvelopeAndForwardsOptions(t *testing.T) {
@@ -99,6 +104,19 @@ func TestStatusUsesRuntimeInspectionAndStableText(t *testing.T) {
 	}
 	if !fake.inspected || !fake.inspectOptions.Runtime || !strings.Contains(out.String(), "Bundle: valid") || !strings.Contains(out.String(), "Runtime: ready") {
 		t.Fatalf("status output = %q, options = %#v", out.String(), fake.inspectOptions)
+	}
+}
+
+func TestLogsForwardsTailAndWritesOutput(t *testing.T) {
+	fake := &fakeService{logs: []byte("floci started\n")}
+	var out bytes.Buffer
+	cmd := New(Options{Stdout: &out, Stderr: &bytes.Buffer{}, App: fake})
+	cmd.SetArgs([]string{"logs", "--project", writeProject(t), "--tail", "25"})
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := out.String(); got != "floci started\n" {
+		t.Fatalf("logs output = %q", got)
 	}
 }
 
