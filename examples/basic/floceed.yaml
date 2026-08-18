@@ -41,6 +41,17 @@ resources:
         mode: bounded
         max_records: 100
         max_bytes: 10485760
+  sqs:
+    - name: floceed-example-events
+      arn: arn:aws:sqs:eu-west-1:123456789012:floceed-example-events
+      data:
+        enabled: true
+        mode: bounded
+        max_messages: 100
+        max_bytes: 16777216
+  sns:
+    - name: floceed-example-events
+      arn: arn:aws:sns:eu-west-1:123456789012:floceed-example-events
 
 capture:
   allow_partial_data: false

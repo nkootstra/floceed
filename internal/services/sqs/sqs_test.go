@@ -2,8 +2,13 @@ package sqs
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	awsSQS "github.com/aws/aws-sdk-go-v2/service/sqs"
+	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
 	"github.com/nkootstra/floceed/internal/config"
 	"github.com/nkootstra/floceed/internal/model"
 )
@@ -32,9 +37,29 @@ func TestPlanCaptureAndDiscoverAreMetadataOnly(t *testing.T) {
 	}
 }
 
-func TestCaptureRejectsData(t *testing.T) {
-	_, err := New().Capture(context.Background(), model.SourceScope{}, model.ResourceRef{Service: "sqs", Type: "queue", ID: "jobs", ARN: "arn:aws:sqs:eu-west-1:123456789012:jobs"}, model.CaptureOptions{IncludeData: true})
-	if err == nil {
-		t.Fatal("expected data capture to be rejected")
+type messageClient struct{}
+
+func (messageClient) GetQueueUrl(context.Context, *awsSQS.GetQueueUrlInput, ...func(*awsSQS.Options)) (*awsSQS.GetQueueUrlOutput, error) {
+	return &awsSQS.GetQueueUrlOutput{QueueUrl: aws.String("http://localhost/queue")}, nil
+}
+func (messageClient) ReceiveMessage(context.Context, *awsSQS.ReceiveMessageInput, ...func(*awsSQS.Options)) (*awsSQS.ReceiveMessageOutput, error) {
+	return &awsSQS.ReceiveMessageOutput{Messages: []types.Message{{Body: aws.String("hello")}}}, nil
+}
+
+func TestCapturesBoundedMessages(t *testing.T) {
+	root := t.TempDir()
+	ref := model.ResourceRef{Service: "sqs", Type: "queue", ID: "jobs", ARN: "arn:aws:sqs:eu-west-1:123456789012:jobs"}
+	snapshot, err := New(messageClient{}).Capture(context.Background(), model.SourceScope{}, ref, model.CaptureOptions{IncludeData: true, ArtifactDirectory: root, Limits: model.DataLimits{MaxItems: 10}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Dataset == nil || snapshot.Dataset.Records != 1 || snapshot.Dataset.Format != "sqs-messages-ndjson-v1" {
+		t.Fatalf("dataset = %#v", snapshot.Dataset)
+	}
+	if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(snapshot.Dataset.Chunks[0].Data.Path))); err != nil {
+		t.Fatal(err)
+	}
+	if err := (model.Manifest{SchemaVersion: model.CurrentManifestSchemaVersion, Snapshots: []model.Snapshot{*snapshot}}).Validate(); err != nil {
+		t.Fatal(err)
 	}
 }

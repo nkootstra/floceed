@@ -164,7 +164,7 @@ def validate_snapshots(snapshots: list, manifest_version: int = 1) -> None:
                 fail(f"snapshot {index} uses legacy data in manifest schema 2")
             dataset = snapshot.get("dataset")
             if dataset:
-                formats = {"s3": {"s3-tar-gzip-v1"}, "dynamodb": {"dynamodb-ndjson-v1", "dynamodb-ndjson-gzip-v1"}, "kinesis": {"kinesis-records-ndjson-v1"}}
+                formats = {"s3": {"s3-tar-gzip-v1"}, "dynamodb": {"dynamodb-ndjson-v1", "dynamodb-ndjson-gzip-v1"}, "kinesis": {"kinesis-records-ndjson-v1"}, "sqs": {"sqs-messages-ndjson-v1"}}
                 if dataset.get("format") not in formats[service] or not isinstance(dataset.get("chunks"), list):
                     fail(f"snapshot {index} has an unsupported dataset")
                 records = 0
@@ -218,6 +218,18 @@ def targets(manifest: dict):
 def streams(manifest: dict):
     for snapshot in manifest.get("snapshots", []):
         if snapshot.get("service") == "kinesis":
+            yield snapshot["structure"], snapshot
+
+
+def queues(manifest: dict):
+    for snapshot in manifest.get("snapshots", []):
+        if snapshot.get("service") == "sqs":
+            yield snapshot["structure"], snapshot
+
+
+def topics(manifest: dict):
+    for snapshot in manifest.get("snapshots", []):
+        if snapshot.get("service") == "sns":
             yield snapshot["structure"], snapshot
 
 
@@ -318,6 +330,14 @@ def ensure_topic(sns, structure: dict) -> str:
     name = structure["name"]
     attributes = {"FifoTopic": "true"} if name.endswith(".fifo") else {}
     return sns.create_topic(Name=name, Attributes=attributes)["TopicArn"]
+
+
+def apply_topic_links(sns, topic: dict, target_arns: dict[str, str]) -> None:
+    topic_arn = target_arns.get(topic.get("arn"), topic.get("arn"))
+    for subscription in topic.get("subscriptions", []):
+        endpoint = target_arns.get(subscription.get("endpoint"), subscription.get("endpoint"))
+        request = {"TopicArn": topic_arn, "Protocol": subscription.get("protocol", "sqs"), "Endpoint": endpoint, "ReturnSubscriptionArn": True}
+        sns.subscribe(**request)
 
 
 def ensure_stream(kinesis, structure: dict) -> None:
@@ -606,6 +626,31 @@ def seed_stream(kinesis, snapshot: dict) -> None:
                 progress("data", "kinesis", stream, completed, total, precision="exact")
 
 
+def seed_queue(sqs, snapshot: dict) -> None:
+    queue = snapshot["structure"]["name"]
+    dataset = snapshot.get("dataset") or {}
+    url = sqs.get_queue_url(QueueName=queue)["QueueUrl"]
+    completed = 0
+    total = dataset.get("records", 0)
+    for chunk in dataset.get("chunks", []):
+        with safe_path(chunk["data"]["path"]).open("r", encoding="utf-8") as source:
+            batch = []
+            for line in source:
+                value = json.loads(line)
+                batch.append({"MessageBody": base64.b64decode(value["body_base64"]).decode("utf-8")})
+                if len(batch) == 10:
+                    for request in batch:
+                        sqs.send_message(QueueUrl=url, **request)
+                    completed += len(batch)
+                    progress("data", "sqs", queue, completed, total, precision="exact")
+                    batch = []
+            for request in batch:
+                sqs.send_message(QueueUrl=url, **request)
+            completed += len(batch)
+            if batch:
+                progress("data", "sqs", queue, completed, total, precision="exact")
+
+
 def main() -> None:
     if len(sys.argv) != 2 or sys.argv[1] not in {"all", "base", "links", "data"}:
         fail("usage: replay.py {all|base|links|data}")
@@ -621,6 +666,8 @@ def main() -> None:
         progress("base")
         for service, structure in targets(manifest):
             target_arns[structure["arn"]] = ensure_queue(sqs, structure) if service == "sqs" else ensure_topic(sns, structure)
+        for topic, _ in topics(manifest):
+            apply_topic_links(sns, topic, target_arns)
         for table, _ in tables(manifest):
             ensure_table(ddb, table)
             apply_mutable(ddb, table)
@@ -648,6 +695,9 @@ def main() -> None:
         for _, snapshot in streams(manifest):
             if snapshot.get("dataset"):
                 seed_stream(kinesis, snapshot)
+        for _, snapshot in queues(manifest):
+            if snapshot.get("dataset"):
+                seed_queue(sqs, snapshot)
 
 
 if __name__ == "__main__":

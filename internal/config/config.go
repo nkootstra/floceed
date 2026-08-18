@@ -140,8 +140,9 @@ type DynamoDBResource struct {
 	Data                *DynamoDBDataPolicy `yaml:"data,omitempty" json:"data,omitempty"`
 }
 type SQSResource struct {
-	Name string `yaml:"name" json:"name"`
-	ARN  string `yaml:"arn" json:"arn"`
+	Name string         `yaml:"name" json:"name"`
+	ARN  string         `yaml:"arn" json:"arn"`
+	Data *SQSDataPolicy `yaml:"data,omitempty" json:"data,omitempty"`
 }
 type SNSResource struct {
 	Name string `yaml:"name" json:"name"`
@@ -165,6 +166,17 @@ type KinesisDataPolicy struct {
 	Mode       DataMode `yaml:"mode,omitempty" json:"mode"`
 	MaxRecords int      `yaml:"max_records,omitempty" json:"max_records,omitempty"`
 	MaxBytes   int64    `yaml:"max_bytes,omitempty" json:"max_bytes,omitempty"`
+}
+
+type SQSDataPolicy struct {
+	Enabled     bool     `yaml:"enabled" json:"enabled"`
+	Mode        DataMode `yaml:"mode,omitempty" json:"mode"`
+	MaxMessages int      `yaml:"max_messages,omitempty" json:"max_messages,omitempty"`
+	MaxBytes    int64    `yaml:"max_bytes,omitempty" json:"max_bytes,omitempty"`
+}
+
+func NewSQSDataPolicy() *SQSDataPolicy {
+	return &SQSDataPolicy{Enabled: true, Mode: DataModeBounded, MaxMessages: 100, MaxBytes: 16 << 20}
 }
 
 func NewKinesisDataPolicy() *KinesisDataPolicy {
@@ -318,6 +330,19 @@ func (p *Project) applyDefaults() {
 			}
 		}
 	}
+	for i := range p.Resources.SQS {
+		if p.Resources.SQS[i].Data != nil {
+			if p.Resources.SQS[i].Data.Mode == "" {
+				p.Resources.SQS[i].Data.Mode = DataModeBounded
+			}
+			if p.Resources.SQS[i].Data.MaxMessages == 0 {
+				p.Resources.SQS[i].Data.MaxMessages = 100
+			}
+			if p.Resources.SQS[i].Data.MaxBytes == 0 {
+				p.Resources.SQS[i].Data.MaxBytes = 16 << 20
+			}
+		}
+	}
 	for name, profile := range p.FixtureProfiles {
 		for i := range profile.Cohorts {
 			if profile.Cohorts[i].MaxRetainedBytes == 0 {
@@ -433,6 +458,9 @@ func validateSQSResources(resources []SQSResource) error {
 		}
 		if err := validateDependencyARN("sqs", resource.Name, resource.ARN); err != nil {
 			return fmt.Errorf("SQS resource %q: %w", resource.Name, err)
+		}
+		if resource.Data != nil && (resource.Data.Mode != DataModeBounded || resource.Data.MaxMessages < 0 || resource.Data.MaxBytes < 0) {
+			return fmt.Errorf("SQS resource %q has invalid data policy: %w", resource.Name, ErrValidation)
 		}
 	}
 	return validateResourceNames("SQS", names)

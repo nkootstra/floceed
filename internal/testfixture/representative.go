@@ -66,6 +66,15 @@ func GenerateRepresentativeBundle(root string) error {
 	if err != nil {
 		return err
 	}
+	sqsData, err := json.Marshal(map[string]any{"body_base64": base64.StdEncoding.EncodeToString([]byte("representative queue message\n")), "message_attributes": map[string]any{}})
+	if err != nil {
+		return err
+	}
+	sqsData = append(sqsData, '\n')
+	sqsRef, err := writeRepresentativeArtifact(artifacts, "bundle/data/sqs/floceed-example-events.ndjson", sqsData, "application/x-ndjson")
+	if err != nil {
+		return err
+	}
 
 	queueARN := "arn:aws:sqs:" + representativeRegion + ":" + representativeAccount + ":floceed-example-events"
 	topicARN := "arn:aws:sns:" + representativeRegion + ":" + representativeAccount + ":floceed-example-events"
@@ -102,6 +111,7 @@ func GenerateRepresentativeBundle(root string) error {
 	if err != nil {
 		return err
 	}
+	queue.Dataset = &model.Dataset{Format: "sqs-messages-ndjson-v1", Records: 1, SourceBytes: int64(len(sqsData)), Consistency: "best_effort", Chunks: []model.DataChunk{{Data: sqsRef, Records: 1, SourceBytes: int64(len(sqsData))}}}
 	topic, err := model.NewSnapshot(selected[3], "sns", map[string]any{"name": selected[3].ID, "arn": topicARN})
 	if err != nil {
 		return err
