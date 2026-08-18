@@ -42,6 +42,13 @@ func TestValidateKinesisStreamARN(t *testing.T) {
 	}
 }
 
+func TestSQSDataIsBoundedOnly(t *testing.T) {
+	project := Project{SchemaVersion: CurrentSchemaVersion, Source: Source{Region: "eu-west-1"}, Resources: Resources{SQS: []SQSResource{{Name: "jobs", ARN: "arn:aws:sqs:eu-west-1:123456789012:jobs", Data: &SQSDataPolicy{Enabled: true, Mode: DataModeFull}}}}}
+	if err := project.Validate(); err == nil {
+		t.Fatal("full SQS message capture should not be accepted")
+	}
+}
+
 func TestValidateRejectsOutputDirectoryResolvingToProjectRoot(t *testing.T) {
 	for _, directory := range []string{".", "./", "subdir/.."} {
 		c := Project{SchemaVersion: 1, Source: Source{Region: "eu-west-1"}, Output: Output{Directory: directory}}

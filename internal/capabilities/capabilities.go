@@ -39,7 +39,7 @@ func Current(toolVersion string) Report {
 			{Service: "kinesis", Support: "partial", DataModes: []string{"bounded", "full"}},
 			{Service: "s3", Support: "partial", DataModes: []string{"bounded", "full"}},
 			{Service: "sns", Support: "structure_only", DataModes: []string{"structure"}},
-			{Service: "sqs", Support: "structure_only", DataModes: []string{"structure"}},
+			{Service: "sqs", Support: "partial", DataModes: []string{"bounded"}},
 		},
 	}
 }

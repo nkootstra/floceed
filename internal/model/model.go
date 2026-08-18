@@ -329,7 +329,7 @@ func (m Manifest) Validate() error {
 				if s.Dataset.Format == "" || s.Dataset.Records < 0 || s.Dataset.SourceBytes < 0 {
 					return fmt.Errorf("snapshot %d has invalid dataset: %w", index, ErrValidation)
 				}
-				validFormat := (s.Service == "s3" && s.Dataset.Format == "s3-tar-gzip-v1") || (s.Service == "dynamodb" && (s.Dataset.Format == "dynamodb-ndjson-v1" || s.Dataset.Format == "dynamodb-ndjson-gzip-v1")) || (s.Service == "kinesis" && s.Dataset.Format == "kinesis-records-ndjson-v1")
+				validFormat := (s.Service == "s3" && s.Dataset.Format == "s3-tar-gzip-v1") || (s.Service == "dynamodb" && (s.Dataset.Format == "dynamodb-ndjson-v1" || s.Dataset.Format == "dynamodb-ndjson-gzip-v1")) || (s.Service == "kinesis" && s.Dataset.Format == "kinesis-records-ndjson-v1") || (s.Service == "sqs" && s.Dataset.Format == "sqs-messages-ndjson-v1")
 				if !validFormat {
 					return fmt.Errorf("snapshot %d has unsupported dataset format %q: %w", index, s.Dataset.Format, ErrValidation)
 				}
