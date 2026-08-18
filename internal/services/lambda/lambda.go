@@ -60,19 +60,33 @@ func (a *Adapter) Capture(ctx context.Context, _ model.SourceScope, ref model.Re
 		structure["timeout"] = configuration.Timeout
 		structure["memory_size"] = configuration.MemorySize
 		structure["architectures"] = configuration.Architectures
-		aliases, err := a.client.ListAliases(ctx, &awsLambda.ListAliasesInput{FunctionName: aws.String(functionName(ref))})
-		if err != nil {
-			return nil, err
+		var aliasMarker *string
+		for {
+			aliases, err := a.client.ListAliases(ctx, &awsLambda.ListAliasesInput{FunctionName: aws.String(functionName(ref)), Marker: aliasMarker})
+			if err != nil {
+				return nil, err
+			}
+			for _, alias := range aliases.Aliases {
+				structure["aliases"] = append(structure["aliases"].([]any), map[string]string{"name": aws.ToString(alias.Name), "function_version": aws.ToString(alias.FunctionVersion)})
+			}
+			if aliases.NextMarker == nil || *aliases.NextMarker == "" {
+				break
+			}
+			aliasMarker = aliases.NextMarker
 		}
-		for _, alias := range aliases.Aliases {
-			structure["aliases"] = append(structure["aliases"].([]any), map[string]string{"name": aws.ToString(alias.Name), "function_version": aws.ToString(alias.FunctionVersion)})
-		}
-		mappings, err := a.client.ListEventSourceMappings(ctx, &awsLambda.ListEventSourceMappingsInput{FunctionName: aws.String(functionName(ref))})
-		if err != nil {
-			return nil, err
-		}
-		for _, mapping := range mappings.EventSourceMappings {
-			structure["event_source_mappings"] = append(structure["event_source_mappings"].([]any), map[string]any{"uuid": aws.ToString(mapping.UUID), "event_source_arn": aws.ToString(mapping.EventSourceArn), "state": aws.ToString(mapping.State), "batch_size": mapping.BatchSize})
+		var mappingMarker *string
+		for {
+			mappings, err := a.client.ListEventSourceMappings(ctx, &awsLambda.ListEventSourceMappingsInput{FunctionName: aws.String(functionName(ref)), Marker: mappingMarker})
+			if err != nil {
+				return nil, err
+			}
+			for _, mapping := range mappings.EventSourceMappings {
+				structure["event_source_mappings"] = append(structure["event_source_mappings"].([]any), map[string]any{"uuid": aws.ToString(mapping.UUID), "event_source_arn": aws.ToString(mapping.EventSourceArn), "state": aws.ToString(mapping.State), "batch_size": mapping.BatchSize})
+			}
+			if mappings.NextMarker == nil || *mappings.NextMarker == "" {
+				break
+			}
+			mappingMarker = mappings.NextMarker
 		}
 		sort.Slice(structure["aliases"], func(i, j int) bool {
 			return structure["aliases"].([]any)[i].(map[string]string)["name"] < structure["aliases"].([]any)[j].(map[string]string)["name"]
