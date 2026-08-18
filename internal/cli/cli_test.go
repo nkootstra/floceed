@@ -89,6 +89,19 @@ func TestInspectJSONUsesOneStableEnvelopeAndForwardsOptions(t *testing.T) {
 	}
 }
 
+func TestStatusUsesRuntimeInspectionAndStableText(t *testing.T) {
+	fake := &fakeService{inspectResult: inspection.Inspection{Runtime: inspection.Runtime{State: inspection.RuntimeReady}}}
+	var out bytes.Buffer
+	cmd := New(Options{Stdout: &out, Stderr: &bytes.Buffer{}, App: fake})
+	cmd.SetArgs([]string{"status", "--project", writeProject(t)})
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !fake.inspected || !fake.inspectOptions.Runtime || !strings.Contains(out.String(), "Runtime: ready") {
+		t.Fatalf("status output = %q, options = %#v", out.String(), fake.inspectOptions)
+	}
+}
+
 func TestInspectTextIsConciseDeterministicAndHasNoANSI(t *testing.T) {
 	fake := &fakeService{inspectResult: inspection.Inspection{
 		SchemaVersion: 1, Valid: true, ManifestSchema: 3, BundleIdentity: "sha256:current", SelectedResources: 1,
