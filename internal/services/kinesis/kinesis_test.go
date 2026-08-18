@@ -4,9 +4,28 @@ import (
 	"context"
 	"testing"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	awsKinesis "github.com/aws/aws-sdk-go-v2/service/kinesis"
+	"github.com/aws/aws-sdk-go-v2/service/kinesis/types"
 	"github.com/nkootstra/floceed/internal/config"
 	"github.com/nkootstra/floceed/internal/model"
 )
+
+type discoveryClient struct{}
+
+func (discoveryClient) ListStreams(context.Context, *awsKinesis.ListStreamsInput, ...func(*awsKinesis.Options)) (*awsKinesis.ListStreamsOutput, error) {
+	return &awsKinesis.ListStreamsOutput{StreamNames: []string{"events"}}, nil
+}
+func (discoveryClient) DescribeStreamSummary(context.Context, *awsKinesis.DescribeStreamSummaryInput, ...func(*awsKinesis.Options)) (*awsKinesis.DescribeStreamSummaryOutput, error) {
+	return &awsKinesis.DescribeStreamSummaryOutput{StreamDescriptionSummary: &types.StreamDescriptionSummary{StreamARN: aws.String("arn:aws:kinesis:eu-west-1:123456789012:stream/events")}}, nil
+}
+
+func TestDiscoverReturnsStreamsForTUISelection(t *testing.T) {
+	result, err := New(discoveryClient{}).Discover(context.Background(), model.SourceScope{Region: "eu-west-1"})
+	if err != nil || len(result.Resources) != 1 || result.Resources[0].Ref.ID != "events" {
+		t.Fatalf("discovery = %#v, %v", result, err)
+	}
+}
 
 func TestMetadataOnlyStreamCapture(t *testing.T) {
 	adapter := New()

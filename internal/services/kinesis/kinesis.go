@@ -3,15 +3,29 @@ package kinesis
 
 import (
 	"context"
+	"sort"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	awsKinesis "github.com/aws/aws-sdk-go-v2/service/kinesis"
 	"github.com/nkootstra/floceed/internal/catalog"
 	"github.com/nkootstra/floceed/internal/config"
 	"github.com/nkootstra/floceed/internal/model"
 )
 
-type Adapter struct{}
+type Client interface {
+	ListStreams(context.Context, *awsKinesis.ListStreamsInput, ...func(*awsKinesis.Options)) (*awsKinesis.ListStreamsOutput, error)
+	DescribeStreamSummary(context.Context, *awsKinesis.DescribeStreamSummaryInput, ...func(*awsKinesis.Options)) (*awsKinesis.DescribeStreamSummaryOutput, error)
+}
 
-func New() *Adapter { return &Adapter{} }
+type Adapter struct{ client Client }
+
+func New(client ...Client) *Adapter {
+	var c Client
+	if len(client) > 0 {
+		c = client[0]
+	}
+	return &Adapter{client: c}
+}
 
 func (*Adapter) Service() model.ServiceDescriptor {
 	return model.ServiceDescriptor{Name: "kinesis", DisplayName: "Kinesis", Support: model.SupportStructureOnly}
@@ -29,8 +43,36 @@ func (*Adapter) FinalizePlanning(*model.Snapshot, []model.Dependency) ([]model.F
 	return nil, nil
 }
 
-func (*Adapter) Discover(context.Context, model.SourceScope) (model.DiscoveryResult, error) {
-	return model.DiscoveryResult{}, nil
+func (a *Adapter) Discover(ctx context.Context, scope model.SourceScope) (model.DiscoveryResult, error) {
+	if a.client == nil {
+		return model.DiscoveryResult{}, nil
+	}
+	var result model.DiscoveryResult
+	start := ""
+	for {
+		out, err := a.client.ListStreams(ctx, &awsKinesis.ListStreamsInput{ExclusiveStartStreamName: valueOrNil(start)})
+		if err != nil {
+			return result, err
+		}
+		for _, name := range out.StreamNames {
+			description, err := a.client.DescribeStreamSummary(ctx, &awsKinesis.DescribeStreamSummaryInput{StreamName: &name})
+			if err != nil {
+				result.Findings = append(result.Findings, model.Finding{Code: "KINESIS_STREAM_DISCOVERY_FAILED", Severity: model.SeverityWarning, Support: model.SupportPartial, Resource: name, Message: err.Error()})
+				continue
+			}
+			arn := ""
+			if description.StreamDescriptionSummary != nil && description.StreamDescriptionSummary.StreamARN != nil {
+				arn = *description.StreamDescriptionSummary.StreamARN
+			}
+			result.Resources = append(result.Resources, model.ResourceSummary{Ref: model.ResourceRef{Service: "kinesis", Type: "stream", ID: name, ARN: arn}, Name: name, Region: scope.Region})
+		}
+		if !aws.ToBool(out.HasMoreStreams) || len(out.StreamNames) == 0 {
+			break
+		}
+		start = out.StreamNames[len(out.StreamNames)-1]
+	}
+	sort.Slice(result.Resources, func(i, j int) bool { return result.Resources[i].Name < result.Resources[j].Name })
+	return result, nil
 }
 
 func (*Adapter) Capture(_ context.Context, _ model.SourceScope, ref model.ResourceRef, opts model.CaptureOptions) (*model.Snapshot, error) {
@@ -43,3 +85,10 @@ func (*Adapter) Capture(_ context.Context, _ model.SourceScope, ref model.Resour
 func (*Adapter) Dependencies(*model.Snapshot) []model.Dependency { return nil }
 
 func (*Adapter) Validate(*model.Snapshot, model.Capabilities) []model.Finding { return nil }
+
+func valueOrNil(value string) *string {
+	if value == "" {
+		return nil
+	}
+	return &value
+}

@@ -455,7 +455,7 @@ func validateSnapshot(snapshot Snapshot) error {
 			return fmt.Errorf("Kinesis structure requires arn: %w", ErrValidation)
 		}
 		parts := strings.Split(value.ARN, ":")
-		if len(parts) != 6 || parts[0] != "arn" || parts[2] != "kinesis" || parts[5] != "stream/"+snapshot.Resource.ID {
+		if len(parts) != 6 || parts[0] != "arn" || parts[1] == "" || parts[2] != "kinesis" || parts[3] == "" || !snapshotAccountID.MatchString(parts[4]) || parts[5] != "stream/"+snapshot.Resource.ID {
 			return fmt.Errorf("Kinesis structure ARN must match resource identity: %w", ErrValidation)
 		}
 		if snapshot.Resource.ARN != "" && snapshot.Resource.ARN != value.ARN {

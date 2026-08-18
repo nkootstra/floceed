@@ -25,7 +25,7 @@ require (
 	github.com/Azure/go-ansiterm v0.0.0-20250102033503-faa5f7b0171c // indirect
 	github.com/Microsoft/go-winio v0.6.2 // indirect
 	github.com/atotto/clipboard v0.1.4 // indirect
-	github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.7.17 // indirect
+	github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.7.18 // indirect
 	github.com/aws/aws-sdk-go-v2/feature/ec2/imds v1.18.36 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/configsources v1.4.37 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/endpoints/v2 v2.7.37 // indirect
@@ -35,6 +35,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/internal/endpoint-discovery v1.12.13 // indirect
 	github.com/aws/aws-sdk-go-v2/service/internal/presigned-url v1.13.36 // indirect
 	github.com/aws/aws-sdk-go-v2/service/internal/s3shared v1.19.37 // indirect
+	github.com/aws/aws-sdk-go-v2/service/kinesis v1.46.6 // indirect
 	github.com/aws/aws-sdk-go-v2/service/signin v1.5.5 // indirect
 	github.com/aws/aws-sdk-go-v2/service/sns v1.42.6 // indirect
 	github.com/aws/aws-sdk-go-v2/service/sqs v1.46.6 // indirect
