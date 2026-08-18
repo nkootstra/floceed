@@ -20,6 +20,8 @@ jobs:
         run: go test ./...
       - name: Race test inspection surfaces
         run: go test -race ./internal/inspect ./internal/bundle ./internal/app ./internal/cli
+      - name: Race test all packages
+        run: go test -race ./...
       - name: Check deterministic inspect fixtures
         run: go test ./internal/testfixture -run TestCommittedInspectFixturesMatchGenerator -count=1
       - name: Smoke test offline inspect CLI
@@ -29,7 +31,9 @@ jobs:
       - name: Build
         run: go build ./cmd/floceed
       - name: Test replay runtime
-        run: python3 -m unittest runtime/test_replay.py
+        run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest runtime/test_replay.py
+      - name: Compile replay runtime
+        run: PYTHONDONTWRITEBYTECODE=1 python3 -m py_compile runtime/replay.py
 
   integration:
     runs-on: ubuntu-latest
