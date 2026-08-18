@@ -32,6 +32,8 @@ github.com/aws/aws-sdk-go-v2/internal/v4a v1.4.38 h1:A3UAuCmx7LyUcrixBTzKJYYIUZ2
 github.com/aws/aws-sdk-go-v2/internal/v4a v1.4.38/go.mod h1:1PDUYG9Z+JrbbsobsAZHjWOm9QBT/djiK3QbykTL5Z4=
 github.com/aws/aws-sdk-go-v2/service/apigatewayv2 v1.37.6 h1:lmAJQCOss0WfsuvUg43vjZ1EmnQxW0UfhXQ3LnpnR58=
 github.com/aws/aws-sdk-go-v2/service/apigatewayv2 v1.37.6/go.mod h1:zGRVx4gb9ntabkuuOYvHi+VvdJUyUS/VdfSOvbYt35o=
+github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs v1.82.2 h1:g0Hm/up9LDheflUekqCl19nTJatL6MHyvZHJSXOVyBI=
+github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs v1.82.2/go.mod h1:AdyGGib8td8DR+9F5xKLooxlSSoXo4pBVl+FkTpzpNA=
 github.com/aws/aws-sdk-go-v2/service/dynamodb v1.63.2 h1:XPLNArcyPPBlFphAW0k5bP81oDq3FjuicY1sULuNN2A=
 github.com/aws/aws-sdk-go-v2/service/dynamodb v1.63.2/go.mod h1:EtI09l1zaCea6NjQWKYR7OMBtQW2be9NwG6UQHOK72g=
 github.com/aws/aws-sdk-go-v2/service/eventbridge v1.48.6 h1:zRKQccd9GSrgw4TgfRiO8RueNo/rwyQ/5YLStYx3gfQ=

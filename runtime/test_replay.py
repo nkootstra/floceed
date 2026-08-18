@@ -196,6 +196,15 @@ class ReplayValidationTests(unittest.TestCase):
         self.write_json("bundle/manifest.json", self.manifest)
         self.assertEqual("stepfunctions", replay.validate_bundle()["snapshots"][0]["service"])
 
+    def test_accepts_cloudwatch_logs_topology(self):
+        self.manifest["snapshots"] = [{
+            "resource": {"service": "logs", "type": "log_group", "id": "/app/orders"},
+            "service": "logs", "structure_version": 1,
+            "structure": {"name": "/app/orders", "arn": "arn:aws:logs:eu-west-1:123456789012:log-group:/app/orders:*", "tags": {}},
+        }]
+        self.write_json("bundle/manifest.json", self.manifest)
+        self.assertEqual("logs", replay.validate_bundle()["snapshots"][0]["service"])
+
     def test_accepts_redacted_secret_and_parameter_metadata(self):
         self.manifest["snapshots"] = [
             {"resource": {"service": "secretsmanager", "type": "secret", "id": "prod/app"}, "service": "secretsmanager", "structure_version": 1, "structure": {"name": "prod/app", "arn": "arn:aws:secretsmanager:eu-west-1:123456789012:prod/app", "value_captured": False}},

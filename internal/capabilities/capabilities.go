@@ -46,6 +46,7 @@ func Current(toolVersion string) Report {
 			{Service: "ssm", Support: "structure_only", DataModes: []string{"structure"}},
 			{Service: "apigateway", Support: "structure_only", DataModes: []string{"structure"}},
 			{Service: "stepfunctions", Support: "structure_only", DataModes: []string{"structure"}},
+			{Service: "logs", Support: "structure_only", DataModes: []string{"structure"}},
 		},
 	}
 }
