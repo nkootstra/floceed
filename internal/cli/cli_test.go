@@ -29,6 +29,26 @@ func TestRootHelpUsesFloceedName(t *testing.T) {
 	}
 }
 
+func TestCapabilitiesJSONIsOfflineAndStable(t *testing.T) {
+	var out bytes.Buffer
+	cmd := New(Options{Version: "v0.11.0", Stdout: &out, Stderr: &bytes.Buffer{}})
+	cmd.SetArgs([]string{"capabilities", "--output", "json"})
+	if err := cmd.ExecuteContext(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var envelope Envelope
+	if err := json.Unmarshal(out.Bytes(), &envelope); err != nil {
+		t.Fatalf("capabilities output is not JSON: %v", err)
+	}
+	if envelope.Command != "capabilities" || envelope.Status != StatusSuccess {
+		t.Fatalf("envelope = %#v", envelope)
+	}
+	payload := envelope.Data.(map[string]any)
+	if payload["tool_version"] != "v0.11.0" || payload["floci_version"] != "1.6.0" {
+		t.Fatalf("capabilities payload = %#v", payload)
+	}
+}
+
 func TestRootExposesFixtureProfileForInteractiveMode(t *testing.T) {
 	cmd := New(Options{})
 	flag := cmd.Flags().Lookup("fixture-profile")

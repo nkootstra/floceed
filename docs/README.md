@@ -68,7 +68,12 @@ floceed inspect --project floceed.yaml
 floceed render --project floceed.yaml
 floceed doctor --project floceed.yaml
 floceed up --project floceed.yaml
+floceed capabilities --output json
 ```
+
+`capabilities` is offline and reports the supported Floci version, manifest
+schemas, services, and data modes for scripts or tooling. Floceed is still
+pre-1.0, so compatibility commitments may evolve between minor releases.
 
 To capture shareable fixtures, define a named `fixture_profiles` entry and
 select it explicitly for both planning and capture:
