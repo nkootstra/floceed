@@ -230,6 +230,16 @@ func TestPlainViewHasBreadcrumbAndHelp(t *testing.T) {
 	}
 }
 
+func TestProgressViewShowsExplicitRemainingWork(t *testing.T) {
+	m := NewModel(fakeBackend{}, Options{NoColor: true})
+	m.screen = ScreenProgress
+	m.progress = model.ProgressEvent{Phase: "capture", Service: "s3", Resource: "assets", CompletedRecords: 25, TotalRecords: 100, RemainingRecords: 75, CompletedBytes: 1 << 20, TotalBytes: 4 << 20, RemainingBytes: 3 << 20}
+	view := m.View().Content
+	if !containsAll(view, "25 / 100 records (75 remaining)", "1.0 MiB / 4.0 MiB (3.0 MiB remaining)") {
+		t.Fatalf("progress view omitted remaining work:\n%s", view)
+	}
+}
+
 func TestNoColorViewsContainNoANSI(t *testing.T) {
 	m := NewModel(fakeBackend{}, Options{NoColor: true})
 	m.screen = ScreenRegion

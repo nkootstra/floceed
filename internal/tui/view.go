@@ -85,12 +85,20 @@ func (m Model) View() tea.View {
 			}
 			fmt.Fprintf(&b, "%s %s %s", strings.Title(m.progress.Phase), m.progress.Service, m.progress.Resource)
 			if m.progress.TotalRecords > 0 {
-				fmt.Fprintf(&b, "\n%d / %s%d records (%d remaining)", m.progress.CompletedRecords, approx, m.progress.TotalRecords, max(0, m.progress.TotalRecords-m.progress.CompletedRecords))
+				remaining := m.progress.RemainingRecords
+				if remaining == 0 {
+					remaining = max(0, m.progress.TotalRecords-m.progress.CompletedRecords)
+				}
+				fmt.Fprintf(&b, "\n%d / %s%d records (%d remaining)", m.progress.CompletedRecords, approx, m.progress.TotalRecords, remaining)
 			} else if m.progress.CompletedRecords > 0 {
 				fmt.Fprintf(&b, "\n%d records processed; total not known yet", m.progress.CompletedRecords)
 			}
 			if m.progress.TotalBytes > 0 {
-				fmt.Fprintf(&b, "\n%s / %s%s (%s remaining)", bytesLabel(m.progress.CompletedBytes), approx, bytesLabel(m.progress.TotalBytes), bytesLabel(max(0, m.progress.TotalBytes-m.progress.CompletedBytes)))
+				remaining := m.progress.RemainingBytes
+				if remaining == 0 {
+					remaining = max(0, m.progress.TotalBytes-m.progress.CompletedBytes)
+				}
+				fmt.Fprintf(&b, "\n%s / %s%s (%s remaining)", bytesLabel(m.progress.CompletedBytes), approx, bytesLabel(m.progress.TotalBytes), bytesLabel(remaining))
 			}
 			if m.progress.Resumed {
 				b.WriteString("\nResumed from a verified checkpoint.")

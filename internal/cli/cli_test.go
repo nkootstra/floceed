@@ -334,7 +334,7 @@ type progressService struct{ fakeService }
 
 func (f *progressService) PullWithOptions(_ context.Context, _ config.Project, _ string, _ string, _ string, options app.PullOptions) (app.PullResult, error) {
 	if options.Progress != nil {
-		options.Progress(model.ProgressEvent{Operation: "pull", Phase: "capture", Service: "dynamodb", Resource: "orders", CompletedRecords: 5, TotalRecords: 10, TotalPrecision: "estimated"})
+		options.Progress(model.ProgressEvent{Operation: "pull", Phase: "capture", Service: "dynamodb", Resource: "orders", CompletedRecords: 5, TotalRecords: 10, RemainingRecords: 5, TotalPrecision: "estimated"})
 	}
 	return pullReceiptResult(), nil
 }
@@ -402,7 +402,7 @@ func TestPullJSONProgressUsesStderrWithoutCorruptingFinalEnvelope(t *testing.T) 
 	if err := json.Unmarshal(stderr.Bytes(), &event); err != nil {
 		t.Fatalf("stderr progress is not JSON: %q: %v", stderr.String(), err)
 	}
-	if event.Resource != "orders" || event.TotalPrecision != "estimated" {
+	if event.Resource != "orders" || event.TotalPrecision != "estimated" || event.RemainingRecords != 5 {
 		t.Fatalf("event = %#v", event)
 	}
 }
@@ -450,8 +450,14 @@ func TestPullPlainProgressMarksEstimatesAndOmitsEmptyFields(t *testing.T) {
 		t.Fatal(err)
 	}
 	line := strings.TrimSpace(stderr.String())
-	if line != "capture dynamodb orders 5/~10" {
+	if line != "capture dynamodb orders 5/~10 5 remaining" {
 		t.Fatalf("plain progress = %q", line)
+	}
+}
+
+func TestProgressBytesLabelScalesLargeCaptures(t *testing.T) {
+	if got := progressBytesLabel(2 << 30); got != "2.0 GiB" {
+		t.Fatalf("progressBytesLabel() = %q, want 2.0 GiB", got)
 	}
 }
 
