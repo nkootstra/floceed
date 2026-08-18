@@ -59,6 +59,20 @@ fixtures are safe: review every rule and uncovered field against your own data
 before sharing a bundle. In particular, do not replace pseudonymization with
 public `hash` for enumerable identifiers such as email addresses.
 
+To generate a deterministic representative bundle without AWS credentials,
+use the repository fixture generator:
+
+```bash
+go run ./internal/testfixture/cmd/generate-bundle \
+  -representative \
+  -output /tmp/floceed-representative
+```
+
+The generated bundle contains one S3 object and one DynamoDB item, plus
+Kinesis, SNS, and SQS structure/topology. It does not claim to contain
+Kinesis records or queued/published messages because those services are
+currently structure-only.
+
 Deterministic cohorts require `full` data mode because Floceed must inspect the
 complete table. `max_retained_bytes` limits the protected candidate state kept
 for resumable selection.
