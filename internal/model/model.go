@@ -433,7 +433,7 @@ func validateSnapshot(snapshot Snapshot) error {
 		if err := json.Unmarshal(snapshot.Structure, &value); err != nil || value.Attributes == nil || len(value.Keys) == 0 || value.BillingMode == "" {
 			return fmt.Errorf("DynamoDB structure requires attribute_definitions, key_schema, and billing_mode: %w", ErrValidation)
 		}
-	case "sqs", "sns":
+	case "sqs", "sns", "events":
 		var value struct {
 			ARN string `json:"arn"`
 		}
@@ -441,7 +441,11 @@ func validateSnapshot(snapshot Snapshot) error {
 			return fmt.Errorf("%s structure requires arn: %w", snapshot.Service, ErrValidation)
 		}
 		parts := strings.Split(value.ARN, ":")
-		if len(parts) != 6 || parts[0] != "arn" || parts[1] == "" || parts[2] != snapshot.Service || parts[3] == "" || !snapshotAccountID.MatchString(parts[4]) || parts[5] != snapshot.Resource.ID {
+		expectedName := snapshot.Resource.ID
+		if snapshot.Service == "events" {
+			expectedName = "event-bus/" + expectedName
+		}
+		if len(parts) != 6 || parts[0] != "arn" || parts[1] == "" || parts[2] != snapshot.Service || parts[3] == "" || !snapshotAccountID.MatchString(parts[4]) || parts[5] != expectedName {
 			return fmt.Errorf("%s structure ARN must match resource identity: %w", snapshot.Service, ErrValidation)
 		}
 		if snapshot.Resource.ARN != "" && snapshot.Resource.ARN != value.ARN {
