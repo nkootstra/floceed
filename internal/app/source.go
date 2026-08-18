@@ -13,6 +13,7 @@ import (
 	"github.com/nkootstra/floceed/internal/catalog"
 	"github.com/nkootstra/floceed/internal/model"
 	ddbservice "github.com/nkootstra/floceed/internal/services/dynamodb"
+	kinesisservice "github.com/nkootstra/floceed/internal/services/kinesis"
 	s3service "github.com/nkootstra/floceed/internal/services/s3"
 	snsservice "github.com/nkootstra/floceed/internal/services/sns"
 	sqsservice "github.com/nkootstra/floceed/internal/services/sqs"
@@ -56,7 +57,7 @@ func (AWSFactory) Open(ctx context.Context, req SourceRequest) (Source, error) {
 }
 
 func newAWSRegistry(s3client s3service.Client, ddbclient ddbservice.Client, s3Names []string) (*catalog.Registry, error) {
-	return catalog.New(s3service.NewFiltered(s3client, s3Names), ddbservice.New(ddbclient), sqsservice.New(), snsservice.New())
+	return catalog.New(s3service.NewFiltered(s3client, s3Names), ddbservice.New(ddbclient), sqsservice.New(), snsservice.New(), kinesisservice.New())
 }
 
 // Identity resolves the standard AWS configuration chain and confirms the

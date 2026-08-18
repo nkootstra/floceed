@@ -327,6 +327,10 @@ Notifications with unselected SQS, SNS, Lambda, or EventBridge targets are
 disabled and reported as unresolved dependencies. DynamoDB capacity settings are representational locally, and the
 known Floci LSI `INCLUDE` projection readback limitation is surfaced.
 
+Explicitly selected Kinesis streams are currently metadata-only: stream names
+and ARNs are validated and preserved in the bundle, but records and stream
+retention state are not captured or replayed.
+
 Existing tables with incompatible keys or indexes and buckets with incompatible
 immutable object-lock state fail without replacement. Floceed does not rewrite
 arbitrary strings that look like ARNs.

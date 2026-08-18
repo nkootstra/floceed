@@ -447,6 +447,20 @@ func validateSnapshot(snapshot Snapshot) error {
 		if snapshot.Resource.ARN != "" && snapshot.Resource.ARN != value.ARN {
 			return fmt.Errorf("%s structure ARN must match resource ARN: %w", snapshot.Service, ErrValidation)
 		}
+	case "kinesis":
+		var value struct {
+			ARN string `json:"arn"`
+		}
+		if err := json.Unmarshal(snapshot.Structure, &value); err != nil || value.ARN == "" {
+			return fmt.Errorf("Kinesis structure requires arn: %w", ErrValidation)
+		}
+		parts := strings.Split(value.ARN, ":")
+		if len(parts) != 6 || parts[0] != "arn" || parts[2] != "kinesis" || parts[5] != "stream/"+snapshot.Resource.ID {
+			return fmt.Errorf("Kinesis structure ARN must match resource identity: %w", ErrValidation)
+		}
+		if snapshot.Resource.ARN != "" && snapshot.Resource.ARN != value.ARN {
+			return fmt.Errorf("Kinesis structure must match resource ARN: %w", ErrValidation)
+		}
 	default:
 		return fmt.Errorf("unsupported snapshot service %q: %w", snapshot.Service, ErrValidation)
 	}

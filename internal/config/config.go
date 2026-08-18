@@ -119,6 +119,7 @@ type Resources struct {
 	DynamoDB []DynamoDBResource `yaml:"dynamodb,omitempty" json:"dynamodb"`
 	SQS      []SQSResource      `yaml:"sqs,omitempty" json:"sqs"`
 	SNS      []SNSResource      `yaml:"sns,omitempty" json:"sns"`
+	Kinesis  []KinesisResource  `yaml:"kinesis,omitempty" json:"kinesis"`
 }
 type S3Resource struct {
 	Name string        `yaml:"name" json:"name"`
@@ -143,6 +144,10 @@ type SQSResource struct {
 	ARN  string `yaml:"arn" json:"arn"`
 }
 type SNSResource struct {
+	Name string `yaml:"name" json:"name"`
+	ARN  string `yaml:"arn" json:"arn"`
+}
+type KinesisResource struct {
 	Name string `yaml:"name" json:"name"`
 	ARN  string `yaml:"arn" json:"arn"`
 }
@@ -382,6 +387,9 @@ func (p Project) Validate() error {
 	if err := validateSNSResources(p.Resources.SNS); err != nil {
 		return err
 	}
+	if err := validateKinesisResources(p.Resources.Kinesis); err != nil {
+		return err
+	}
 	if hasFullData(p) && p.Target.HookTimeoutSeconds <= DefaultHookTimeoutSeconds {
 		return fmt.Errorf("full data mode requires target.hook_timeout_seconds greater than %d: %w", DefaultHookTimeoutSeconds, ErrValidation)
 	}
@@ -417,6 +425,21 @@ func validateSNSResources(resources []SNSResource) error {
 		}
 	}
 	return validateResourceNames("SNS", names)
+}
+
+func validateKinesisResources(resources []KinesisResource) error {
+	names := make([]string, len(resources))
+	for i, resource := range resources {
+		names[i] = resource.Name
+		if !validDependencyName(resource.Name, 128) || strings.HasSuffix(resource.Name, ".fifo") {
+			return fmt.Errorf("Kinesis resource %q has invalid name: %w", resource.Name, ErrValidation)
+		}
+		parts := strings.Split(resource.ARN, ":")
+		if len(parts) != 6 || parts[0] != "arn" || !arnPartition.MatchString(parts[1]) || parts[2] != "kinesis" || parts[3] == "" || !accountID.MatchString(parts[4]) || parts[5] != "stream/"+resource.Name {
+			return fmt.Errorf("Kinesis resource %q: ARN %q does not match stream name: %w", resource.Name, resource.ARN, ErrValidation)
+		}
+	}
+	return validateResourceNames("Kinesis", names)
 }
 
 func validDependencyName(name string, max int) bool {
