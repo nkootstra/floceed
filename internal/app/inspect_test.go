@@ -105,6 +105,15 @@ func TestInspectReadsCustomOutputWithoutOpeningSource(t *testing.T) {
 	if got.Artifacts.Files != 4 || got.Artifacts.Bytes == 0 || len(got.Services) != 1 || got.Services[0].Selected != 1 || len(got.Operations) != 1 {
 		t.Fatalf("inspection summaries = artifacts %#v, services %#v, operations %#v", got.Artifacts, got.Services, got.Operations)
 	}
+	withArtifacts, err := service.InspectWithOptions(context.Background(), project, projectDir, InspectOptions{Artifacts: true})
+	if err != nil || len(withArtifacts.Artifacts.Entries) != got.Artifacts.Files {
+		t.Fatalf("artifact inventory = %#v, %v", withArtifacts.Artifacts, err)
+	}
+	for i := 1; i < len(withArtifacts.Artifacts.Entries); i++ {
+		if withArtifacts.Artifacts.Entries[i-1].Path > withArtifacts.Artifacts.Entries[i].Path {
+			t.Fatalf("artifact inventory is not sorted: %#v", withArtifacts.Artifacts.Entries)
+		}
+	}
 }
 
 func TestInspectRuntimeIsOptionalAndAdditive(t *testing.T) {

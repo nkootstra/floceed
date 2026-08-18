@@ -78,7 +78,7 @@ func TestInspectJSONUsesOneStableEnvelopeAndForwardsOptions(t *testing.T) {
 	fake := &fakeService{inspectResult: inspection.Inspection{SchemaVersion: 1, Valid: true, ManifestSchema: 3, BundleIdentity: "sha256:current", Runtime: inspection.Runtime{State: inspection.RuntimeUnavailable, Diagnostic: "connection refused"}}}
 	var out bytes.Buffer
 	cmd := New(Options{Stdout: &out, Stderr: &bytes.Buffer{}, App: fake})
-	cmd.SetArgs([]string{"inspect", "--project", writeProject(t), "--output", "json", "--compare", "baseline", "--runtime"})
+	cmd.SetArgs([]string{"inspect", "--project", writeProject(t), "--output", "json", "--compare", "baseline", "--runtime", "--artifacts"})
 	if err := cmd.ExecuteContext(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +93,7 @@ func TestInspectJSONUsesOneStableEnvelopeAndForwardsOptions(t *testing.T) {
 	if envelope.SchemaVersion != 1 || envelope.Command != "inspect" || envelope.Status != StatusSuccess {
 		t.Fatalf("envelope = %#v", envelope)
 	}
-	if !fake.inspected || fake.inspectOptions.ComparePath != "baseline" || !fake.inspectOptions.Runtime {
+	if !fake.inspected || fake.inspectOptions.ComparePath != "baseline" || !fake.inspectOptions.Runtime || !fake.inspectOptions.Artifacts {
 		t.Fatalf("inspect options = %#v", fake.inspectOptions)
 	}
 }

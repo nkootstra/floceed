@@ -16,6 +16,7 @@ func inspectCommand(service Service) *cobra.Command {
 	var project projectOptions
 	var compare string
 	var runtime bool
+	var artifacts bool
 	cmd := &cobra.Command{
 		Use:   "inspect",
 		Short: "Validate and explain a generated bundle",
@@ -25,7 +26,7 @@ func inspectCommand(service Service) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			result, err := service.InspectWithOptions(cmd.Context(), definition, dir, app.InspectOptions{ComparePath: compare, Runtime: runtime})
+			result, err := service.InspectWithOptions(cmd.Context(), definition, dir, app.InspectOptions{ComparePath: compare, Runtime: runtime, Artifacts: artifacts})
 			if err != nil {
 				return convert(err)
 			}
@@ -38,6 +39,7 @@ func inspectCommand(service Service) *cobra.Command {
 	project.bind(cmd)
 	cmd.Flags().StringVar(&compare, "compare", "", "compare with another generated bundle directory or project file")
 	cmd.Flags().BoolVar(&runtime, "runtime", false, "include bounded Floci runtime readiness")
+	cmd.Flags().BoolVar(&artifacts, "artifacts", false, "include the verified artifact inventory")
 	return cmd
 }
 
@@ -84,6 +86,16 @@ func writeInspectionText(w io.Writer, result inspection.Inspection) error {
 				return err
 			}
 			if err := writeFindings(w, "  Findings\n", "  ", resource.Findings); err != nil {
+				return err
+			}
+		}
+	}
+	if len(result.Artifacts.Entries) > 0 {
+		if _, err := fmt.Fprintln(w, "\nArtifacts"); err != nil {
+			return err
+		}
+		for _, artifact := range result.Artifacts.Entries {
+			if _, err := fmt.Fprintf(w, "%s: %d bytes sha256:%s\n", terminalSafe(artifact.Path), artifact.Size, terminalSafe(artifact.SHA256)); err != nil {
 				return err
 			}
 		}
