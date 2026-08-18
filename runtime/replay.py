@@ -157,6 +157,12 @@ def validate_snapshots(snapshots: list, manifest_version: int = 1) -> None:
             arn = structure["arn"].split(":")
             if len(arn) != 6 or arn[0] != "arn" or arn[2] != "kinesis" or arn[5] != "stream/" + resource.get("id"):
                 fail(f"snapshot {index} Kinesis structure ARN must match resource identity")
+        elif service == "events":
+            if not isinstance(structure.get("arn"), str) or not structure["arn"]:
+                fail(f"snapshot {index} EventBridge structure requires arn")
+            arn = structure["arn"].split(":")
+            if len(arn) != 6 or arn[0] != "arn" or arn[2] != "events" or arn[5] != "event-bus/" + resource.get("id"):
+                fail(f"snapshot {index} EventBridge structure ARN must match resource identity")
         else:
             fail(f"snapshot {index} service {service!r} is unsupported")
         if manifest_version >= 2:
@@ -195,6 +201,36 @@ def local_client(manifest: dict, service: str):
         aws_secret_access_key="test",
         config=config,
     )
+
+
+def event_buses(manifest: dict):
+    for snapshot in manifest.get("snapshots", []):
+        if snapshot.get("service") == "events":
+            yield snapshot["structure"], snapshot
+
+
+def ensure_event_bus(events, bus: dict) -> str:
+    name = bus["name"]
+    try:
+        events.describe_event_bus(Name=name)
+    except ClientError as error:
+        if not missing(error, "ResourceNotFoundException"):
+            raise
+        events.create_event_bus(Name=name)
+    return bus["arn"]
+
+
+def apply_event_rules(events, bus: dict) -> None:
+    for rule in bus.get("rules", []):
+        request = {"Name": rule["name"], "EventBusName": bus["name"], "State": rule.get("state", "ENABLED")}
+        if rule.get("description"):
+            request["Description"] = rule["description"]
+        if rule.get("event_pattern"):
+            request["EventPattern"] = rule["event_pattern"]
+        events.put_rule(**request)
+        targets = [{"Id": target["id"], "Arn": target["arn"], **({"RoleArn": target["role_arn"]} if target.get("role_arn") else {})} for target in rule.get("targets", [])]
+        if targets:
+            events.put_targets(Rule=rule["name"], EventBusName=bus["name"], Targets=targets)
 
 
 def tables(manifest: dict):
@@ -660,6 +696,7 @@ def main() -> None:
     sqs = local_client(manifest, "sqs")
     sns = local_client(manifest, "sns")
     kinesis = local_client(manifest, "kinesis")
+    events = local_client(manifest, "events")
     target_arns = {}
     stages = {"base", "links", "data"} if sys.argv[1] == "all" else {sys.argv[1]}
     if "base" in stages:
@@ -676,6 +713,9 @@ def main() -> None:
             apply_bucket_mutable(s3, bucket)
         for stream, _ in streams(manifest):
             ensure_stream(kinesis, stream)
+        for bus, _ in event_buses(manifest):
+            ensure_event_bus(events, bus)
+            apply_event_rules(events, bus)
     if "links" in stages:
         progress("links")
         for bucket, _ in buckets(manifest):

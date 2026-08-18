@@ -109,6 +109,8 @@ func (m Model) Project() config.Project {
 			p.Resources.DynamoDB = append(p.Resources.DynamoDB, entry)
 		case "kinesis":
 			p.Resources.Kinesis = append(p.Resources.Kinesis, config.KinesisResource{Name: r.Ref.ID, ARN: r.Ref.ARN})
+		case "events":
+			p.Resources.EventBridge = append(p.Resources.EventBridge, config.EventBridgeResource{Name: r.Ref.ID, ARN: r.Ref.ARN})
 		}
 	}
 	return p

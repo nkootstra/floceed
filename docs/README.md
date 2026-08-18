@@ -338,6 +338,11 @@ Explicitly selected Kinesis streams support bounded or full record capture.
 Records are replayed in deterministic shard order; stream retention and
 consumer/shard-iterator state are not captured or replayed.
 
+Explicitly selected EventBridge event buses support structure-only capture of
+rules, event patterns, and targets. Replay creates buses and upserts their
+rules and targets; historical events, archive contents, and replay-time
+delivery history are not captured.
+
 Existing tables with incompatible keys or indexes and buckets with incompatible
 immutable object-lock state fail without replacement. Floceed does not rewrite
 arbitrary strings that look like ARNs.

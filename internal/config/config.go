@@ -115,11 +115,12 @@ type Output struct {
 	Directory string `yaml:"directory,omitempty" json:"directory"`
 }
 type Resources struct {
-	S3       []S3Resource       `yaml:"s3,omitempty" json:"s3"`
-	DynamoDB []DynamoDBResource `yaml:"dynamodb,omitempty" json:"dynamodb"`
-	SQS      []SQSResource      `yaml:"sqs,omitempty" json:"sqs"`
-	SNS      []SNSResource      `yaml:"sns,omitempty" json:"sns"`
-	Kinesis  []KinesisResource  `yaml:"kinesis,omitempty" json:"kinesis"`
+	S3          []S3Resource          `yaml:"s3,omitempty" json:"s3"`
+	DynamoDB    []DynamoDBResource    `yaml:"dynamodb,omitempty" json:"dynamodb"`
+	SQS         []SQSResource         `yaml:"sqs,omitempty" json:"sqs"`
+	SNS         []SNSResource         `yaml:"sns,omitempty" json:"sns"`
+	Kinesis     []KinesisResource     `yaml:"kinesis,omitempty" json:"kinesis"`
+	EventBridge []EventBridgeResource `yaml:"eventbridge,omitempty" json:"eventbridge"`
 }
 type S3Resource struct {
 	Name string        `yaml:"name" json:"name"`
@@ -152,6 +153,10 @@ type KinesisResource struct {
 	Name string             `yaml:"name" json:"name"`
 	ARN  string             `yaml:"arn" json:"arn"`
 	Data *KinesisDataPolicy `yaml:"data,omitempty" json:"data,omitempty"`
+}
+type EventBridgeResource struct {
+	Name string `yaml:"name" json:"name"`
+	ARN  string `yaml:"arn" json:"arn"`
 }
 type DynamoDBDataPolicy struct {
 	Enabled  bool     `yaml:"enabled" json:"enabled"`
@@ -440,6 +445,9 @@ func (p Project) Validate() error {
 	if err := validateKinesisResources(p.Resources.Kinesis); err != nil {
 		return err
 	}
+	if err := validateEventBridgeResources(p.Resources.EventBridge); err != nil {
+		return err
+	}
 	if hasFullData(p) && p.Target.HookTimeoutSeconds <= DefaultHookTimeoutSeconds {
 		return fmt.Errorf("full data mode requires target.hook_timeout_seconds greater than %d: %w", DefaultHookTimeoutSeconds, ErrValidation)
 	}
@@ -501,6 +509,21 @@ func validateKinesisResources(resources []KinesisResource) error {
 		}
 	}
 	return validateResourceNames("Kinesis", names)
+}
+
+func validateEventBridgeResources(resources []EventBridgeResource) error {
+	names := make([]string, len(resources))
+	for i, resource := range resources {
+		names[i] = resource.Name
+		if !validDependencyName(resource.Name, 256) || resource.Name == "default" {
+			return fmt.Errorf("EventBridge resource %q has invalid name: %w", resource.Name, ErrValidation)
+		}
+		parts := strings.Split(resource.ARN, ":")
+		if len(parts) != 6 || parts[0] != "arn" || !arnPartition.MatchString(parts[1]) || parts[2] != "events" || parts[3] == "" || !accountID.MatchString(parts[4]) || parts[5] != "event-bus/"+resource.Name {
+			return fmt.Errorf("EventBridge resource %q: ARN %q does not match event bus name: %w", resource.Name, resource.ARN, ErrValidation)
+		}
+	}
+	return validateResourceNames("EventBridge", names)
 }
 
 func validDependencyName(name string, max int) bool {

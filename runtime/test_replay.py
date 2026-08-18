@@ -160,6 +160,15 @@ class ReplayValidationTests(unittest.TestCase):
         manifest = replay.validate_bundle()
         self.assertEqual(["sqs", "sns"], [snapshot["service"] for snapshot in manifest["snapshots"]])
 
+    def test_accepts_eventbridge_bus_topology(self):
+        self.manifest["snapshots"] = [{
+            "resource": {"service": "events", "type": "event_bus", "id": "orders"},
+            "service": "events", "structure_version": 1,
+            "structure": {"name": "orders", "arn": "arn:aws:events:eu-west-1:123456789012:event-bus/orders", "rules": []},
+        }]
+        self.write_json("bundle/manifest.json", self.manifest)
+        self.assertEqual("events", replay.validate_bundle()["snapshots"][0]["service"])
+
     def test_fifo_topic_creation_preserves_fifo_attribute(self):
         class FakeSNS:
             def __init__(self):
