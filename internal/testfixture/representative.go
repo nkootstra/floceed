@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"os"
@@ -24,9 +25,8 @@ const (
 )
 
 // GenerateRepresentativeBundle writes a small, deterministic bundle that
-// exercises every currently replayable service. S3 and DynamoDB include data;
-// SNS and SQS contain structure/topology. Kinesis remains discovery-only until
-// record replay is implemented.
+// exercises every currently replayable service. S3, DynamoDB, and Kinesis
+// include data; SNS and SQS contain structure/topology.
 func GenerateRepresentativeBundle(root string) error {
 	artifacts := root
 	if err := os.MkdirAll(artifacts, 0o700); err != nil {
@@ -57,12 +57,22 @@ func GenerateRepresentativeBundle(root string) error {
 	if err != nil {
 		return err
 	}
+	kinesisData, err := json.Marshal(map[string]any{"partition_key": "representative", "sequence_number": "1", "data_base64": base64.StdEncoding.EncodeToString([]byte("representative kinesis record\n"))})
+	if err != nil {
+		return err
+	}
+	kinesisData = append(kinesisData, '\n')
+	kinesisRef, err := writeRepresentativeArtifact(artifacts, "bundle/data/kinesis/floceed-example-stream.ndjson", kinesisData, "application/x-ndjson")
+	if err != nil {
+		return err
+	}
 
 	queueARN := "arn:aws:sqs:" + representativeRegion + ":" + representativeAccount + ":floceed-example-events"
 	topicARN := "arn:aws:sns:" + representativeRegion + ":" + representativeAccount + ":floceed-example-events"
 	bucketARN := "arn:aws:s3:::floceed-example-assets"
 	selected := []model.ResourceRef{
 		{Service: "dynamodb", Type: "table", ID: "floceed-example-items"},
+		{Service: "kinesis", Type: "stream", ID: "floceed-example-stream", ARN: "arn:aws:kinesis:" + representativeRegion + ":" + representativeAccount + ":stream/floceed-example-stream"},
 		{Service: "s3", Type: "bucket", ID: "floceed-example-assets", ARN: bucketARN},
 		{Service: "sns", Type: "topic", ID: "floceed-example-events", ARN: topicARN},
 		{Service: "sqs", Type: "queue", ID: "floceed-example-events", ARN: queueARN},
@@ -75,7 +85,12 @@ func GenerateRepresentativeBundle(root string) error {
 		return err
 	}
 	dynamo.Dataset = &model.Dataset{Format: "dynamodb-ndjson-v1", Records: 1, SourceBytes: int64(len(item)), Consistency: "best_effort", Chunks: []model.DataChunk{{Data: itemRef, Records: 1, SourceBytes: int64(len(item))}}}
-	s3, err := model.NewSnapshot(selected[1], "s3", map[string]any{
+	stream, err := model.NewSnapshot(selected[1], "kinesis", map[string]any{"name": selected[1].ID, "arn": selected[1].ARN, "shard_count": 1})
+	if err != nil {
+		return err
+	}
+	stream.Dataset = &model.Dataset{Format: "kinesis-records-ndjson-v1", Records: 1, SourceBytes: int64(len(kinesisData)), Consistency: "best_effort", Chunks: []model.DataChunk{{Data: kinesisRef, Records: 1, SourceBytes: int64(len(kinesisData))}}}
+	s3, err := model.NewSnapshot(selected[2], "s3", map[string]any{
 		"name": "floceed-example-assets", "region": representativeRegion,
 		"notifications": map[string]any{"QueueConfigurations": []map[string]any{{"Id": "events", "QueueArn": queueARN, "Events": []string{"s3:ObjectCreated:*"}}}, "TopicConfigurations": []map[string]any{{"Id": "events", "TopicArn": topicARN, "Events": []string{"s3:ObjectCreated:Put"}}}},
 	})
@@ -83,11 +98,11 @@ func GenerateRepresentativeBundle(root string) error {
 		return err
 	}
 	s3.Dataset = &model.Dataset{Format: "s3-tar-gzip-v1", Records: 1, SourceBytes: int64(len(object)), Consistency: "best_effort", Chunks: []model.DataChunk{{Data: objectRef, Index: &indexRef, Records: 1, SourceBytes: int64(len(object))}}}
-	queue, err := model.NewSnapshot(selected[3], "sqs", map[string]any{"name": selected[3].ID, "arn": queueARN})
+	queue, err := model.NewSnapshot(selected[4], "sqs", map[string]any{"name": selected[4].ID, "arn": queueARN})
 	if err != nil {
 		return err
 	}
-	topic, err := model.NewSnapshot(selected[2], "sns", map[string]any{"name": selected[2].ID, "arn": topicARN})
+	topic, err := model.NewSnapshot(selected[3], "sns", map[string]any{"name": selected[3].ID, "arn": topicARN})
 	if err != nil {
 		return err
 	}
@@ -97,7 +112,7 @@ func GenerateRepresentativeBundle(root string) error {
 		Target:        model.TargetMetadata{FlociVersion: config.DefaultFlociVersion, Image: compose.Image},
 		Source:        model.SourceMetadata{AccountID: representativeAccount, Region: representativeRegion},
 		Capture:       model.CaptureMetadata{CapturedAt: time.Date(2026, 8, 18, 0, 0, 0, 0, time.UTC)},
-		Selected:      selected, Snapshots: []model.Snapshot{*dynamo, *s3, *topic, *queue},
+		Selected:      selected, Snapshots: []model.Snapshot{*dynamo, *stream, *s3, *topic, *queue},
 		Operations: []model.Operation{{ID: "base:dynamodb:floceed-example-items", Stage: model.StageBase, Service: "dynamodb", ResourceID: "floceed-example-items", Action: "ensure"}},
 	}
 	project := config.Project{SchemaVersion: config.CurrentSchemaVersion, Source: config.Source{Region: representativeRegion, ExpectedAccountID: representativeAccount}, Target: config.Target{FlociVersion: config.DefaultFlociVersion, Port: config.DefaultPort, HookTimeoutSeconds: config.DefaultHookTimeoutSeconds}, Output: config.Output{Directory: ".floceed"}}

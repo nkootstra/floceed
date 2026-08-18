@@ -19,8 +19,8 @@ Docker Compose validation.
 
 The manifest schema is versioned independently of the project YAML. New pulls
 write manifest schema v3; the renderer and embedded runtime continue to accept
-v1 and v2. Schema v2 stores DynamoDB data as bounded sorted NDJSON chunks and
-S3 data as bounded tar/gzip packs with streamed per-pack indexes, avoiding one
+v1 and v2. Schema v2 stores DynamoDB data as bounded sorted NDJSON chunks,
+Kinesis records as bounded NDJSON chunks, and S3 data as bounded tar/gzip packs with streamed per-pack indexes, avoiding one
 manifest entry and one host file per S3 object. Paths in the manifest are
 relative and must remain below `bundle/data/`. The replay
 runtime rejects a newer schema, a non-loopback endpoint, an invalid source

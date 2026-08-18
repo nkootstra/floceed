@@ -151,6 +151,12 @@ def validate_snapshots(snapshots: list, manifest_version: int = 1) -> None:
             expected_type = "sqs" if service == "sqs" else "sns"
             if len(arn) != 6 or arn[0] != "arn" or arn[2] != expected_type or arn[5] != resource.get("id"):
                 fail(f"snapshot {index} {service} structure ARN must match resource identity")
+        elif service == "kinesis":
+            if not isinstance(structure.get("arn"), str) or not structure["arn"]:
+                fail(f"snapshot {index} Kinesis structure requires arn")
+            arn = structure["arn"].split(":")
+            if len(arn) != 6 or arn[0] != "arn" or arn[2] != "kinesis" or arn[5] != "stream/" + resource.get("id"):
+                fail(f"snapshot {index} Kinesis structure ARN must match resource identity")
         else:
             fail(f"snapshot {index} service {service!r} is unsupported")
         if manifest_version >= 2:
@@ -158,7 +164,7 @@ def validate_snapshots(snapshots: list, manifest_version: int = 1) -> None:
                 fail(f"snapshot {index} uses legacy data in manifest schema 2")
             dataset = snapshot.get("dataset")
             if dataset:
-                formats = {"s3": {"s3-tar-gzip-v1"}, "dynamodb": {"dynamodb-ndjson-v1", "dynamodb-ndjson-gzip-v1"}}
+                formats = {"s3": {"s3-tar-gzip-v1"}, "dynamodb": {"dynamodb-ndjson-v1", "dynamodb-ndjson-gzip-v1"}, "kinesis": {"kinesis-records-ndjson-v1"}}
                 if dataset.get("format") not in formats[service] or not isinstance(dataset.get("chunks"), list):
                     fail(f"snapshot {index} has an unsupported dataset")
                 records = 0
@@ -207,6 +213,12 @@ def targets(manifest: dict):
     for snapshot in manifest.get("snapshots", []):
         if snapshot.get("service") in {"sqs", "sns"}:
             yield snapshot["service"], snapshot["structure"]
+
+
+def streams(manifest: dict):
+    for snapshot in manifest.get("snapshots", []):
+        if snapshot.get("service") == "kinesis":
+            yield snapshot["structure"], snapshot
 
 
 def missing(error: ClientError, *codes: str) -> bool:
@@ -306,6 +318,18 @@ def ensure_topic(sns, structure: dict) -> str:
     name = structure["name"]
     attributes = {"FifoTopic": "true"} if name.endswith(".fifo") else {}
     return sns.create_topic(Name=name, Attributes=attributes)["TopicArn"]
+
+
+def ensure_stream(kinesis, structure: dict) -> None:
+    name = structure["name"]
+    try:
+        kinesis.describe_stream_summary(StreamName=name)
+    except ClientError as error:
+        if not missing(error, "ResourceNotFoundException"):
+            raise
+        kinesis.create_stream(StreamName=name, ShardCount=max(1, int(structure.get("shard_count", 1))))
+        waiter = kinesis.get_waiter("stream_exists")
+        waiter.wait(StreamName=name)
 
 
 def stream_sha256(body) -> str:
@@ -560,6 +584,28 @@ def seed(ddb, snapshot: dict) -> None:
             progress("data", "dynamodb", table, completed, total, precision="exact" if dataset else "unknown")
 
 
+def seed_stream(kinesis, snapshot: dict) -> None:
+    stream = snapshot["structure"]["name"]
+    dataset = snapshot.get("dataset") or {}
+    completed = 0
+    total = dataset.get("records", 0)
+    for chunk in dataset.get("chunks", []):
+        with safe_path(chunk["data"]["path"]).open("r", encoding="utf-8") as source:
+            batch = []
+            for line in source:
+                value = json.loads(line)
+                batch.append({"Data": base64.b64decode(value["data_base64"]), "PartitionKey": value["partition_key"]})
+                if len(batch) == 500:
+                    kinesis.put_records(StreamName=stream, Records=batch)
+                    completed += len(batch)
+                    progress("data", "kinesis", stream, completed, total, precision="exact")
+                    batch = []
+            if batch:
+                kinesis.put_records(StreamName=stream, Records=batch)
+                completed += len(batch)
+                progress("data", "kinesis", stream, completed, total, precision="exact")
+
+
 def main() -> None:
     if len(sys.argv) != 2 or sys.argv[1] not in {"all", "base", "links", "data"}:
         fail("usage: replay.py {all|base|links|data}")
@@ -568,6 +614,7 @@ def main() -> None:
     s3 = local_client(manifest, "s3")
     sqs = local_client(manifest, "sqs")
     sns = local_client(manifest, "sns")
+    kinesis = local_client(manifest, "kinesis")
     target_arns = {}
     stages = {"base", "links", "data"} if sys.argv[1] == "all" else {sys.argv[1]}
     if "base" in stages:
@@ -580,6 +627,8 @@ def main() -> None:
         for bucket, _ in buckets(manifest):
             ensure_bucket(s3, bucket)
             apply_bucket_mutable(s3, bucket)
+        for stream, _ in streams(manifest):
+            ensure_stream(kinesis, stream)
     if "links" in stages:
         progress("links")
         for bucket, _ in buckets(manifest):
@@ -596,6 +645,9 @@ def main() -> None:
                 seed_bucket_dataset(s3, bucket, snapshot)
             else:
                 seed_bucket(s3, bucket)
+        for _, snapshot in streams(manifest):
+            if snapshot.get("dataset"):
+                seed_stream(kinesis, snapshot)
 
 
 if __name__ == "__main__":

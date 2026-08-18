@@ -148,8 +148,9 @@ type SNSResource struct {
 	ARN  string `yaml:"arn" json:"arn"`
 }
 type KinesisResource struct {
-	Name string `yaml:"name" json:"name"`
-	ARN  string `yaml:"arn" json:"arn"`
+	Name string             `yaml:"name" json:"name"`
+	ARN  string             `yaml:"arn" json:"arn"`
+	Data *KinesisDataPolicy `yaml:"data,omitempty" json:"data,omitempty"`
 }
 type DynamoDBDataPolicy struct {
 	Enabled  bool     `yaml:"enabled" json:"enabled"`
@@ -157,6 +158,17 @@ type DynamoDBDataPolicy struct {
 	MaxItems int      `yaml:"max_items,omitempty" json:"max_items,omitempty"`
 	MaxPages int      `yaml:"max_pages,omitempty" json:"max_pages,omitempty"`
 	Gzip     *bool    `yaml:"gzip,omitempty" json:"gzip,omitempty"`
+}
+
+type KinesisDataPolicy struct {
+	Enabled    bool     `yaml:"enabled" json:"enabled"`
+	Mode       DataMode `yaml:"mode,omitempty" json:"mode"`
+	MaxRecords int      `yaml:"max_records,omitempty" json:"max_records,omitempty"`
+	MaxBytes   int64    `yaml:"max_bytes,omitempty" json:"max_bytes,omitempty"`
+}
+
+func NewKinesisDataPolicy() *KinesisDataPolicy {
+	return &KinesisDataPolicy{Enabled: true, Mode: DataModeBounded, MaxRecords: 1000, MaxBytes: 64 << 20}
 }
 
 func NewS3DataPolicy() *S3DataPolicy {
@@ -291,6 +303,19 @@ func (p *Project) applyDefaults() {
 	for i := range p.Resources.DynamoDB {
 		if p.Resources.DynamoDB[i].Data != nil && p.Resources.DynamoDB[i].Data.Mode == "" {
 			p.Resources.DynamoDB[i].Data.Mode = DataModeBounded
+		}
+	}
+	for i := range p.Resources.Kinesis {
+		if p.Resources.Kinesis[i].Data != nil {
+			if p.Resources.Kinesis[i].Data.Mode == "" {
+				p.Resources.Kinesis[i].Data.Mode = DataModeBounded
+			}
+			if p.Resources.Kinesis[i].Data.MaxRecords == 0 {
+				p.Resources.Kinesis[i].Data.MaxRecords = 1000
+			}
+			if p.Resources.Kinesis[i].Data.MaxBytes == 0 {
+				p.Resources.Kinesis[i].Data.MaxBytes = 64 << 20
+			}
 		}
 	}
 	for name, profile := range p.FixtureProfiles {
@@ -437,6 +462,14 @@ func validateKinesisResources(resources []KinesisResource) error {
 		parts := strings.Split(resource.ARN, ":")
 		if len(parts) != 6 || parts[0] != "arn" || !arnPartition.MatchString(parts[1]) || parts[2] != "kinesis" || parts[3] == "" || !accountID.MatchString(parts[4]) || parts[5] != "stream/"+resource.Name {
 			return fmt.Errorf("Kinesis resource %q: ARN %q does not match stream name: %w", resource.Name, resource.ARN, ErrValidation)
+		}
+		if resource.Data != nil {
+			if resource.Data.Mode != DataModeBounded && resource.Data.Mode != DataModeFull {
+				return fmt.Errorf("Kinesis resource %q has invalid data.mode: %w", resource.Name, ErrValidation)
+			}
+			if resource.Data.MaxRecords < 0 || resource.Data.MaxBytes < 0 {
+				return fmt.Errorf("Kinesis resource %q has invalid data limits: %w", resource.Name, ErrValidation)
+			}
 		}
 	}
 	return validateResourceNames("Kinesis", names)
