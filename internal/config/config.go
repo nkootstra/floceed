@@ -121,6 +121,7 @@ type Resources struct {
 	SNS         []SNSResource         `yaml:"sns,omitempty" json:"sns"`
 	Kinesis     []KinesisResource     `yaml:"kinesis,omitempty" json:"kinesis"`
 	EventBridge []EventBridgeResource `yaml:"eventbridge,omitempty" json:"eventbridge"`
+	Lambda      []LambdaResource      `yaml:"lambda,omitempty" json:"lambda"`
 }
 type S3Resource struct {
 	Name string        `yaml:"name" json:"name"`
@@ -155,6 +156,10 @@ type KinesisResource struct {
 	Data *KinesisDataPolicy `yaml:"data,omitempty" json:"data,omitempty"`
 }
 type EventBridgeResource struct {
+	Name string `yaml:"name" json:"name"`
+	ARN  string `yaml:"arn" json:"arn"`
+}
+type LambdaResource struct {
 	Name string `yaml:"name" json:"name"`
 	ARN  string `yaml:"arn" json:"arn"`
 }
@@ -448,6 +453,9 @@ func (p Project) Validate() error {
 	if err := validateEventBridgeResources(p.Resources.EventBridge); err != nil {
 		return err
 	}
+	if err := validateLambdaResources(p.Resources.Lambda); err != nil {
+		return err
+	}
 	if hasFullData(p) && p.Target.HookTimeoutSeconds <= DefaultHookTimeoutSeconds {
 		return fmt.Errorf("full data mode requires target.hook_timeout_seconds greater than %d: %w", DefaultHookTimeoutSeconds, ErrValidation)
 	}
@@ -524,6 +532,21 @@ func validateEventBridgeResources(resources []EventBridgeResource) error {
 		}
 	}
 	return validateResourceNames("EventBridge", names)
+}
+
+func validateLambdaResources(resources []LambdaResource) error {
+	names := make([]string, len(resources))
+	for i, resource := range resources {
+		names[i] = resource.Name
+		if !validDependencyName(resource.Name, 64) {
+			return fmt.Errorf("Lambda resource %q has invalid name: %w", resource.Name, ErrValidation)
+		}
+		parts := strings.Split(resource.ARN, ":")
+		if len(parts) != 7 || parts[0] != "arn" || !arnPartition.MatchString(parts[1]) || parts[2] != "lambda" || parts[3] == "" || !accountID.MatchString(parts[4]) || parts[5] != "function" || parts[6] != resource.Name {
+			return fmt.Errorf("Lambda resource %q: ARN %q does not match function name: %w", resource.Name, resource.ARN, ErrValidation)
+		}
+	}
+	return validateResourceNames("Lambda", names)
 }
 
 func validDependencyName(name string, max int) bool {
