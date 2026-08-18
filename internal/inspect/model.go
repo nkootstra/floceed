@@ -93,8 +93,15 @@ type Finding struct {
 }
 
 type ArtifactSummary struct {
-	Files int   `json:"files"`
-	Bytes int64 `json:"bytes"`
+	Files   int             `json:"files"`
+	Bytes   int64           `json:"bytes"`
+	Entries []ArtifactEntry `json:"entries,omitempty"`
+}
+
+type ArtifactEntry struct {
+	Path   string `json:"path"`
+	SHA256 string `json:"sha256"`
+	Size   int64  `json:"size"`
 }
 
 type ServiceSummary struct {

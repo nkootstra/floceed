@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -25,6 +26,7 @@ func (a *Application) Inspect(ctx context.Context, project config.Project, proje
 type InspectOptions struct {
 	ComparePath string
 	Runtime     bool
+	Artifacts   bool
 }
 
 // InspectWithOptions validates both comparison sides independently and only
@@ -37,7 +39,7 @@ func (a *Application) InspectWithOptions(ctx context.Context, project config.Pro
 		return inspection.Inspection{}, &Error{Kind: ErrorPlan, Code: "PROJECT_INVALID", Message: err.Error(), Remediation: "Fix the project configuration and retry inspection.", Err: err}
 	}
 	root := filepath.Join(projectDir, filepath.FromSlash(project.Output.Directory))
-	result, projection, err := inspectGenerated(ctx, root)
+	result, projection, err := inspectGenerated(ctx, root, options.Artifacts)
 	if err != nil {
 		return inspection.Inspection{}, inspectError(err)
 	}
@@ -59,7 +61,7 @@ func (a *Application) InspectWithOptions(ctx context.Context, project config.Pro
 	return result, nil
 }
 
-func inspectGenerated(ctx context.Context, root string) (inspection.Inspection, inspection.Projection, error) {
+func inspectGenerated(ctx context.Context, root string, includeArtifacts bool) (inspection.Inspection, inspection.Projection, error) {
 	generated, err := bundle.LoadGenerated(ctx, root)
 	if err != nil {
 		return inspection.Inspection{}, inspection.Projection{}, err
@@ -68,7 +70,7 @@ func inspectGenerated(ctx context.Context, root string) (inspection.Inspection, 
 	if err != nil {
 		return inspection.Inspection{}, inspection.Projection{}, err
 	}
-	return summarizeInspection(generated, projection), projection, nil
+	return summarizeInspection(generated, projection, includeArtifacts), projection, nil
 }
 
 func loadComparisonProjection(ctx context.Context, target string) (inspection.Projection, error) {
@@ -99,14 +101,14 @@ func loadComparisonProjection(ctx context.Context, target string) (inspection.Pr
 		}
 		root = filepath.Join(filepath.Dir(target), filepath.FromSlash(project.Output.Directory))
 	}
-	_, projection, err := inspectGenerated(ctx, root)
+	_, projection, err := inspectGenerated(ctx, root, false)
 	if err != nil {
 		return inspection.Projection{}, inspectError(err)
 	}
 	return projection, nil
 }
 
-func summarizeInspection(generated bundle.Generated, projection inspection.Projection) inspection.Inspection {
+func summarizeInspection(generated bundle.Generated, projection inspection.Projection, includeArtifacts bool) inspection.Inspection {
 	manifest := generated.Manifest
 	result := inspection.Inspection{
 		SchemaVersion: inspection.InspectionSchemaVersion, Valid: true,
@@ -123,7 +125,11 @@ func summarizeInspection(generated bundle.Generated, projection inspection.Proje
 	for _, sum := range generated.Checksums.Files {
 		result.Artifacts.Files++
 		result.Artifacts.Bytes += sum.Size
+		if includeArtifacts {
+			result.Artifacts.Entries = append(result.Artifacts.Entries, inspection.ArtifactEntry{Path: sum.Path, SHA256: sum.SHA256, Size: sum.Size})
+		}
 	}
+	sort.Slice(result.Artifacts.Entries, func(i, j int) bool { return result.Artifacts.Entries[i].Path < result.Artifacts.Entries[j].Path })
 	snapshots := make(map[string]model.Snapshot, len(manifest.Snapshots))
 	for _, snapshot := range manifest.Snapshots {
 		snapshots[inspectionResourceKey(snapshot.Resource)] = snapshot
