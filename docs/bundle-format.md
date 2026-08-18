@@ -49,6 +49,13 @@ selected state but never removes unexpected local resources. Tags are merged.
 An incompatible immutable DynamoDB schema or S3 object-lock setting is a hard
 failure rather than a delete-and-recreate operation.
 
+SQS and SNS snapshots are minimal identity records (`name` and captured `arn`).
+Replay creates selected queues and topics during the base stage, records their
+local ARNs, and substitutes those ARNs only in typed S3 queue/topic notification
+fields during the links stage. Notification events and key filters are retained;
+messages, subscriptions, policies, and delivery settings are outside the bundle
+contract. FIFO queue/topic names retain their FIFO creation attributes.
+
 ## Integrity, inspection, and semantic receipts
 
 `floceed inspect` reads this directory without AWS or Docker. It first validates

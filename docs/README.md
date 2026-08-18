@@ -319,9 +319,12 @@ credentials that preserve account-scoped local ARNs.
 The current capability registry targets Floci 1.6.0 only. S3 lifecycle and
 encryption configuration can be stored locally but do not reproduce all AWS
 runtime semantics. S3 website redirect/routing behavior is partial. Replication
-and access logging are reported but not replayed. Notifications with unselected
-SQS, SNS, Lambda, or EventBridge targets are disabled and reported as unresolved
-dependencies. DynamoDB capacity settings are representational locally, and the
+and access logging are reported but not replayed. Explicitly selected SQS queues
+and SNS topics are created as structure-only local targets before S3 notification
+links are applied; queue/topic messages, subscriptions, policies, and delivery
+settings are not captured. Notification events and S3 key filters are preserved.
+Notifications with unselected SQS, SNS, Lambda, or EventBridge targets are
+disabled and reported as unresolved dependencies. DynamoDB capacity settings are representational locally, and the
 known Floci LSI `INCLUDE` projection readback limitation is surfaced.
 
 Existing tables with incompatible keys or indexes and buckets with incompatible

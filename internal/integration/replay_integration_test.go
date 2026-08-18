@@ -25,6 +25,9 @@ import (
 	ddbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/aws/aws-sdk-go-v2/service/sns"
+	"github.com/aws/aws-sdk-go-v2/service/sqs"
+	sqstypes "github.com/aws/aws-sdk-go-v2/service/sqs/types"
 	"github.com/nkootstra/floceed/internal/bundle"
 	"github.com/nkootstra/floceed/internal/compose"
 	"github.com/nkootstra/floceed/internal/config"
@@ -34,10 +37,12 @@ import (
 )
 
 const (
-	accountID = "123456789012"
-	region    = "eu-west-1"
-	bucket    = "floceed-integration-bucket"
-	table     = "floceed-integration-items"
+	accountID  = "123456789012"
+	region     = "eu-west-1"
+	bucket     = "floceed-integration-bucket"
+	table      = "floceed-integration-items"
+	eventQueue = "floceed-integration-events"
+	eventTopic = "floceed-integration-topic"
 )
 
 func TestGeneratedBundleReplaysIdempotentlyWithPersistentState(t *testing.T) {
@@ -129,11 +134,67 @@ func TestReplayUsesStandaloneBundleAfterCaptureStateIsDetached(t *testing.T) {
 	verifySnapshot(t, ctx, endpoint, "standalone reused and refreshed fixture\n", "standalone-fixture")
 }
 
+func TestReplayCreatesSelectedEventTargetsBeforeS3Links(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
+	defer cancel()
+	bundleRoot := renderSyntheticBundle(t, ctx, replayFixture{SchemaVersion: 3, ObjectBody: "event-linked\n", ItemID: "event-linked", EventDependencies: true})
+	persistence := t.TempDir()
+	container := startFloci(t, ctx, bundleRoot, persistence)
+	endpoint := endpointFor(t, ctx, container)
+	waitForReady(t, ctx, container, endpoint)
+	assertEventTargets(t, ctx, endpoint)
+	if err := container.Terminate(ctx); err != nil {
+		t.Fatalf("terminate first replay: %v", err)
+	}
+	second := startFloci(t, ctx, bundleRoot, persistence)
+	defer testcontainers.CleanupContainer(t, second)
+	endpoint = endpointFor(t, ctx, second)
+	waitForReady(t, ctx, second, endpoint)
+	assertEventTargets(t, ctx, endpoint)
+}
+
+func assertEventTargets(t *testing.T, ctx context.Context, endpoint string) {
+	t.Helper()
+	awsCredentials := aws.NewCredentialsCache(credentials.NewStaticCredentialsProvider(accountID, "test", ""))
+	awsConfig := aws.Config{Region: region, Credentials: awsCredentials}
+	sqsClient := sqs.NewFromConfig(awsConfig, func(options *sqs.Options) { options.BaseEndpoint = aws.String(endpoint) })
+	snsClient := sns.NewFromConfig(awsConfig, func(options *sns.Options) { options.BaseEndpoint = aws.String(endpoint) })
+	s3Client := s3.NewFromConfig(awsConfig, func(options *s3.Options) { options.BaseEndpoint = aws.String(endpoint); options.UsePathStyle = true })
+	queue, err := sqsClient.GetQueueUrl(ctx, &sqs.GetQueueUrlInput{QueueName: aws.String(eventQueue)})
+	if err != nil {
+		t.Fatalf("get replayed queue: %v", err)
+	}
+	queueAttributes, err := sqsClient.GetQueueAttributes(ctx, &sqs.GetQueueAttributesInput{QueueUrl: queue.QueueUrl, AttributeNames: []sqstypes.QueueAttributeName{sqstypes.QueueAttributeNameQueueArn}})
+	if err != nil {
+		t.Fatalf("get replayed queue attributes: %v", err)
+	}
+	queueARN := queueAttributes.Attributes[string(sqstypes.QueueAttributeNameQueueArn)]
+	topic, err := snsClient.CreateTopic(ctx, &sns.CreateTopicInput{Name: aws.String(eventTopic)})
+	if err != nil {
+		t.Fatalf("get replayed topic: %v", err)
+	}
+	notifications, err := s3Client.GetBucketNotificationConfiguration(ctx, &s3.GetBucketNotificationConfigurationInput{Bucket: aws.String(bucket)})
+	if err != nil {
+		t.Fatalf("get replayed notifications: %v", err)
+	}
+	if len(notifications.QueueConfigurations) != 1 || aws.ToString(notifications.QueueConfigurations[0].QueueArn) != queueARN {
+		t.Fatalf("replayed queue notification = %#v", notifications.QueueConfigurations)
+	}
+	if len(notifications.TopicConfigurations) != 1 || aws.ToString(notifications.TopicConfigurations[0].TopicArn) != aws.ToString(topic.TopicArn) {
+		t.Fatalf("replayed topic notification = %#v", notifications.TopicConfigurations)
+	}
+	filter := notifications.QueueConfigurations[0].Filter
+	if filter == nil || filter.Key == nil || len(filter.Key.FilterRules) != 1 || aws.ToString(filter.Key.FilterRules[0].Value) != "incoming/" {
+		t.Fatalf("replayed queue filter = %#v", filter)
+	}
+}
+
 type replayFixture struct {
-	SchemaVersion int
-	ObjectBody    string
-	ItemID        string
-	Governance    *model.GovernanceAudit
+	SchemaVersion     int
+	ObjectBody        string
+	ItemID            string
+	Governance        *model.GovernanceAudit
+	EventDependencies bool
 }
 
 func renderSyntheticBundle(t *testing.T, ctx context.Context, fixture replayFixture) string {
@@ -180,25 +241,44 @@ func renderSyntheticBundle(t *testing.T, ctx context.Context, fixture replayFixt
 	dynamoSnapshot.Dataset = &model.Dataset{Format: "dynamodb-ndjson-v1", Records: 1, SourceBytes: int64(len(item)), Consistency: "best_effort", Chunks: []model.DataChunk{{Data: itemRef, Records: 1, SourceBytes: int64(len(item))}}}
 	s3Snapshot := testSnapshot(t, model.Snapshot{Resource: model.ResourceRef{Service: "s3", Type: "bucket", ID: bucket, ARN: "arn:aws:s3:::" + bucket}, Service: "s3"}, map[string]any{"name": bucket, "region": region, "versioning": "Enabled", "tags": []map[string]any{{"key": "floceed", "value": "integration"}}}, nil)
 	s3Snapshot.Dataset = &model.Dataset{Format: "s3-tar-gzip-v1", Records: 1, SourceBytes: int64(len(object)), Consistency: "best_effort", Chunks: []model.DataChunk{{Data: packRef, Index: &indexRef, Records: 1, SourceBytes: int64(len(object))}}}
-
+	selected := []model.ResourceRef{
+		{Service: "dynamodb", Type: "table", ID: table},
+		{Service: "s3", Type: "bucket", ID: bucket, ARN: "arn:aws:s3:::" + bucket},
+	}
+	snapshots := []model.Snapshot{dynamoSnapshot, s3Snapshot}
+	operations := []model.Operation{
+		{ID: "base:dynamodb:" + table, Stage: model.StageBase, Service: "dynamodb", ResourceID: table, Action: "ensure"},
+		{ID: "base:s3:" + bucket, Stage: model.StageBase, Service: "s3", ResourceID: bucket, Action: "ensure"},
+		{ID: "data:dynamodb:" + table, Stage: model.StageData, Service: "dynamodb", ResourceID: table, Action: "upsert"},
+		{ID: "data:s3:" + bucket, Stage: model.StageData, Service: "s3", ResourceID: bucket, Action: "upsert"},
+	}
+	if fixture.EventDependencies {
+		queueARN := "arn:aws:sqs:" + region + ":" + accountID + ":" + eventQueue
+		topicARN := "arn:aws:sns:" + region + ":" + accountID + ":" + eventTopic
+		s3Structure := map[string]any{"name": bucket, "region": region, "versioning": "Enabled", "tags": []map[string]any{{"key": "floceed", "value": "integration"}}, "notifications": map[string]any{
+			"QueueConfigurations": []map[string]any{{"Id": "queue-link", "QueueArn": queueARN, "Events": []string{"s3:ObjectCreated:*"}, "Filter": map[string]any{"Key": map[string]any{"FilterRules": []map[string]any{{"Name": "prefix", "Value": "incoming/"}}}}}},
+			"TopicConfigurations": []map[string]any{{"Id": "topic-link", "TopicArn": topicARN, "Events": []string{"s3:ObjectCreated:Put"}}},
+		}}
+		s3Snapshot = testSnapshot(t, model.Snapshot{Resource: model.ResourceRef{Service: "s3", Type: "bucket", ID: bucket, ARN: "arn:aws:s3:::" + bucket}, Service: "s3"}, s3Structure, nil)
+		sqsSnapshot := testSnapshot(t, model.Snapshot{Resource: model.ResourceRef{Service: "sqs", Type: "queue", ID: eventQueue, ARN: queueARN}, Service: "sqs"}, map[string]any{"name": eventQueue, "arn": queueARN}, nil)
+		snsSnapshot := testSnapshot(t, model.Snapshot{Resource: model.ResourceRef{Service: "sns", Type: "topic", ID: eventTopic, ARN: topicARN}, Service: "sns"}, map[string]any{"name": eventTopic, "arn": topicARN}, nil)
+		selected = append(selected, model.ResourceRef{Service: "sqs", Type: "queue", ID: eventQueue, ARN: queueARN}, model.ResourceRef{Service: "sns", Type: "topic", ID: eventTopic, ARN: topicARN})
+		snapshots = []model.Snapshot{dynamoSnapshot, s3Snapshot, sqsSnapshot, snsSnapshot}
+		operations = append(operations,
+			model.Operation{ID: "base:sqs:" + eventQueue, Stage: model.StageBase, Service: "sqs", ResourceID: eventQueue, Action: "ensure"},
+			model.Operation{ID: "base:sns:" + eventTopic, Stage: model.StageBase, Service: "sns", ResourceID: eventTopic, Action: "ensure"},
+		)
+	}
 	manifest := model.Manifest{
 		SchemaVersion: fixture.SchemaVersion,
 		Tool:          model.ToolMetadata{Version: "integration-test"},
 		Target:        model.TargetMetadata{FlociVersion: config.DefaultFlociVersion, Image: compose.Image},
 		Source:        model.SourceMetadata{AccountID: accountID, Region: region},
 		Capture:       model.CaptureMetadata{CapturedAt: time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC)},
-		Selected: []model.ResourceRef{
-			{Service: "dynamodb", Type: "table", ID: table},
-			{Service: "s3", Type: "bucket", ID: bucket, ARN: "arn:aws:s3:::" + bucket},
-		},
-		Snapshots: []model.Snapshot{dynamoSnapshot, s3Snapshot},
-		Operations: []model.Operation{
-			{ID: "base:dynamodb:" + table, Stage: model.StageBase, Service: "dynamodb", ResourceID: table, Action: "ensure"},
-			{ID: "base:s3:" + bucket, Stage: model.StageBase, Service: "s3", ResourceID: bucket, Action: "ensure"},
-			{ID: "data:dynamodb:" + table, Stage: model.StageData, Service: "dynamodb", ResourceID: table, Action: "upsert"},
-			{ID: "data:s3:" + bucket, Stage: model.StageData, Service: "s3", ResourceID: bucket, Action: "upsert"},
-		},
-		Governance: fixture.Governance,
+		Selected:      selected,
+		Snapshots:     snapshots,
+		Operations:    operations,
+		Governance:    fixture.Governance,
 	}
 	project := config.Project{
 		SchemaVersion: 1,
