@@ -39,6 +39,9 @@ func (panicInspectRuntime) WaitReady(context.Context, string, time.Duration) err
 func (panicInspectRuntime) InspectStatus(context.Context, string, time.Duration) (inspection.Runtime, error) {
 	panic("inspect must not call runtime status")
 }
+func (panicInspectRuntime) Logs(context.Context, string, string, int) ([]byte, error) {
+	panic("inspect must not call runtime logs")
+}
 
 type inspectRuntimeStub struct {
 	result inspection.Runtime
@@ -54,6 +57,9 @@ func (r *inspectRuntimeStub) InspectStatus(_ context.Context, url string, _ time
 	r.calls++
 	r.url = url
 	return r.result, r.err
+}
+func (r *inspectRuntimeStub) Logs(context.Context, string, string, int) ([]byte, error) {
+	return nil, nil
 }
 
 func TestInspectReadsCustomOutputWithoutOpeningSource(t *testing.T) {

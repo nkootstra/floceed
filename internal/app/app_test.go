@@ -882,6 +882,10 @@ func (f *fakeLocalRuntime) InspectStatus(context.Context, string, time.Duration)
 	return inspection.Runtime{State: inspection.RuntimeNotRequested}, nil
 }
 
+func (f *fakeLocalRuntime) Logs(context.Context, string, string, int) ([]byte, error) {
+	return nil, nil
+}
+
 func TestDoctorOrchestratesAllChecksWithoutExternalCommands(t *testing.T) {
 	p := testProject()
 	service := New("test")
@@ -919,6 +923,16 @@ func TestDoctorOrchestratesAllChecksWithoutExternalCommands(t *testing.T) {
 	wantCommands := []string{"compose version", "info", "manifest inspect " + compose.Image}
 	if !reflect.DeepEqual(commands, wantCommands) {
 		t.Fatalf("docker commands = %v, want %v", commands, wantCommands)
+	}
+}
+
+func TestCappedBufferBoundsComposeLogs(t *testing.T) {
+	buffer := &cappedBuffer{limit: 4}
+	if _, err := buffer.Write([]byte("123456")); err != nil {
+		t.Fatal(err)
+	}
+	if got := buffer.String(); got != "1234" {
+		t.Fatalf("capped logs = %q", got)
 	}
 }
 

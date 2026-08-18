@@ -2,6 +2,7 @@ package app
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -24,6 +25,7 @@ import (
 
 const defaultDockerProbeTimeout = 10 * time.Second
 const defaultReadyPollInterval = 500 * time.Millisecond
+const maxComposeLogBytes = 4 << 20
 
 type httpDoer interface {
 	Do(*http.Request) (*http.Response, error)
@@ -34,6 +36,7 @@ type localRuntime interface {
 	Start(context.Context, string, string) ([]byte, error)
 	WaitReady(context.Context, string, time.Duration) error
 	InspectStatus(context.Context, string, time.Duration) (inspection.Runtime, error)
+	Logs(context.Context, string, string, int) ([]byte, error)
 }
 type progressRuntime interface {
 	WatchProgress(context.Context, string, string, time.Time, func(model.ProgressEvent)) func()
@@ -46,6 +49,7 @@ type UpOptions struct {
 type dockerLocalRuntime struct {
 	lookPath      func(string) (string, error)
 	dockerCommand func(context.Context, ...string) ([]byte, error)
+	composeLogs   func(context.Context, string, string, int) ([]byte, error)
 	httpClient    httpDoer
 	probeTimeout  time.Duration
 	pollInterval  time.Duration
@@ -55,6 +59,7 @@ func newDockerLocalRuntime() *dockerLocalRuntime {
 	return &dockerLocalRuntime{
 		lookPath:      exec.LookPath,
 		dockerCommand: runDockerCommand,
+		composeLogs:   runComposeLogs,
 		httpClient:    &http.Client{Timeout: 2 * time.Second},
 		probeTimeout:  defaultDockerProbeTimeout,
 		pollInterval:  defaultReadyPollInterval,
@@ -150,6 +155,40 @@ func (r *dockerLocalRuntime) Start(ctx context.Context, target, composeFile stri
 	return runComposeUp(ctx, target, composeFile)
 }
 
+func (r *dockerLocalRuntime) Logs(ctx context.Context, target, composeFile string, tail int) ([]byte, error) {
+	return r.composeLogs(ctx, target, composeFile, tail)
+}
+
+type cappedBuffer struct {
+	bytes.Buffer
+	limit int
+}
+
+func (b *cappedBuffer) Write(p []byte) (int, error) {
+	written := len(p)
+	remaining := b.limit - b.Len()
+	if remaining > 0 {
+		if len(p) > remaining {
+			p = p[:remaining]
+		}
+		_, _ = b.Buffer.Write(p)
+	}
+	return written, nil
+}
+
+func runComposeLogs(ctx context.Context, target, composeFile string, tail int) ([]byte, error) {
+	if tail <= 0 || tail > 10000 {
+		tail = 200
+	}
+	cmd := exec.CommandContext(ctx, "docker", "compose", "-f", composeFile, "logs", "--no-color", "--tail", fmt.Sprintf("%d", tail))
+	cmd.Dir = target
+	output := &cappedBuffer{limit: maxComposeLogBytes}
+	cmd.Stdout = output
+	cmd.Stderr = output
+	err := cmd.Run()
+	return output.Bytes(), err
+}
+
 type initStatus struct {
 	Completed struct {
 		Ready bool `json:"ready"`
@@ -165,6 +204,29 @@ type initStatus struct {
 
 func (a *Application) Up(ctx context.Context, p config.Project, projectDir string, wait time.Duration) error {
 	return a.UpWithOptions(ctx, p, projectDir, UpOptions{Wait: wait})
+}
+
+func (a *Application) Logs(ctx context.Context, p config.Project, projectDir string, tail int) ([]byte, error) {
+	target := filepath.Join(projectDir, p.Output.Directory)
+	composeFile := filepath.Join(target, bundle.ComposeFile)
+	info, err := os.Lstat(composeFile)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, &Error{Kind: ErrorFilesystem, Code: "BUNDLE_MISSING", Message: fmt.Sprintf("generated Compose file not found: %s", composeFile), Remediation: "Run floceed render if a valid local manifest exists; otherwise run floceed pull for this project."}
+		}
+		return nil, filesystemError(err)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, &Error{Kind: ErrorFilesystem, Code: "BUNDLE_INVALID", Message: fmt.Sprintf("generated Compose path is not a regular file: %s", composeFile), Remediation: "Run floceed render if a valid local manifest exists; otherwise run floceed pull for this project."}
+	}
+	output, err := a.localRuntime.Logs(ctx, target, composeFile, tail)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, &Error{Kind: ErrorLocal, Code: "COMPOSE_LOGS_FAILED", Message: fmt.Sprintf("docker compose logs failed: %s", output), Err: err}
+	}
+	return output, nil
 }
 
 func (a *Application) UpWithOptions(ctx context.Context, p config.Project, projectDir string, options UpOptions) error {
