@@ -5,6 +5,10 @@ S3 buckets and DynamoDB tables from AWS, normalizes them, and emits a portable
 bundle that Floci replays locally through `ready.d` initialization hooks. It is
 not a network proxy and never writes to the source account.
 
+For a first run, start with the [getting started guide](getting-started.md).
+This document is the detailed reference for configuration, fixture governance,
+bundle inspection, replay behavior, and development.
+
 CI consumers can verify and admit a generated fixture without AWS credentials:
 
 ```bash
