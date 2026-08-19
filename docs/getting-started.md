@@ -71,8 +71,8 @@ When Floci is ready, inspect the local resources through its AWS-compatible
 endpoint:
 
 ```bash
-aws --endpoint-url http://localhost:4566 s3 ls
-aws --endpoint-url http://localhost:4566 dynamodb list-tables
+aws --no-sign-request --endpoint-url http://localhost:4566 s3 ls
+aws --no-sign-request --endpoint-url http://localhost:4566 dynamodb list-tables
 ```
 
 Use `floceed doctor --project floceed.yaml` when a prerequisite or local

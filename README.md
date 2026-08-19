@@ -34,7 +34,7 @@ Docker Compose are required for local replay.
 ```bash
 go install github.com/nkootstra/floceed/cmd/floceed@latest
 
-floceed init --region eu-west-1
+floceed init --profile development --region eu-west-1
 floceed scan --profile development --region eu-west-1
 floceed plan --project floceed.yaml
 floceed pull --project floceed.yaml --yes
