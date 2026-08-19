@@ -17,9 +17,10 @@ latest version before requesting help with a vulnerability.
 
 ## Reporting a vulnerability
 
-Report vulnerabilities privately through GitHub's private vulnerability
-reporting for this repository. Do not open a public issue, discussion, or pull
-request containing security details.
+Use the **Report a vulnerability** button on this repository's [Security
+advisories](https://github.com/nkootstra/floceed/security/advisories) page.
+GitHub private vulnerability reporting is enabled for this repository. Do not
+open a public issue, discussion, or pull request containing security details.
 
 Include enough information to reproduce the issue safely, such as the affected
 version or commit, command and configuration context, impact, and a minimal
