@@ -74,6 +74,46 @@ func TestScanRequestsOnlySelectedServices(t *testing.T) {
 	}
 }
 
+func TestServicesScanRendersBusyState(t *testing.T) {
+	m := NewModel(fakeBackend{}, Options{})
+	m.screen = ScreenServices
+	m.busy, m.pending = true, ScreenServices
+
+	view := m.View().Content
+	if !strings.Contains(view, "Discovering selected services") {
+		t.Fatalf("busy Services view omitted discovery status:\n%s", view)
+	}
+	if strings.Contains(view, "Choose services") {
+		t.Fatalf("busy Services view still rendered selection prompt:\n%s", view)
+	}
+}
+
+func TestCancellingServicesScanClearsBusyState(t *testing.T) {
+	m := NewModel(fakeBackend{}, Options{})
+	m.screen = ScreenServices
+	m.busy, m.pending = true, ScreenServices
+	m.scanCancel = func() {}
+
+	m.back()
+
+	if m.Screen() != ScreenIdentity || m.busy || m.pending != "" || m.scanCancel != nil {
+		t.Fatalf("cancelled scan state = screen %s, busy %t, pending %q, cancel %v", m.Screen(), m.busy, m.pending, m.scanCancel != nil)
+	}
+}
+
+func TestStaleScanResultDoesNotAffectNewServicesScan(t *testing.T) {
+	m := NewModel(fakeBackend{}, Options{})
+	m.screen, m.pending = ScreenServices, ScreenServices
+	m.busy = true
+	m.scanToken = 2
+
+	m = update(t, m, scanFinishedMsg{token: 1})
+
+	if !m.busy || m.Screen() != ScreenServices {
+		t.Fatalf("stale scan changed state: screen %s, busy %t", m.Screen(), m.busy)
+	}
+}
+
 func TestMissingProfileRegionRequiresRegionEntry(t *testing.T) {
 	m := NewModel(fakeBackend{}, Options{})
 	m = update(t, m, profilesLoadedMsg{profiles: []Profile{{Name: "dev"}}})

@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 
+	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"github.com/nkootstra/floceed/internal/app"
@@ -63,6 +64,9 @@ type Model struct {
 	filtering       bool
 	filter          textinput.Model
 	regionInput     textinput.Model
+	spinner         spinner.Model
+	scanCancel      context.CancelFunc
+	scanToken       uint64
 	err             error
 	progress        model.ProgressEvent
 	pullUpdates     chan tea.Msg
@@ -79,6 +83,7 @@ type identityLoadedMsg struct {
 type scanFinishedMsg struct {
 	result app.ScanResult
 	err    error
+	token  uint64
 }
 type planFinishedMsg struct {
 	plan app.Plan
@@ -101,6 +106,7 @@ func NewModel(backend Backend, opts Options) Model {
 	region.Placeholder = "eu-west-1"
 	region.Prompt = "Region: "
 	region.SetValue(opts.Region)
+	progressSpinner := spinner.New(spinner.WithSpinner(spinner.Dot))
 	if opts.NoColor {
 		filter.SetStyles(textinput.Styles{})
 		region.SetStyles(textinput.Styles{})
@@ -123,7 +129,7 @@ func NewModel(backend Backend, opts Options) Model {
 			{Name: "logs", DisplayName: "CloudWatch Logs", Support: model.SupportStructureOnly},
 		},
 		serviceSelected: map[string]bool{"s3": true, "dynamodb": true, "kinesis": false, "events": false, "lambda": false, "secretsmanager": false, "ssm": false, "apigateway": false, "stepfunctions": false, "logs": false}, selected: map[string]bool{},
-		dataEnabled: map[string]bool{}, dataMode: map[string]config.DataMode{}, filter: filter, regionInput: region,
+		dataEnabled: map[string]bool{}, dataMode: map[string]config.DataMode{}, filter: filter, regionInput: region, spinner: progressSpinner,
 	}
 }
 
@@ -139,16 +145,20 @@ func (m Model) loadIdentity() tea.Cmd {
 		return identityLoadedMsg{id, err}
 	}
 }
-func (m Model) scan() tea.Cmd {
+func (m *Model) scan() tea.Cmd {
 	services := make([]string, 0, len(m.services))
 	for _, service := range m.services {
 		if m.serviceSelected[service.Name] {
 			services = append(services, service.Name)
 		}
 	}
+	m.scanToken++
+	token := m.scanToken
+	scanCtx, cancel := context.WithCancel(m.ctx)
+	m.scanCancel = cancel
 	return func() tea.Msg {
-		r, err := m.backend.Scan(m.ctx, app.ScanRequest{Profile: m.profile, Region: m.region, Services: services})
-		return scanFinishedMsg{r, err}
+		r, err := m.backend.Scan(scanCtx, app.ScanRequest{Profile: m.profile, Region: m.region, Services: services})
+		return scanFinishedMsg{result: r, err: err, token: token}
 	}
 }
 func (m Model) makePlan() tea.Cmd {
