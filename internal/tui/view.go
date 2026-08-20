@@ -39,9 +39,14 @@ func (m Model) View() tea.View {
 			fmt.Fprintf(&b, "Account: %s\nARN: %s\n\nPress Enter to confirm.", m.identity.AccountID, m.identity.ARN)
 		}
 	case ScreenServices:
-		b.WriteString("Choose services\n")
-		for i, s := range m.services {
-			b.WriteString(m.checkRow(i, m.serviceSelected[s.Name], s.DisplayName+" "+badge(s.Support, m.opts.NoColor)))
+		if m.busy {
+			fmt.Fprintf(&b, "%s Discovering selected services...\n", m.spinner.View())
+			b.WriteString("Press Esc to cancel discovery.\n")
+		} else {
+			b.WriteString("Choose services\n")
+			for i, s := range m.services {
+				b.WriteString(m.checkRow(i, m.serviceSelected[s.Name], s.DisplayName+" "+badge(s.Support, m.opts.NoColor)))
+			}
 		}
 	case ScreenResources:
 		if m.filtering {

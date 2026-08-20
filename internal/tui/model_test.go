@@ -15,6 +15,7 @@ import (
 
 type fakeBackend struct {
 	scanRequests chan<- app.ScanRequest
+	scanContexts chan<- context.Context
 	planRequests chan<- ProjectRequest
 }
 
@@ -24,9 +25,12 @@ func (fakeBackend) Profiles(context.Context) ([]Profile, error) {
 func (fakeBackend) Identity(context.Context, string, string) (awsconfig.Identity, error) {
 	return awsconfig.Identity{AccountID: "123456789012", ARN: "arn:aws:iam::123456789012:user/dev"}, nil
 }
-func (b fakeBackend) Scan(_ context.Context, req app.ScanRequest) (app.ScanResult, error) {
+func (b fakeBackend) Scan(ctx context.Context, req app.ScanRequest) (app.ScanResult, error) {
 	if b.scanRequests != nil {
 		b.scanRequests <- req
+	}
+	if b.scanContexts != nil {
+		b.scanContexts <- ctx
 	}
 	return app.ScanResult{}, nil
 }
@@ -71,6 +75,61 @@ func TestScanRequestsOnlySelectedServices(t *testing.T) {
 	req := <-requests
 	if !reflect.DeepEqual(req.Services, []string{"s3"}) {
 		t.Fatalf("services = %#v, want []string{\"s3\"}", req.Services)
+	}
+}
+
+func TestCompletedServicesScanCancelsScanContext(t *testing.T) {
+	contexts := make(chan context.Context, 1)
+	m := NewModel(fakeBackend{scanContexts: contexts}, Options{})
+
+	_ = m.scan()()
+
+	scanCtx := <-contexts
+	select {
+	case <-scanCtx.Done():
+	default:
+		t.Fatal("scan context was not canceled after the scan completed")
+	}
+}
+
+func TestServicesScanRendersBusyState(t *testing.T) {
+	m := NewModel(fakeBackend{}, Options{})
+	m.screen = ScreenServices
+	m.busy, m.pending = true, ScreenServices
+
+	view := m.View().Content
+	if !strings.Contains(view, "Discovering selected services") {
+		t.Fatalf("busy Services view omitted discovery status:\n%s", view)
+	}
+	if strings.Contains(view, "Choose services") {
+		t.Fatalf("busy Services view still rendered selection prompt:\n%s", view)
+	}
+}
+
+func TestCancellingServicesScanClearsBusyState(t *testing.T) {
+	m := NewModel(fakeBackend{}, Options{})
+	m.screen = ScreenServices
+	m.busy, m.pending = true, ScreenServices
+	cancelled := false
+	m.scanCancel = func() { cancelled = true }
+
+	m.back()
+
+	if !cancelled || m.Screen() != ScreenIdentity || m.busy || m.pending != "" || m.scanCancel != nil {
+		t.Fatalf("cancelled scan state = screen %s, busy %t, pending %q, cancel %v", m.Screen(), m.busy, m.pending, m.scanCancel != nil)
+	}
+}
+
+func TestStaleScanResultDoesNotAffectNewServicesScan(t *testing.T) {
+	m := NewModel(fakeBackend{}, Options{})
+	m.screen, m.pending = ScreenServices, ScreenServices
+	m.busy = true
+	m.scanToken = 2
+
+	m = update(t, m, scanFinishedMsg{token: 1})
+
+	if !m.busy || m.Screen() != ScreenServices {
+		t.Fatalf("stale scan changed state: screen %s, busy %t", m.Screen(), m.busy)
 	}
 }
 
