@@ -15,6 +15,7 @@ import (
 
 type fakeBackend struct {
 	scanRequests chan<- app.ScanRequest
+	scanContexts chan<- context.Context
 	planRequests chan<- ProjectRequest
 }
 
@@ -24,9 +25,12 @@ func (fakeBackend) Profiles(context.Context) ([]Profile, error) {
 func (fakeBackend) Identity(context.Context, string, string) (awsconfig.Identity, error) {
 	return awsconfig.Identity{AccountID: "123456789012", ARN: "arn:aws:iam::123456789012:user/dev"}, nil
 }
-func (b fakeBackend) Scan(_ context.Context, req app.ScanRequest) (app.ScanResult, error) {
+func (b fakeBackend) Scan(ctx context.Context, req app.ScanRequest) (app.ScanResult, error) {
 	if b.scanRequests != nil {
 		b.scanRequests <- req
+	}
+	if b.scanContexts != nil {
+		b.scanContexts <- ctx
 	}
 	return app.ScanResult{}, nil
 }
@@ -74,6 +78,20 @@ func TestScanRequestsOnlySelectedServices(t *testing.T) {
 	}
 }
 
+func TestCompletedServicesScanCancelsScanContext(t *testing.T) {
+	contexts := make(chan context.Context, 1)
+	m := NewModel(fakeBackend{scanContexts: contexts}, Options{})
+
+	_ = m.scan()()
+
+	scanCtx := <-contexts
+	select {
+	case <-scanCtx.Done():
+	default:
+		t.Fatal("scan context was not canceled after the scan completed")
+	}
+}
+
 func TestServicesScanRendersBusyState(t *testing.T) {
 	m := NewModel(fakeBackend{}, Options{})
 	m.screen = ScreenServices
@@ -92,11 +110,12 @@ func TestCancellingServicesScanClearsBusyState(t *testing.T) {
 	m := NewModel(fakeBackend{}, Options{})
 	m.screen = ScreenServices
 	m.busy, m.pending = true, ScreenServices
-	m.scanCancel = func() {}
+	cancelled := false
+	m.scanCancel = func() { cancelled = true }
 
 	m.back()
 
-	if m.Screen() != ScreenIdentity || m.busy || m.pending != "" || m.scanCancel != nil {
+	if !cancelled || m.Screen() != ScreenIdentity || m.busy || m.pending != "" || m.scanCancel != nil {
 		t.Fatalf("cancelled scan state = screen %s, busy %t, pending %q, cancel %v", m.Screen(), m.busy, m.pending, m.scanCancel != nil)
 	}
 }

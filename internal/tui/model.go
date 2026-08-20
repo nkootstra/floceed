@@ -157,6 +157,7 @@ func (m *Model) scan() tea.Cmd {
 	scanCtx, cancel := context.WithCancel(m.ctx)
 	m.scanCancel = cancel
 	return func() tea.Msg {
+		defer cancel()
 		r, err := m.backend.Scan(scanCtx, app.ScanRequest{Profile: m.profile, Region: m.region, Services: services})
 		return scanFinishedMsg{result: r, err: err, token: token}
 	}
