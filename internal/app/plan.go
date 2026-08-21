@@ -59,7 +59,7 @@ func (a *Application) PlanWithOptions(ctx context.Context, p config.Project, opt
 	if err != nil {
 		return Plan{}, err
 	}
-	result, err := a.capture(ctx, captureRequest{Project: p, Profile: options.AWSProfile, Region: options.Region, Governance: policy})
+	result, err := a.capture(ctx, captureRequest{Project: p, Profile: options.AWSProfile, Region: options.Region, Governance: policy, PlanIncludeData: true})
 	return result.Plan, err
 }
 
@@ -72,17 +72,18 @@ func resolveGovernance(project config.Project, fixtureProfile string) (*governan
 }
 
 type captureRequest struct {
-	Project        config.Project
-	Profile        string
-	Governance     *governance.EffectivePolicy
-	Region         string
-	ArtifactRoot   string
-	IncludeData    bool
-	CheckpointRoot string
-	Progress       func(model.ProgressEvent)
-	Source         *Source
-	Ledger         *captureledger.Store
-	LedgerSource   captureledger.SourceIdentity
+	Project         config.Project
+	Profile         string
+	Governance      *governance.EffectivePolicy
+	Region          string
+	ArtifactRoot    string
+	IncludeData     bool
+	PlanIncludeData bool
+	CheckpointRoot  string
+	Progress        func(model.ProgressEvent)
+	Source          *Source
+	Ledger          *captureledger.Store
+	LedgerSource    captureledger.SourceIdentity
 }
 
 func (a *Application) capture(ctx context.Context, req captureRequest) (captureResult, error) {
@@ -110,7 +111,7 @@ func (a *Application) capture(ctx context.Context, req captureRequest) (captureR
 	result := Plan{Source: model.SourceMetadata{AccountID: source.Identity.AccountID, Region: region}, RequiredIAMActions: []string{"sts:GetCallerIdentity"}, Governance: governanceAuditForPolicy(policy)}
 	var selections []catalog.Selection
 	for _, adapter := range source.Registry.All() {
-		contribution := adapter.Plan(p, req.IncludeData)
+		contribution := adapter.Plan(p, req.IncludeData || req.PlanIncludeData)
 		selections = append(selections, contribution.Selections...)
 		result.RequiredIAMActions = append(result.RequiredIAMActions, contribution.RequiredIAMActions...)
 	}

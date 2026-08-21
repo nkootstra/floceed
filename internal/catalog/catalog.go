@@ -20,6 +20,24 @@ type PlanContribution struct {
 	RequiredIAMActions []string
 }
 
+// PermissionCheck is a disclosure-safe result from a source permission probe.
+// Adapters never include returned payloads in the result.
+type PermissionCheck struct {
+	Service  string
+	Resource string
+	Action   string
+	ARN      string
+	OK       bool
+	Blocking bool
+	Message  string
+}
+
+// PermissionChecker is implemented by adapters that can exercise their
+// source permissions with a bounded, read-only request.
+type PermissionChecker interface {
+	CheckPermissions(context.Context, model.SourceScope, model.ResourceRef, model.CaptureOptions) []PermissionCheck
+}
+
 // Planner is implemented by adapters that translate project configuration into
 // capture work. FinalizePlanning lets the adapter remove or report links that
 // cannot be represented by the current set of supported services.

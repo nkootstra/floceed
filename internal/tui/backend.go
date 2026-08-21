@@ -30,6 +30,7 @@ type Backend interface {
 	Identity(context.Context, string, string) (awsconfig.Identity, error)
 	Scan(context.Context, app.ScanRequest) (app.ScanResult, error)
 	Plan(context.Context, ProjectRequest) (app.Plan, error)
+	Preflight(context.Context, ProjectRequest) (app.PermissionResult, error)
 	SaveAndPull(context.Context, ProjectRequest) (model.Manifest, error)
 }
 
@@ -39,6 +40,7 @@ type application interface {
 	Identity(context.Context, string, string) (awsconfig.Identity, error)
 	Scan(context.Context, app.ScanRequest) (app.ScanResult, error)
 	PlanWithOptions(context.Context, config.Project, app.PlanOptions) (app.Plan, error)
+	Preflight(context.Context, config.Project, string, string) (app.PermissionResult, error)
 	PullWithOptions(context.Context, config.Project, string, string, string, app.PullOptions) (app.PullResult, error)
 }
 
@@ -74,8 +76,18 @@ func (b ApplicationBackend) Plan(ctx context.Context, req ProjectRequest) (app.P
 	return b.App.PlanWithOptions(ctx, req.Project, app.PlanOptions{AWSProfile: req.Project.Source.Profile, Region: req.Project.Source.Region, FixtureProfile: req.FixtureProfile})
 }
 
+func (b ApplicationBackend) Preflight(ctx context.Context, req ProjectRequest) (app.PermissionResult, error) {
+	if err := req.Project.Validate(); err != nil {
+		return app.PermissionResult{}, err
+	}
+	return b.App.Preflight(ctx, req.Project, req.Project.Source.Profile, req.Project.Source.Region)
+}
+
 func (b ApplicationBackend) SaveAndPull(ctx context.Context, req ProjectRequest) (model.Manifest, error) {
 	if err := req.Project.Validate(); err != nil {
+		return model.Manifest{}, err
+	}
+	if _, err := b.App.Preflight(ctx, req.Project, req.Project.Source.Profile, req.Project.Source.Region); err != nil {
 		return model.Manifest{}, err
 	}
 	abs, err := filepath.Abs(req.ProjectFile)

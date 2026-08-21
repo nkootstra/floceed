@@ -142,6 +142,49 @@ func (*Adapter) FinalizePlanning(snapshot *model.Snapshot, dependencies []model.
 	return findings, nil
 }
 
+func (a *Adapter) CheckPermissions(ctx context.Context, _ model.SourceScope, ref model.ResourceRef, opts model.CaptureOptions) []catalog.PermissionCheck {
+	checks := make([]catalog.PermissionCheck, 0, 4)
+	bucket := ref.ID
+	arn := ref.ARN
+	if arn == "" {
+		arn = "arn:aws:s3:::" + bucket
+	}
+	if _, err := a.client.HeadBucket(ctx, &awss3.HeadBucketInput{Bucket: aws.String(bucket)}); err != nil {
+		return append(checks, catalog.PermissionCheck{Service: "s3", Resource: bucket, Action: "s3:ListBucket", ARN: arn, Blocking: true, Message: err.Error()})
+	}
+	checks = append(checks, catalog.PermissionCheck{Service: "s3", Resource: bucket, Action: "s3:ListBucket", ARN: arn, OK: true, Blocking: true})
+	objects, err := a.client.ListObjectsV2(ctx, &awss3.ListObjectsV2Input{Bucket: aws.String(bucket), MaxKeys: aws.Int32(1)})
+	checks = append(checks, catalog.PermissionCheck{Service: "s3", Resource: bucket, Action: "s3:ListBucket", ARN: arn, OK: err == nil, Blocking: true, Message: errorMessage(err)})
+	if err != nil || objects == nil || !opts.IncludeData || len(objects.Contents) == 0 {
+		if err == nil && objects == nil {
+			checks[len(checks)-1].OK = false
+			checks[len(checks)-1].Message = "AWS returned no object listing"
+		}
+		return checks
+	}
+	key := aws.ToString(objects.Contents[0].Key)
+	objectSize := aws.ToInt64(objects.Contents[0].Size)
+	input := &awss3.GetObjectInput{Bucket: aws.String(bucket), Key: aws.String(key)}
+	if objectSize > 0 {
+		input.Range = aws.String("bytes=0-0")
+	}
+	object, err := a.client.GetObject(ctx, input)
+	if object != nil && object.Body != nil {
+		_ = object.Body.Close()
+	}
+	checks = append(checks, catalog.PermissionCheck{Service: "s3", Resource: bucket, Action: "s3:GetObject", ARN: arn + "/" + key, OK: err == nil, Blocking: true, Message: errorMessage(err)})
+	_, err = a.client.GetObjectTagging(ctx, &awss3.GetObjectTaggingInput{Bucket: aws.String(bucket), Key: aws.String(key)})
+	checks = append(checks, catalog.PermissionCheck{Service: "s3", Resource: bucket, Action: "s3:GetObjectTagging", ARN: arn + "/" + key, OK: err == nil, Blocking: true, Message: errorMessage(err)})
+	return checks
+}
+
+func errorMessage(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
 func dependencyFinding(service string) (string, model.SupportState, string) {
 	switch service {
 	case "sqs":

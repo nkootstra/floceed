@@ -545,6 +545,23 @@ func TestPlanOwnsDynamoDBSelectionOptionsAndIAM(t *testing.T) {
 	}
 }
 
+func TestCheckPermissionsUsesBoundedCountScanForDataCapture(t *testing.T) {
+	client := &fakeClient{
+		described: map[string]*dynamodb.DescribeTableOutput{"orders": {Table: &types.TableDescription{TableName: aws.String("orders"), TableArn: aws.String("arn:aws:dynamodb:eu-west-1:123456789012:table/orders")}}},
+		scans:     []*dynamodb.ScanOutput{{}},
+	}
+	checks := New(client).CheckPermissions(context.Background(), model.SourceScope{Region: "eu-west-1"}, model.ResourceRef{Service: "dynamodb", Type: "table", ID: "orders"}, model.CaptureOptions{IncludeData: true})
+	if len(checks) != 4 {
+		t.Fatalf("checks = %#v, want metadata and data checks", checks)
+	}
+	if got := checks[len(checks)-1]; got.Action != "dynamodb:Scan" || !got.OK {
+		t.Fatalf("scan check = %#v", got)
+	}
+	if len(client.scans) != 0 {
+		t.Fatal("permission check did not consume exactly one bounded scan result")
+	}
+}
+
 type fakeClient struct {
 	list      []*dynamodb.ListTablesOutput
 	described map[string]*dynamodb.DescribeTableOutput

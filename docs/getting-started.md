@@ -21,6 +21,8 @@ aws sso login --profile development
 
 Start from the [least-privilege IAM policy](iam-policy.md) and consider setting
 `expected_account_id` so a project cannot capture from the wrong account.
+Run `floceed doctor --project floceed.yaml` after selecting resources to verify
+the effective AWS identity and the permissions required by the capture.
 
 ## Install
 
