@@ -14,8 +14,10 @@ import (
 )
 
 type fakeBackend struct {
-	scanRequests chan<- app.ScanRequest
-	planRequests chan<- ProjectRequest
+	scanRequests  chan<- app.ScanRequest
+	planRequests  chan<- ProjectRequest
+	permissions   app.PermissionResult
+	permissionErr error
 }
 
 func (fakeBackend) Profiles(context.Context) ([]Profile, error) {
@@ -35,6 +37,9 @@ func (b fakeBackend) Plan(_ context.Context, req ProjectRequest) (app.Plan, erro
 		b.planRequests <- req
 	}
 	return app.Plan{}, nil
+}
+func (b fakeBackend) Preflight(context.Context, ProjectRequest) (app.PermissionResult, error) {
+	return b.permissions, b.permissionErr
 }
 func (fakeBackend) SaveAndPull(context.Context, ProjectRequest) (model.Manifest, error) {
 	return model.Manifest{SchemaVersion: 1}, nil
@@ -233,6 +238,23 @@ func TestStaleFailedPlanDoesNotSetErr(t *testing.T) {
 	}
 	if m.screen != ScreenResources {
 		t.Fatalf("stale failed plan changed screen to %s", m.screen)
+	}
+}
+
+func TestPermissionFailureStaysOnReviewBeforeConfirmation(t *testing.T) {
+	m := NewModel(fakeBackend{}, Options{})
+	m.screen, m.pending = ScreenOptions, ScreenOptions
+	m = update(t, m, planFinishedMsg{
+		plan:        app.Plan{},
+		permissions: app.PermissionResult{Checks: []app.Check{{Name: "aws:dynamodb:orders:dynamodb:Scan", Message: "missing", OK: false, Blocking: true}}},
+		err:         errors.New("permission preflight failed"),
+	})
+	if m.screen != ScreenReview || !m.hasFailedPermissions() {
+		t.Fatalf("screen=%s checks=%#v, want review with failed permission", m.screen, m.permissionChecks)
+	}
+	m = press(t, m, "enter")
+	if m.screen != ScreenReview {
+		t.Fatalf("screen=%s, permission failure must block confirmation", m.screen)
 	}
 }
 

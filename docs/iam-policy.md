@@ -181,6 +181,29 @@ Secrets Manager resource uses `SECRET-??????` so the `-XXXXXX` suffix AWS
 appends to every secret ARN is required, matching AWS's recommended
 least-privilege pattern. Remove the statements for services you do not select.
 
+## Permission preflight
+
+`floceed doctor` checks the configured AWS identity before capture. A pull
+repeats the check immediately before reading source data, and the interactive
+TUI performs the same check before it writes the project and bundle. Missing
+permissions are reported with the required action and resource ARN; Floceed
+does not modify IAM policies.
+
+Data-enabled captures use bounded read probes for payload permissions:
+
+| Service | Data permission |
+|---|---|
+| S3 | `s3:GetObject`, `s3:GetObjectTagging` |
+| DynamoDB | `dynamodb:Scan` |
+| Kinesis | `kinesis:ListShards`, `kinesis:GetShardIterator`, `kinesis:GetRecords` |
+| SQS | `sqs:GetQueueUrl`, `sqs:ReceiveMessage` |
+
+SQS preflight performs a zero-wait receive with visibility timeout zero. It may
+still affect the queue's receive metrics. Empty S3 buckets, streams without
+shards, and similar resources cannot exercise every payload permission; the
+required policy actions remain listed and the capture-time guard remains in
+place.
+
 Completed S3 reuse evaluates freshness with `ListObjectsV2`, which AWS
 authorizes through the existing `s3:ListBucket` action in `ReadSelectedS3`.
 It adds no permission beyond the policy above. An unchanged inventory can avoid

@@ -69,9 +69,10 @@ func newDockerLocalRuntime() *dockerLocalRuntime {
 }
 
 type Check struct {
-	Name    string `json:"name"`
-	OK      bool   `json:"ok"`
-	Message string `json:"message"`
+	Name     string `json:"name"`
+	OK       bool   `json:"ok"`
+	Blocking bool   `json:"blocking,omitempty"`
+	Message  string `json:"message"`
 }
 type DoctorResult struct {
 	Checks []Check `json:"checks"`
@@ -80,9 +81,9 @@ type DoctorResult struct {
 func (a *Application) Doctor(ctx context.Context, p config.Project, projectDir, profile, region string) (DoctorResult, error) {
 	result := DoctorResult{}
 	if err := p.Validate(); err != nil {
-		result.Checks = append(result.Checks, Check{"project", false, err.Error()})
+		result.Checks = append(result.Checks, Check{Name: "project", OK: false, Message: err.Error()})
 	} else {
-		result.Checks = append(result.Checks, Check{"project", true, "configuration is valid"})
+		result.Checks = append(result.Checks, Check{Name: "project", OK: true, Message: "configuration is valid"})
 	}
 	if profile == "" {
 		profile = p.Source.Profile
@@ -90,30 +91,30 @@ func (a *Application) Doctor(ctx context.Context, p config.Project, projectDir, 
 	if region == "" {
 		region = p.Source.Region
 	}
-	if _, err := a.Factory.Open(ctx, SourceRequest{
-		Profile:       profile,
-		Region:        region,
-		S3Names:       s3Names(p),
-		DynamoDBNames: ddbNames(p),
-	}); err != nil {
-		result.Checks = append(result.Checks, Check{"aws", false, err.Error()})
+	permissions, preflightErr := a.Preflight(ctx, p, profile, region)
+	if preflightErr != nil && permissions.Identity.AccountID == "" {
+		result.Checks = append(result.Checks, Check{Name: "aws", OK: false, Message: preflightErr.Error()})
 	} else {
-		result.Checks = append(result.Checks, Check{"aws", true, "caller identity confirmed"})
+		result.Checks = append(result.Checks, Check{Name: "aws", OK: true, Message: "caller identity confirmed"})
+		result.Checks = append(result.Checks, permissions.Checks...)
+		if preflightErr != nil && len(permissions.Checks) == 0 {
+			result.Checks = append(result.Checks, Check{Name: "aws:permissions", OK: false, Blocking: true, Message: preflightErr.Error()})
+		}
 	}
 	result.Checks = append(result.Checks, a.localRuntime.DoctorChecks(ctx)...)
 	parent := filepath.Dir(filepath.Join(projectDir, p.Output.Directory))
 	if err := os.MkdirAll(parent, 0700); err != nil {
-		result.Checks = append(result.Checks, Check{"output", false, err.Error()})
+		result.Checks = append(result.Checks, Check{Name: "output", OK: false, Message: err.Error()})
 	} else if f, err := os.CreateTemp(parent, ".floceed-write-check-"); err != nil {
-		result.Checks = append(result.Checks, Check{"output", false, err.Error()})
+		result.Checks = append(result.Checks, Check{Name: "output", OK: false, Message: err.Error()})
 	} else {
 		name := f.Name()
 		f.Close()
 		os.Remove(name)
-		result.Checks = append(result.Checks, Check{"output", true, "output directory is writable"})
+		result.Checks = append(result.Checks, Check{Name: "output", OK: true, Message: "output directory is writable"})
 	}
 	for _, c := range result.Checks {
-		if !c.OK {
+		if !c.OK && (c.Blocking || !strings.HasPrefix(c.Name, "aws:")) {
 			return result, &Error{Kind: ErrorLocal, Code: "DOCTOR_FAILED", Message: "one or more prerequisite checks failed"}
 		}
 	}
@@ -138,19 +139,19 @@ func (r *dockerLocalRuntime) runDockerProbe(ctx context.Context, args ...string)
 
 func (r *dockerLocalRuntime) DoctorChecks(ctx context.Context) []Check {
 	if _, err := r.lookPath("docker"); err != nil {
-		return []Check{{"docker", false, "docker executable not found"}}
+		return []Check{{Name: "docker", OK: false, Message: "docker executable not found"}}
 	}
 	if output, err := r.runDockerProbe(ctx, "compose", "version"); err != nil {
-		return []Check{{"docker", false, string(output)}}
+		return []Check{{Name: "docker", OK: false, Message: string(output)}}
 	}
 	if output, err := r.runDockerProbe(ctx, "info"); err != nil {
-		return []Check{{"docker", false, string(output)}}
+		return []Check{{Name: "docker", OK: false, Message: string(output)}}
 	}
-	checks := []Check{{"docker", true, "Docker and Compose are available"}}
+	checks := []Check{{Name: "docker", OK: true, Message: "Docker and Compose are available"}}
 	if output, err := r.runDockerProbe(ctx, "manifest", "inspect", compose.Image); err != nil {
-		return append(checks, Check{"floci-image", false, fmt.Sprintf("pinned Floci image is unavailable: %s", output)})
+		return append(checks, Check{Name: "floci-image", OK: false, Message: fmt.Sprintf("pinned Floci image is unavailable: %s", output)})
 	}
-	return append(checks, Check{"floci-image", true, "pinned Floci 1.6.0 compat image is available"})
+	return append(checks, Check{Name: "floci-image", OK: true, Message: "pinned Floci 1.6.0 compat image is available"})
 }
 
 func (r *dockerLocalRuntime) Start(ctx context.Context, target, composeFile string) ([]byte, error) {

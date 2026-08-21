@@ -45,27 +45,28 @@ type Model struct {
 	// pending is the screen that launched an in-flight async operation.
 	// Completion handlers only navigate forward if the user is still on that
 	// screen (i.e. has not navigated away in the meantime).
-	pending         Screen
-	profiles        []Profile
-	profile, region string
-	identity        awsconfig.Identity
-	services        []model.ServiceDescriptor
-	serviceSelected map[string]bool
-	resources       []model.ResourceSummary
-	selected        map[string]bool
-	dataEnabled     map[string]bool
-	dataMode        map[string]config.DataMode
-	findings        []model.Finding
-	plan            app.Plan
-	manifest        model.Manifest
-	cursor          int
-	busy            bool
-	filtering       bool
-	filter          textinput.Model
-	regionInput     textinput.Model
-	err             error
-	progress        model.ProgressEvent
-	pullUpdates     chan tea.Msg
+	pending          Screen
+	profiles         []Profile
+	profile, region  string
+	identity         awsconfig.Identity
+	services         []model.ServiceDescriptor
+	serviceSelected  map[string]bool
+	resources        []model.ResourceSummary
+	selected         map[string]bool
+	dataEnabled      map[string]bool
+	dataMode         map[string]config.DataMode
+	findings         []model.Finding
+	permissionChecks []app.Check
+	plan             app.Plan
+	manifest         model.Manifest
+	cursor           int
+	busy             bool
+	filtering        bool
+	filter           textinput.Model
+	regionInput      textinput.Model
+	err              error
+	progress         model.ProgressEvent
+	pullUpdates      chan tea.Msg
 }
 
 type profilesLoadedMsg struct {
@@ -81,8 +82,9 @@ type scanFinishedMsg struct {
 	err    error
 }
 type planFinishedMsg struct {
-	plan app.Plan
-	err  error
+	plan        app.Plan
+	permissions app.PermissionResult
+	err         error
 }
 type pullFinishedMsg struct {
 	manifest model.Manifest
@@ -130,6 +132,15 @@ func NewModel(backend Backend, opts Options) Model {
 func (m Model) Screen() Screen { return m.screen }
 func (m Model) Init() tea.Cmd  { return m.loadProfiles() }
 
+func (m Model) hasFailedPermissions() bool {
+	for _, check := range m.permissionChecks {
+		if check.Blocking && !check.OK {
+			return true
+		}
+	}
+	return false
+}
+
 func (m Model) loadProfiles() tea.Cmd {
 	return func() tea.Msg { p, err := m.backend.Profiles(m.ctx); return profilesLoadedMsg{p, err} }
 }
@@ -153,7 +164,14 @@ func (m Model) scan() tea.Cmd {
 }
 func (m Model) makePlan() tea.Cmd {
 	req := m.request()
-	return func() tea.Msg { p, err := m.backend.Plan(m.ctx, req); return planFinishedMsg{p, err} }
+	return func() tea.Msg {
+		p, err := m.backend.Plan(m.ctx, req)
+		if err != nil {
+			return planFinishedMsg{plan: p, err: err}
+		}
+		permissions, err := m.backend.Preflight(m.ctx, req)
+		return planFinishedMsg{plan: p, permissions: permissions, err: err}
+	}
 }
 func (m *Model) pull() tea.Cmd {
 	m.pullUpdates = make(chan tea.Msg, 16)

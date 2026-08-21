@@ -72,6 +72,16 @@ func (m Model) View() tea.View {
 		for _, f := range m.findings {
 			fmt.Fprintf(&b, "- %s %s: %s\n", badge(f.Support, m.opts.NoColor), f.Code, f.Message)
 		}
+		for _, check := range m.permissionChecks {
+			status := "OK"
+			if !check.OK {
+				status = "MISSING"
+			}
+			fmt.Fprintf(&b, "- %s %s: %s\n", status, check.Name, check.Message)
+		}
+		if m.hasFailedPermissions() {
+			b.WriteString("\nFix the missing AWS permissions, then retry.\n")
+		}
 	case ScreenSummary:
 		fmt.Fprintf(&b, "Ready to generate\n%d resources | %d actions | estimated %s\n", len(m.selected), len(m.plan.Operations), bytesLabel(m.plan.EstimatedBytes))
 	case ScreenConfirm:

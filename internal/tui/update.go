@@ -41,10 +41,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.err, m.plan = msg.err, msg.plan
-		if msg.err == nil {
-			m.findings = slices.Clone(msg.plan.Findings)
-			m.screen, m.cursor = ScreenReview, 0
+		m.permissionChecks = slices.Clone(msg.permissions.Checks)
+		if msg.err != nil && len(msg.permissions.Checks) == 0 {
+			return m, nil
 		}
+		m.findings = slices.Clone(msg.plan.Findings)
+		m.screen, m.cursor = ScreenReview, 0
 		return m, nil
 	case pullFinishedMsg:
 		m.busy, m.err, m.manifest, m.screen = false, msg.err, msg.manifest, ScreenResult
@@ -169,6 +171,9 @@ func (m *Model) advance() (tea.Model, tea.Cmd) {
 		m.busy, m.pending = true, ScreenOptions
 		return *m, m.makePlan()
 	case ScreenReview:
+		if m.hasFailedPermissions() {
+			return *m, nil
+		}
 		m.screen = ScreenSummary
 	case ScreenSummary:
 		m.screen = ScreenConfirm

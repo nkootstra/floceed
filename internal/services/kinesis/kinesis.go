@@ -78,6 +78,48 @@ func (*Adapter) FinalizePlanning(*model.Snapshot, []model.Dependency) ([]model.F
 	return nil, nil
 }
 
+func (a *Adapter) CheckPermissions(ctx context.Context, _ model.SourceScope, ref model.ResourceRef, opts model.CaptureOptions) []catalog.PermissionCheck {
+	checks := make([]catalog.PermissionCheck, 0, 5)
+	if _, err := a.client.DescribeStreamSummary(ctx, &awsKinesis.DescribeStreamSummaryInput{StreamName: &ref.ID}); err != nil {
+		return append(checks, catalog.PermissionCheck{Service: "kinesis", Resource: ref.ID, Action: "kinesis:DescribeStreamSummary", ARN: ref.ARN, Blocking: true, Message: err.Error()})
+	}
+	checks = append(checks, catalog.PermissionCheck{Service: "kinesis", Resource: ref.ID, Action: "kinesis:DescribeStreamSummary", ARN: ref.ARN, OK: true, Blocking: true})
+	if !opts.IncludeData {
+		return checks
+	}
+	recordClient, ok := a.client.(RecordClient)
+	if !ok {
+		return append(checks, catalog.PermissionCheck{Service: "kinesis", Resource: ref.ID, Action: "kinesis:ListShards", ARN: ref.ARN, Blocking: true, Message: "record client unavailable"})
+	}
+	shards, err := recordClient.ListShards(ctx, &awsKinesis.ListShardsInput{StreamARN: awsconfig.StringOrNil(ref.ARN)})
+	checks = append(checks, catalog.PermissionCheck{Service: "kinesis", Resource: ref.ID, Action: "kinesis:ListShards", ARN: ref.ARN, OK: err == nil && shards != nil, Blocking: true, Message: errorMessage(err)})
+	if err == nil && shards == nil {
+		checks[len(checks)-1].Message = "AWS returned no shard listing"
+	}
+	if err != nil || shards == nil || len(shards.Shards) == 0 || shards.Shards[0].ShardId == nil {
+		return checks
+	}
+	shardID := aws.ToString(shards.Shards[0].ShardId)
+	iterator, err := recordClient.GetShardIterator(ctx, &awsKinesis.GetShardIteratorInput{StreamARN: awsconfig.StringOrNil(ref.ARN), ShardId: &shardID, ShardIteratorType: types.ShardIteratorTypeTrimHorizon})
+	checks = append(checks, catalog.PermissionCheck{Service: "kinesis", Resource: ref.ID, Action: "kinesis:GetShardIterator", ARN: ref.ARN, OK: err == nil && iterator != nil, Blocking: true, Message: errorMessage(err)})
+	if err == nil && iterator == nil {
+		checks[len(checks)-1].Message = "AWS returned no shard iterator"
+	}
+	if err != nil || iterator == nil || iterator.ShardIterator == nil {
+		return checks
+	}
+	_, err = recordClient.GetRecords(ctx, &awsKinesis.GetRecordsInput{ShardIterator: iterator.ShardIterator, Limit: aws.Int32(1)})
+	checks = append(checks, catalog.PermissionCheck{Service: "kinesis", Resource: ref.ID, Action: "kinesis:GetRecords", ARN: ref.ARN, OK: err == nil, Blocking: true, Message: errorMessage(err)})
+	return checks
+}
+
+func errorMessage(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
 func (a *Adapter) Discover(ctx context.Context, scope model.SourceScope) (model.DiscoveryResult, error) {
 	if a.client == nil {
 		return model.DiscoveryResult{}, nil

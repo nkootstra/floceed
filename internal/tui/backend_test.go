@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -20,6 +21,7 @@ type fakePuller struct {
 	called         bool
 	planCalled     bool
 	fixtureProfile string
+	preflightErr   error
 }
 
 func (f *fakePuller) PlanWithOptions(_ context.Context, _ config.Project, options app.PlanOptions) (app.Plan, error) {
@@ -57,6 +59,28 @@ func (f *fakePuller) PullWithOptions(_ context.Context, _ config.Project, _ stri
 	f.called = true
 	f.fixtureProfile = options.FixtureProfile
 	return app.PullResult{Manifest: model.Manifest{SchemaVersion: model.CurrentManifestSchemaVersion}, Baseline: app.BaselinePresent}, nil
+}
+func (f *fakePuller) Preflight(context.Context, config.Project, string, string) (app.PermissionResult, error) {
+	return app.PermissionResult{}, f.preflightErr
+}
+
+func TestSaveAndPullRunsPreflightBeforeWritingProject(t *testing.T) {
+	project := config.NewProject()
+	project.Source.Region = "eu-west-1"
+	projectFile := filepath.Join(t.TempDir(), "floceed.yaml")
+	puller := &fakePuller{preflightErr: errors.New("missing permission")}
+	backend := ApplicationBackend{App: puller}
+
+	_, err := backend.SaveAndPull(context.Background(), ProjectRequest{Project: project, ProjectFile: projectFile})
+	if err == nil || err.Error() != "missing permission" {
+		t.Fatalf("error = %v, want preflight error", err)
+	}
+	if puller.called {
+		t.Fatal("Pull() was called after permission preflight failed")
+	}
+	if _, readErr := os.Stat(projectFile); !errors.Is(readErr, os.ErrNotExist) {
+		t.Fatalf("project file exists after failed preflight: %v", readErr)
+	}
 }
 
 func TestApplicationBackendForwardsFixtureProfileToPlanAndPull(t *testing.T) {

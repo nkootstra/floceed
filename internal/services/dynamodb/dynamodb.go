@@ -63,6 +63,48 @@ func (*Adapter) FinalizePlanning(*model.Snapshot, []model.Dependency) ([]model.F
 	return nil, nil
 }
 
+func (a *Adapter) CheckPermissions(ctx context.Context, scope model.SourceScope, ref model.ResourceRef, opts model.CaptureOptions) []catalog.PermissionCheck {
+	arn := ref.ARN
+	checks := make([]catalog.PermissionCheck, 0, 4)
+	description, err := a.client.DescribeTable(ctx, &awsddb.DescribeTableInput{TableName: aws.String(ref.ID)})
+	if err != nil {
+		checks = append(checks, catalog.PermissionCheck{Service: "dynamodb", Resource: ref.ID, Action: "dynamodb:DescribeTable", ARN: arn, Blocking: true, Message: err.Error()})
+		return checks
+	}
+	if description.Table != nil && description.Table.TableArn != nil {
+		arn = aws.ToString(description.Table.TableArn)
+	}
+	if description.Table == nil {
+		checks = append(checks, catalog.PermissionCheck{Service: "dynamodb", Resource: ref.ID, Action: "dynamodb:DescribeTable", ARN: arn, Blocking: true, Message: "AWS returned no table description"})
+		return checks
+	}
+	checks = append(checks, catalog.PermissionCheck{Service: "dynamodb", Resource: ref.ID, Action: "dynamodb:DescribeTable", ARN: arn, OK: true, Blocking: true})
+	if _, err := a.client.DescribeTimeToLive(ctx, &awsddb.DescribeTimeToLiveInput{TableName: aws.String(ref.ID)}); err != nil {
+		checks = append(checks, catalog.PermissionCheck{Service: "dynamodb", Resource: ref.ID, Action: "dynamodb:DescribeTimeToLive", ARN: arn, Message: err.Error()})
+	} else {
+		checks = append(checks, catalog.PermissionCheck{Service: "dynamodb", Resource: ref.ID, Action: "dynamodb:DescribeTimeToLive", ARN: arn, OK: true})
+	}
+	if arn != "" {
+		if _, err := a.client.ListTagsOfResource(ctx, &awsddb.ListTagsOfResourceInput{ResourceArn: aws.String(arn)}); err != nil {
+			checks = append(checks, catalog.PermissionCheck{Service: "dynamodb", Resource: ref.ID, Action: "dynamodb:ListTagsOfResource", ARN: arn, Message: err.Error()})
+		} else {
+			checks = append(checks, catalog.PermissionCheck{Service: "dynamodb", Resource: ref.ID, Action: "dynamodb:ListTagsOfResource", ARN: arn, OK: true})
+		}
+	}
+	if opts.IncludeData {
+		_, err := a.client.Scan(ctx, &awsddb.ScanInput{TableName: aws.String(ref.ID), Limit: aws.Int32(1), Select: types.SelectCount})
+		checks = append(checks, catalog.PermissionCheck{Service: "dynamodb", Resource: ref.ID, Action: "dynamodb:Scan", ARN: arn, OK: err == nil, Blocking: true, Message: errorMessage(err)})
+	}
+	return checks
+}
+
+func errorMessage(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
 type AttributeDefinition struct {
 	Name string `json:"name"`
 	Type string `json:"type"`

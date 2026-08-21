@@ -116,6 +116,10 @@ func (a *Application) PullWithOptions(ctx context.Context, p config.Project, pro
 	if err != nil {
 		return PullResult{}, sourceError(err)
 	}
+	permissions, preflightErr := a.preflightSource(ctx, p, source, false)
+	if preflightErr != nil {
+		return PullResult{}, permissionPreflightError(permissions, preflightErr)
+	}
 	fingerprint := captureFingerprint(p, abs, effectiveProfile, effectiveRegion, source.Identity.AccountID, policy)
 	tmp := filepath.Join(workBase, hex.EncodeToString(fingerprint[:16]))
 	if err := os.MkdirAll(workBase, 0o700); err != nil {

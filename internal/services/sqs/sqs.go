@@ -63,6 +63,31 @@ func (*Adapter) Plan(project config.Project, _ bool) catalog.PlanContribution {
 func (*Adapter) FinalizePlanning(*model.Snapshot, []model.Dependency) ([]model.Finding, error) {
 	return nil, nil
 }
+
+func (a *Adapter) CheckPermissions(ctx context.Context, _ model.SourceScope, ref model.ResourceRef, opts model.CaptureOptions) []catalog.PermissionCheck {
+	if !opts.IncludeData {
+		return nil
+	}
+	checks := make([]catalog.PermissionCheck, 0, 2)
+	url, err := a.client.GetQueueUrl(ctx, &awsSQS.GetQueueUrlInput{QueueName: &ref.ID})
+	checks = append(checks, catalog.PermissionCheck{Service: "sqs", Resource: ref.ID, Action: "sqs:GetQueueUrl", ARN: ref.ARN, OK: err == nil && url != nil && url.QueueUrl != nil, Blocking: true, Message: errorMessage(err)})
+	if err == nil && (url == nil || url.QueueUrl == nil) {
+		checks[len(checks)-1].Message = "AWS returned no queue URL"
+	}
+	if err != nil || url == nil || url.QueueUrl == nil {
+		return checks
+	}
+	_, err = a.client.ReceiveMessage(ctx, &awsSQS.ReceiveMessageInput{QueueUrl: url.QueueUrl, MaxNumberOfMessages: 1, VisibilityTimeout: 0, WaitTimeSeconds: 0})
+	checks = append(checks, catalog.PermissionCheck{Service: "sqs", Resource: ref.ID, Action: "sqs:ReceiveMessage", ARN: ref.ARN, OK: err == nil, Blocking: true, Message: errorMessage(err)})
+	return checks
+}
+
+func errorMessage(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
 func (*Adapter) Discover(context.Context, model.SourceScope) (model.DiscoveryResult, error) {
 	return model.DiscoveryResult{}, nil
 }
