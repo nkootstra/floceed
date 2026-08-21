@@ -4,6 +4,7 @@ import (
 	"slices"
 	"strings"
 
+	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
 	"github.com/nkootstra/floceed/internal/config"
 )
@@ -20,7 +21,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.busy, m.err, m.identity = false, msg.err, msg.identity
 		return m, nil
 	case scanFinishedMsg:
+		if msg.token != 0 && msg.token != m.scanToken {
+			return m, nil
+		}
 		m.busy = false
+		m.scanCancel = nil
 		honorResult := m.screen == m.pending
 		m.pending = ""
 		if !honorResult {
@@ -55,6 +60,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.progress = msg.event
 		return m, waitPullUpdate(m.pullUpdates)
 	case tea.WindowSizeMsg:
+		return m, nil
+	case spinner.TickMsg:
+		var cmd tea.Cmd
+		m.spinner, cmd = m.spinner.Update(msg)
+		if m.busy {
+			return m, cmd
+		}
 		return m, nil
 	case tea.KeyPressMsg:
 		return m.updateKey(msg)
@@ -162,7 +174,7 @@ func (m *Model) advance() (tea.Model, tea.Cmd) {
 		}
 	case ScreenServices:
 		m.busy, m.pending = true, ScreenServices
-		return *m, m.scan()
+		return *m, tea.Batch(m.scan(), func() tea.Msg { return m.spinner.Tick() })
 	case ScreenResources:
 		if len(m.selected) > 0 {
 			m.screen, m.cursor = ScreenOptions, 0
@@ -197,6 +209,11 @@ func (m *Model) back() {
 		}
 		m.screen = ScreenProfiles
 	case ScreenServices:
+		if m.scanCancel != nil {
+			m.scanCancel()
+			m.scanCancel = nil
+		}
+		m.busy = false
 		m.screen = ScreenIdentity
 	case ScreenResources:
 		m.screen = ScreenServices
