@@ -94,6 +94,14 @@ capability report for the exact runtime contract:
 floceed capabilities --output json
 ```
 
+Replay stays permissive: generated Compose projects never enable Floci's
+optional IAM enforcement mode, and Floceed does not capture or evaluate IAM
+policies. The end-to-end suite separately verifies a representative denied API
+call for every advertised service against the pinned image. Floci 1.6.0 returns
+HTTP 403 `AccessDenied` for eleven of the twelve services; API Gateway v2 REST
+routes remain a documented upstream enforcement gap that the test tracks
+explicitly.
+
 Floceed is pre-1.0, so compatibility commitments may evolve between minor
 releases.
 
