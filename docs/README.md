@@ -433,13 +433,13 @@ A dedicated end-to-end test starts Floci with IAM enforcement enabled
 (`FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED=true`) and proves that permission
 differences between local replay and real AWS are observable offline: a locally
 seeded identity carrying a least-privilege application policy can read the
-replayed S3 object and DynamoDB item. For each supported service, an identity
-with no policy must receive HTTP 403 `AccessDenied`, while the same read-only
-probe must succeed for an identity granted that exact action. Eleven of twelve
-advertised services enforce that comparison. API Gateway v2 REST routes are
-the pinned-image exception: Floci 1.6.0 currently permits `GET /v2/apis` without
-`apigateway:GET`. The test records that exception as a skipped known gap and
-fails when enforcement appears so the exception cannot silently become stale.
+replayed S3 object and DynamoDB item. The suite probes every advertised service:
+an identity with no policy receives HTTP 403 `AccessDenied` for eleven of the
+twelve services, while the same read-only probes succeed for an identity granted
+the exact actions. API Gateway v2 REST is the tracked pinned-image exception:
+Floci 1.6.0 currently permits `GET /v2/apis` without `apigateway:GET`. The test
+records that exception as a skipped known gap and fails when enforcement appears
+so the exception cannot silently become stale.
 Three upstream properties of the pinned Floci 1.6.0 image make this work and
 are worth knowing:
 

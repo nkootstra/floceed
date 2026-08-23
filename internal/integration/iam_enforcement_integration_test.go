@@ -5,7 +5,6 @@ package integration_test
 import (
 	"context"
 	"errors"
-	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -153,9 +152,20 @@ func assertPermissionMatrixCoversSupportedServices(t *testing.T, calls []permiss
 func assertPermissionMatrixMatchesAppPolicy(t *testing.T, calls []permissionCall) {
 	t.Helper()
 	grantedActions := testfixture.RepresentativeServiceDiscoveryIAMActions()
+	granted := make(map[string]bool, len(grantedActions))
+	for _, action := range grantedActions {
+		granted[action] = true
+	}
+	matrix := make(map[string]bool, len(calls))
 	for _, call := range calls {
-		if !slices.Contains(grantedActions, call.action) {
+		matrix[call.action] = true
+		if !granted[call.action] {
 			t.Errorf("representative app policy does not grant matrix action %q", call.action)
+		}
+	}
+	for _, action := range grantedActions {
+		if !matrix[action] {
+			t.Errorf("representative app policy grants action %q that is absent from the permission matrix", action)
 		}
 	}
 }
