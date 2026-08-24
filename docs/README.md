@@ -342,6 +342,14 @@ Notifications with unselected SQS, SNS, Lambda, or EventBridge targets are
 disabled and reported as unresolved dependencies. DynamoDB capacity settings are representational locally, and the
 known Floci LSI `INCLUDE` projection readback limitation is surfaced.
 
+Floci's optional IAM enforcement mode is never enabled by generated Compose
+projects: replay stays permissive by default. Floceed does not capture, seed,
+or evaluate IAM policies; its end-to-end suite only exercises enforcement
+against the pinned image so permission gaps between local replay and real AWS
+stay observable offline. Enforcement upstream covers identity-based policies,
+session policies, and permission boundaries; resource-based policies and
+`NotPrincipal` are not evaluated.
+
 Explicitly selected Kinesis streams support bounded or full record capture.
 Records are replayed in deterministic shard order; stream retention and
 consumer/shard-iterator state are not captured or replayed.
@@ -420,6 +428,31 @@ go test -tags=integration ./internal/integration -count=1
 It starts the exact digest-pinned Floci compat image, mounts the generated
 runtime and hooks read-only, verifies an S3 object and DynamoDB item, then
 recreates Floci with persistent state and replays the same bundle.
+
+A dedicated end-to-end test starts Floci with IAM enforcement enabled
+(`FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED=true`) and proves that permission
+differences between local replay and real AWS are observable offline: a locally
+seeded identity carrying a least-privilege application policy can read the
+replayed S3 object and DynamoDB item. The suite probes every advertised service:
+an identity with no policy receives HTTP 403 `AccessDenied` for eleven of the
+twelve services, while the same read-only probes succeed for an identity granted
+the exact actions. API Gateway v2 REST is the tracked pinned-image exception:
+Floci 1.6.0 currently permits `GET /v2/apis` without `apigateway:GET`. The test
+records that exception as a skipped known gap and fails when enforcement appears
+so the exception cannot silently become stale.
+Three upstream properties of the pinned Floci 1.6.0 image make this work and
+are worth knowing:
+
+- Floceed's replay hook signs requests with the source account ID as a dummy
+  access key. Unknown access keys bypass enforcement, so replay itself is
+  unaffected when enforcement is on.
+- Floci resolves DynamoDB data-plane resources only at
+  `arn:aws:dynamodb:<region>:<account>:table/*` granularity; a concrete table
+  name in a policy resource never matches, so least-privilege DynamoDB grants
+  must use the wildcard form.
+- Requests signed with a 12-digit access key are routed to that account ID,
+  so tests that seed identities alongside replay pin
+  `FLOCI_DEFAULT_ACCOUNT_ID` to the source account to keep one namespace.
 
 Deterministic metadata-only inspect fixtures can be checked without AWS or
 Docker:

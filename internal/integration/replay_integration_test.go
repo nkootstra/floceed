@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -314,14 +315,21 @@ func writeArtifact(t *testing.T, root, relative string, data []byte, mediaType s
 
 func startFloci(t *testing.T, ctx context.Context, bundleRoot, persistence string) testcontainers.Container {
 	t.Helper()
+	return startFlociWithEnv(t, ctx, bundleRoot, persistence, nil)
+}
+
+func startFlociWithEnv(t *testing.T, ctx context.Context, bundleRoot, persistence string, extraEnv map[string]string) testcontainers.Container {
+	t.Helper()
+	env := map[string]string{
+		"FLOCI_INIT_HOOKS_TIMEOUT_SECONDS": "300",
+		"FLOCI_STORAGE_MODE":               "persistent",
+		"FLOCI_STORAGE_PERSISTENT_PATH":    "/app/data",
+	}
+	maps.Copy(env, extraEnv)
 	request := testcontainers.ContainerRequest{
 		Image:        compose.Image,
 		ExposedPorts: []string{"4566/tcp"},
-		Env: map[string]string{
-			"FLOCI_INIT_HOOKS_TIMEOUT_SECONDS": "300",
-			"FLOCI_STORAGE_MODE":               "persistent",
-			"FLOCI_STORAGE_PERSISTENT_PATH":    "/app/data",
-		},
+		Env:          env,
 		Mounts: testcontainers.ContainerMounts{
 			{Source: testcontainers.GenericBindMountSource{HostPath: bundleRoot}, Target: "/floceed", ReadOnly: true},
 			{Source: testcontainers.GenericBindMountSource{HostPath: filepath.Join(bundleRoot, "init", "ready.d")}, Target: "/etc/floci/init/ready.d", ReadOnly: true},
