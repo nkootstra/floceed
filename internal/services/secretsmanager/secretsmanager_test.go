@@ -2,6 +2,7 @@ package secretsmanager
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -49,7 +50,7 @@ func TestCaptureIsStructureOnlyAndNeverReadsValues(t *testing.T) {
 	if err := (model.Manifest{SchemaVersion: model.CurrentManifestSchemaVersion, Snapshots: []model.Snapshot{*snapshot}}).Validate(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := New(nil).Capture(context.Background(), model.SourceScope{}, ref, model.CaptureOptions{IncludeData: true}); err == nil {
+	if _, err := New(nil).Capture(context.Background(), model.SourceScope{}, ref, model.CaptureOptions{}); err == nil || !errors.Is(err, model.ErrValidation) {
 		t.Fatal("data capture must be rejected")
 	}
 }

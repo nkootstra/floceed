@@ -186,6 +186,7 @@ func (m *Model) advance() (tea.Model, tea.Cmd) {
 		return *m, tea.Batch(m.scan(), func() tea.Msg { return m.spinner.Tick() })
 	case ScreenResources:
 		if len(m.selected) > 0 {
+			m.sanitizeDataChoices()
 			m.screen, m.cursor = ScreenOptions, 0
 		}
 	case ScreenOptions:
@@ -262,14 +263,42 @@ func (m *Model) toggle() {
 		items := m.selectedResources()
 		if m.cursor >= 0 && m.cursor < len(items) {
 			k := resourceKey(items[m.cursor].Ref)
-			switch m.dataChoice[k] {
-			case "":
-				m.dataChoice[k] = config.DataModeBounded
-			case config.DataModeBounded:
-				m.dataChoice[k] = config.DataModeFull
-			default:
+			modes := dataModes(items[m.cursor].Ref.Service)
+			if len(modes) == 0 {
 				delete(m.dataChoice, k)
+				return
 			}
+			current := m.dataChoice[k]
+			if current == "" {
+				m.dataChoice[k] = modes[0]
+				return
+			}
+			index := slices.Index(modes, current)
+			if index < 0 || index == len(modes)-1 {
+				delete(m.dataChoice, k)
+				return
+			}
+			m.dataChoice[k] = modes[index+1]
+		}
+	}
+}
+
+func dataModes(service string) []config.DataMode {
+	switch service {
+	case "s3", "dynamodb":
+		return []config.DataMode{config.DataModeBounded, config.DataModeFull}
+	case "sqs":
+		return []config.DataMode{config.DataModeBounded}
+	default:
+		return nil
+	}
+}
+
+func (m *Model) sanitizeDataChoices() {
+	for key, choice := range m.dataChoice {
+		service, _, _ := strings.Cut(key, "/")
+		if !slices.Contains(dataModes(service), choice) {
+			delete(m.dataChoice, key)
 		}
 	}
 }

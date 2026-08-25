@@ -2,7 +2,6 @@ package s3
 
 import (
 	"archive/tar"
-	"bufio"
 	"bytes"
 	"compress/gzip"
 	"context"
@@ -31,18 +30,21 @@ import (
 )
 
 func TestInventoryPackReaderUsesSharedCountBoundary(t *testing.T) {
-	var input strings.Builder
-	for i := 0; i < s3PackObjects+1; i++ {
-		fmt.Fprintf(&input, `{"key":"key-%d","path":"key-%d","size":1}`+"\n", i, i)
+	inventory := make([]types.Object, s3PackObjects+1)
+	for i := range inventory {
+		key := fmt.Sprintf("key-%d", i)
+		inventory[i] = types.Object{Key: aws.String(key), ETag: aws.String(key), Size: aws.Int64(1)}
 	}
-	r := newInventoryPackReader(bufio.NewReader(strings.NewReader(input.String())))
-	first, _, err := r.Next()
-	if err != nil || len(first) != s3PackObjects {
-		t.Fatalf("first pack = %d entries, %v", len(first), err)
+	root := t.TempDir()
+	ref := model.ResourceRef{Service: "s3", Type: "bucket", ID: "assets"}
+	snapshot, err := New(&inventoryBoundaryClient{packedDataClient: packedDataClient{inventory: inventory}}).Capture(context.Background(), model.SourceScope{Region: "eu-west-1"}, ref, model.CaptureOptions{
+		IncludeData: true, Mode: "full", ArtifactDirectory: filepath.Join(root, "artifacts"), CheckpointDirectory: filepath.Join(root, "checkpoint"),
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
-	second, _, err := r.Next()
-	if err != nil || len(second) != 1 {
-		t.Fatalf("second pack = %d entries, %v", len(second), err)
+	if snapshot.Dataset == nil || len(snapshot.Dataset.Chunks) != 2 || snapshot.Dataset.Chunks[0].Records != s3PackObjects || snapshot.Dataset.Chunks[1].Records != 1 {
+		t.Fatalf("dataset chunks = %#v", snapshot.Dataset)
 	}
 }
 
@@ -281,6 +283,53 @@ type packedDataClient struct {
 	ifMatches []string
 	metadata  string
 	tags      []types.Tag
+}
+
+// inventoryBoundaryClient supplies the public bucket metadata calls required
+// by Adapter.Capture while retaining packedDataClient's object behavior.
+type inventoryBoundaryClient struct{ packedDataClient }
+
+func (c *inventoryBoundaryClient) ListBuckets(context.Context, *awss3.ListBucketsInput, ...func(*awss3.Options)) (*awss3.ListBucketsOutput, error) {
+	return &awss3.ListBucketsOutput{}, nil
+}
+func (c *inventoryBoundaryClient) HeadBucket(context.Context, *awss3.HeadBucketInput, ...func(*awss3.Options)) (*awss3.HeadBucketOutput, error) {
+	return &awss3.HeadBucketOutput{BucketRegion: aws.String("eu-west-1")}, nil
+}
+func (c *inventoryBoundaryClient) GetBucketTagging(context.Context, *awss3.GetBucketTaggingInput, ...func(*awss3.Options)) (*awss3.GetBucketTaggingOutput, error) {
+	return &awss3.GetBucketTaggingOutput{}, nil
+}
+func (c *inventoryBoundaryClient) GetBucketVersioning(context.Context, *awss3.GetBucketVersioningInput, ...func(*awss3.Options)) (*awss3.GetBucketVersioningOutput, error) {
+	return &awss3.GetBucketVersioningOutput{}, nil
+}
+func (c *inventoryBoundaryClient) GetBucketCors(context.Context, *awss3.GetBucketCorsInput, ...func(*awss3.Options)) (*awss3.GetBucketCorsOutput, error) {
+	return &awss3.GetBucketCorsOutput{}, nil
+}
+func (c *inventoryBoundaryClient) GetBucketLifecycleConfiguration(context.Context, *awss3.GetBucketLifecycleConfigurationInput, ...func(*awss3.Options)) (*awss3.GetBucketLifecycleConfigurationOutput, error) {
+	return &awss3.GetBucketLifecycleConfigurationOutput{}, nil
+}
+func (c *inventoryBoundaryClient) GetBucketEncryption(context.Context, *awss3.GetBucketEncryptionInput, ...func(*awss3.Options)) (*awss3.GetBucketEncryptionOutput, error) {
+	return &awss3.GetBucketEncryptionOutput{}, nil
+}
+func (c *inventoryBoundaryClient) GetBucketPolicy(context.Context, *awss3.GetBucketPolicyInput, ...func(*awss3.Options)) (*awss3.GetBucketPolicyOutput, error) {
+	return &awss3.GetBucketPolicyOutput{}, nil
+}
+func (c *inventoryBoundaryClient) GetBucketWebsite(context.Context, *awss3.GetBucketWebsiteInput, ...func(*awss3.Options)) (*awss3.GetBucketWebsiteOutput, error) {
+	return &awss3.GetBucketWebsiteOutput{}, nil
+}
+func (c *inventoryBoundaryClient) GetPublicAccessBlock(context.Context, *awss3.GetPublicAccessBlockInput, ...func(*awss3.Options)) (*awss3.GetPublicAccessBlockOutput, error) {
+	return &awss3.GetPublicAccessBlockOutput{}, nil
+}
+func (c *inventoryBoundaryClient) GetObjectLockConfiguration(context.Context, *awss3.GetObjectLockConfigurationInput, ...func(*awss3.Options)) (*awss3.GetObjectLockConfigurationOutput, error) {
+	return &awss3.GetObjectLockConfigurationOutput{}, nil
+}
+func (c *inventoryBoundaryClient) GetBucketNotificationConfiguration(context.Context, *awss3.GetBucketNotificationConfigurationInput, ...func(*awss3.Options)) (*awss3.GetBucketNotificationConfigurationOutput, error) {
+	return &awss3.GetBucketNotificationConfigurationOutput{}, nil
+}
+func (c *inventoryBoundaryClient) GetBucketReplication(context.Context, *awss3.GetBucketReplicationInput, ...func(*awss3.Options)) (*awss3.GetBucketReplicationOutput, error) {
+	return &awss3.GetBucketReplicationOutput{}, nil
+}
+func (c *inventoryBoundaryClient) GetBucketLogging(context.Context, *awss3.GetBucketLoggingInput, ...func(*awss3.Options)) (*awss3.GetBucketLoggingOutput, error) {
+	return &awss3.GetBucketLoggingOutput{}, nil
 }
 
 func (c packedDataClient) ListObjectsV2(context.Context, *awss3.ListObjectsV2Input, ...func(*awss3.Options)) (*awss3.ListObjectsV2Output, error) {
@@ -588,13 +637,19 @@ func TestGovernedS3CaptureCheckpointIncludesPolicyIdentity(t *testing.T) {
 }
 
 func TestLoadS3CheckpointRejectsMalformedJSONAsCorrupt(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "checkpoint.json")
+	root := t.TempDir()
+	path := filepath.Join(root, "checkpoint", "checkpoint.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(path, []byte("{this is not json"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	_, _, err := loadS3Checkpoint(path, "assets", model.CaptureOptions{}, nil)
+	_, err := New(&inventoryBoundaryClient{}).Capture(context.Background(), model.SourceScope{Region: "eu-west-1"}, model.ResourceRef{Service: "s3", Type: "bucket", ID: "assets"}, model.CaptureOptions{
+		IncludeData: true, Mode: "full", ArtifactDirectory: filepath.Join(root, "artifacts"), CheckpointDirectory: filepath.Dir(path),
+	})
 	if !errors.Is(err, ErrCheckpointCorrupt) {
-		t.Fatalf("loadS3Checkpoint error = %v, want ErrCheckpointCorrupt", err)
+		t.Fatalf("Capture error = %v, want ErrCheckpointCorrupt", err)
 	}
 	if err == nil || !strings.Contains(err.Error(), "invalid character") {
 		t.Fatalf("loadS3Checkpoint error = %v, want the JSON parse error preserved", err)

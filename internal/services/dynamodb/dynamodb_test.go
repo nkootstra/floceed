@@ -351,13 +351,22 @@ func TestGovernedCohortRejectsCorruptCheckpointSelection(t *testing.T) {
 }
 
 func TestLoadCheckpointRejectsMalformedJSONAsCorrupt(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "checkpoint.json")
+	root := t.TempDir()
+	path := filepath.Join(root, "checkpoint", "checkpoint.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(path, []byte("{this is not json"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	_, _, err := loadCheckpoint(path, "orders", model.CaptureOptions{})
+	client := &fakeClient{described: map[string]*dynamodb.DescribeTableOutput{
+		"orders": {Table: &types.TableDescription{TableName: aws.String("orders"), TableArn: aws.String("arn:orders")}},
+	}}
+	_, err := New(client).Capture(context.Background(), model.SourceScope{Region: "eu-west-1"}, model.ResourceRef{Service: "dynamodb", Type: "table", ID: "orders"}, model.CaptureOptions{
+		IncludeData: true, Mode: "full", ArtifactDirectory: filepath.Join(root, "artifacts"), CheckpointDirectory: filepath.Dir(path),
+	})
 	if !errors.Is(err, ErrCheckpointCorrupt) {
-		t.Fatalf("loadCheckpoint error = %v, want ErrCheckpointCorrupt", err)
+		t.Fatalf("Capture error = %v, want ErrCheckpointCorrupt", err)
 	}
 	if err == nil || !strings.Contains(err.Error(), "invalid character") {
 		t.Fatalf("loadCheckpoint error = %v, want the JSON parse error preserved", err)

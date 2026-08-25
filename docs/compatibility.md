@@ -61,7 +61,9 @@ automation can consume the final stdout envelope without interleaved logs.
 ## Large datasets and reuse
 
 Full S3, DynamoDB, and Kinesis captures are resumable and require an explicit
-hook timeout above the default. SQS remains bounded-only. In-progress
+hook timeout above the default. Full S3 mode is explicit and can capture all
+selected data; it bypasses configured object and byte limits. SQS remains
+bounded-only. In-progress
 checkpoints and completed capture-reuse ledgers live under the resolved work
 directory and are runner-local optimizations, not portable bundle contents.
 Completed ledger blobs are immutable and revalidated before reuse; they are

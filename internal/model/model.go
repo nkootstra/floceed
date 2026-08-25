@@ -563,16 +563,13 @@ func validateSnapshot(snapshot Snapshot) error {
 			return fmt.Errorf("CloudWatch Logs structure requires arn: %w", ErrValidation)
 		}
 		identity, parseErr := arnidentity.Parse(value.ARN)
-		resourcePart := ""
-		if parseErr == nil {
-			resourcePart = strings.TrimPrefix(identity.Resource, "log-group:")
-		}
+		resourcePart, hasLogGroupPrefix := identity.ResourceName("log-group:")
 		// DescribeLogGroups returns the ARN with a trailing ":*" for log groups
 		// created after AWS's 2019 ARN format change; configured ARNs may or may
 		// not carry it. Trim it before the identity check so a different log
 		// group whose name merely shares a prefix cannot pass.
 		resourcePart = strings.TrimSuffix(resourcePart, ":*")
-		if parseErr != nil || identity.Service != "logs" || identity.Region == "" || !snapshotAccountID.MatchString(identity.Account) || resourcePart != snapshot.Resource.ID {
+		if parseErr != nil || identity.Service != "logs" || identity.Region == "" || !snapshotAccountID.MatchString(identity.Account) || !hasLogGroupPrefix || resourcePart != snapshot.Resource.ID {
 			return fmt.Errorf("CloudWatch Logs structure ARN must match resource identity: %w", ErrValidation)
 		}
 		// A configured ARN may carry the optional ":*" suffix; compare identity

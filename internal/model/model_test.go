@@ -74,6 +74,7 @@ func TestManifestValidateCloudWatchLogsARNIgnoresStarSuffix(t *testing.T) {
 		ok   bool
 	}{
 		{"bare configured ARN, API returns :* suffix", snapshot(base, "arn:aws:logs:eu-west-1:123456789012:log-group:/app/orders:*"), true},
+		{"bare log ARN without log-group resource type rejected", snapshot(base, "arn:aws:logs:eu-west-1:123456789012:/app/orders:*"), false},
 		{"configured and API ARN both bare", snapshot(ResourceRef{Service: "logs", ID: "/app/orders", ARN: "arn:aws:logs:eu-west-1:123456789012:log-group:/app/orders"}, "arn:aws:logs:eu-west-1:123456789012:log-group:/app/orders"), true},
 		{"different log group rejected", snapshot(base, "arn:aws:logs:eu-west-1:123456789012:log-group:/app/other:*"), false},
 		{"wrong account in configured ARN rejected", snapshot(ResourceRef{Service: "logs", ID: "/app/orders", ARN: "arn:aws:logs:eu-west-1:999999999999:log-group:/app/orders:*"}, "arn:aws:logs:eu-west-1:123456789012:log-group:/app/orders:*"), false},

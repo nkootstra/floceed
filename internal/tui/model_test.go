@@ -367,6 +367,68 @@ func TestSafeDataDefaultsAndFinalConfirmation(t *testing.T) {
 	}
 }
 
+func TestDataChoiceCyclingFollowsServiceSupport(t *testing.T) {
+	m := NewModel(fakeBackend{}, Options{})
+	m.screen = ScreenResources
+	m.resources = []model.ResourceSummary{
+		{Ref: model.ResourceRef{Service: "s3", ID: "assets"}, Name: "assets"},
+		{Ref: model.ResourceRef{Service: "dynamodb", ID: "users"}, Name: "users"},
+		{Ref: model.ResourceRef{Service: "sqs", ID: "jobs"}, Name: "jobs"},
+		{Ref: model.ResourceRef{Service: "sns", ID: "events"}, Name: "events"},
+	}
+	for _, resource := range m.resources {
+		m.selected[resourceKey(resource.Ref)] = true
+	}
+	// A stale choice from an older model must not survive into the options screen.
+	m.dataChoice["sns/events"] = config.DataModeFull
+	m = press(t, m, "enter")
+	if m.dataChoice["sns/events"] != "" {
+		t.Fatal("unsupported SNS data choice was not removed")
+	}
+
+	// S3 and DynamoDB cycle through bounded, full, and structure-only.
+	for _, key := range []string{"s3/assets", "dynamodb/users"} {
+		m.cursor = indexOfSelectedResource(m, key)
+		m = press(t, m, " ")
+		if m.dataChoice[key] != config.DataModeBounded {
+			t.Fatalf("%s first choice = %q, want bounded", key, m.dataChoice[key])
+		}
+		m = press(t, m, " ")
+		if m.dataChoice[key] != config.DataModeFull {
+			t.Fatalf("%s second choice = %q, want full", key, m.dataChoice[key])
+		}
+		m = press(t, m, " ")
+		if m.dataChoice[key] != "" {
+			t.Fatalf("%s third choice = %q, want structure-only", key, m.dataChoice[key])
+		}
+	}
+
+	// SQS supports bounded data only; SNS never offers a data choice.
+	m.cursor = indexOfSelectedResource(m, "sqs/jobs")
+	m = press(t, m, " ")
+	if m.dataChoice["sqs/jobs"] != config.DataModeBounded {
+		t.Fatalf("SQS first choice = %q, want bounded", m.dataChoice["sqs/jobs"])
+	}
+	m = press(t, m, " ")
+	if m.dataChoice["sqs/jobs"] != "" {
+		t.Fatalf("SQS second choice = %q, want structure-only", m.dataChoice["sqs/jobs"])
+	}
+	m.cursor = indexOfSelectedResource(m, "sns/events")
+	m = press(t, m, " ")
+	if m.dataChoice["sns/events"] != "" {
+		t.Fatalf("SNS choice = %q, want structure-only", m.dataChoice["sns/events"])
+	}
+}
+
+func indexOfSelectedResource(m Model, key string) int {
+	for i, resource := range m.selectedResources() {
+		if resourceKey(resource.Ref) == key {
+			return i
+		}
+	}
+	return -1
+}
+
 func TestFixtureProfileOptionReachesPlanFromInteractiveFlow(t *testing.T) {
 	requests := make(chan ProjectRequest, 1)
 	m := NewModel(fakeBackend{planRequests: requests}, Options{FixtureProfile: "share-safe"})

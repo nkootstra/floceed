@@ -43,7 +43,7 @@ func TestExecuteWritesJSONEnvelopeForJSONInvocationError(t *testing.T) {
 	cmd := cli.New(cli.Options{Stdout: &stdout, Stderr: &stderr})
 	cmd.SetArgs([]string{"scan", "--output", "json"})
 
-	if code := execute(context.Background(), cmd, &stderr); code != 2 {
+	if code := Execute(context.Background(), cmd, &stderr); code != 2 {
 		t.Fatalf("exit code = %d, want 2", code)
 	}
 	var envelope cli.Envelope
@@ -66,7 +66,7 @@ func TestExecutePreservesTextInvocationError(t *testing.T) {
 	cmd := cli.New(cli.Options{Stdout: &stdout, Stderr: &stderr})
 	cmd.SetArgs([]string{"scan"})
 
-	if code := execute(context.Background(), cmd, &stderr); code != 2 {
+	if code := Execute(context.Background(), cmd, &stderr); code != 2 {
 		t.Fatalf("exit code = %d, want 2", code)
 	}
 	if stdout.Len() != 0 {
@@ -81,13 +81,13 @@ func TestExecuteUsesExecutedLeafForOutputMode(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	cmd := cli.New(cli.Options{Stdout: &stdout, Stderr: &stderr})
 	cmd.SetArgs([]string{"scan", "--output", "json"})
-	if code := execute(context.Background(), cmd, &stderr); code != 2 {
+	if code := Execute(context.Background(), cmd, &stderr); code != 2 {
 		t.Fatalf("first exit code = %d, want 2", code)
 	}
 	stdout.Reset()
 	stderr.Reset()
 	cmd.SetArgs([]string{"doctor"})
-	if code := execute(context.Background(), cmd, &stderr); code != 2 {
+	if code := Execute(context.Background(), cmd, &stderr); code != 2 {
 		t.Fatalf("second exit code = %d, want 2", code)
 	}
 	if stdout.Len() != 0 || stderr.Len() == 0 {
@@ -106,7 +106,7 @@ func TestExecuteKeepsDoctorChecksOnStdoutAndSummaryOnStderr(t *testing.T) {
 	}
 	cmd.SetOut(&stdout)
 
-	if code := execute(context.Background(), cmd, &stderr); code != 7 {
+	if code := Execute(context.Background(), cmd, &stderr); code != 7 {
 		t.Fatalf("exit code = %d, want 7", code)
 	}
 	if got := stdout.String(); !strings.Contains(got, `"name":"aws"`) {
