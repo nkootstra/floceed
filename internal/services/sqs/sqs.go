@@ -115,6 +115,7 @@ func (a *Adapter) Capture(ctx context.Context, _ model.SourceScope, ref model.Re
 	if err != nil {
 		return nil, err
 	}
+	defer writer.Abort()
 	var count int64
 	for _, message := range messages.Messages {
 		if err := ctx.Err(); err != nil {

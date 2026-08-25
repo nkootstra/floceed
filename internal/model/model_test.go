@@ -14,6 +14,16 @@ func TestManifestValidateRejectsNewerSchema(t *testing.T) {
 	}
 }
 
+func TestNewSnapshotDerivesServiceFromResource(t *testing.T) {
+	snapshot, err := NewSnapshot(ResourceRef{Service: "s3", ID: "assets"}, "dynamodb", map[string]string{"name": "assets"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Service != snapshot.Resource.Service {
+		t.Fatalf("service = %q, resource service = %q", snapshot.Service, snapshot.Resource.Service)
+	}
+}
+
 func TestManifestContractV1GoldenFixture(t *testing.T) {
 	payload, err := os.ReadFile("../../runtime/testdata/manifest-contract-v1.json")
 	if err != nil {

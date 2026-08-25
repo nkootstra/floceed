@@ -61,16 +61,18 @@ func (m Model) View() tea.View {
 		b.WriteString("Import options (structure only by default)\n")
 		for i, r := range m.selectedResources() {
 			label := r.Name + "  structure only"
-			if m.dataEnabled[resourceKey(r.Ref)] {
-				if m.dataMode[resourceKey(r.Ref)] == config.DataModeFull {
+			if m.dataChoice[resourceKey(r.Ref)] != "" {
+				if m.dataChoice[resourceKey(r.Ref)] == config.DataModeFull {
 					label = r.Name + "  full data (resumable; 1h replay timeout)"
 				} else if r.Ref.Service == "s3" {
 					label += fmt.Sprintf(" + data (%d objects, %s/object, %s total)", config.DefaultS3MaxObjects, bytesLabel(config.DefaultS3MaxObjectBytes), bytesLabel(config.DefaultS3MaxTotalBytes))
-				} else {
+				} else if r.Ref.Service == "dynamodb" {
 					label += fmt.Sprintf(" + data (%d items, %d pages, gzip)", config.DefaultDynamoDBMaxItems, config.DefaultDynamoDBMaxPages)
+				} else if r.Ref.Service == "sqs" {
+					label += " + data (100 messages)"
 				}
 			}
-			b.WriteString(m.checkRow(i, m.dataEnabled[resourceKey(r.Ref)], label))
+			b.WriteString(m.checkRow(i, m.dataChoice[resourceKey(r.Ref)] != "", label))
 		}
 	case ScreenReview:
 		fmt.Fprintf(&b, "Dependency and compatibility review\n%d dependencies | %d findings\n", len(m.plan.Dependencies), len(m.findings))

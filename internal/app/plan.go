@@ -13,6 +13,7 @@ import (
 	"sort"
 	"sync"
 
+	"github.com/nkootstra/floceed/internal/bundle"
 	"github.com/nkootstra/floceed/internal/captureledger"
 	"github.com/nkootstra/floceed/internal/catalog"
 	"github.com/nkootstra/floceed/internal/config"
@@ -54,12 +55,23 @@ type PlanOptions struct {
 	FixtureProfile string
 }
 
+type captureMode uint8
+
+const (
+	structureOnly captureMode = iota
+	planData
+	captureData
+)
+
+func (m captureMode) plansData() bool    { return m == planData || m == captureData }
+func (m captureMode) capturesData() bool { return m == captureData }
+
 func (a *Application) PlanWithOptions(ctx context.Context, p config.Project, options PlanOptions) (Plan, error) {
 	policy, err := resolveGovernance(p, options.FixtureProfile)
 	if err != nil {
 		return Plan{}, err
 	}
-	result, err := a.capture(ctx, captureRequest{Project: p, Profile: options.AWSProfile, Region: options.Region, Governance: policy, PlanIncludeData: true})
+	result, err := a.capture(ctx, captureRequest{Project: p, Profile: options.AWSProfile, Region: options.Region, Governance: policy, Mode: planData})
 	return result.Plan, err
 }
 
@@ -72,18 +84,17 @@ func resolveGovernance(project config.Project, fixtureProfile string) (*governan
 }
 
 type captureRequest struct {
-	Project         config.Project
-	Profile         string
-	Governance      *governance.EffectivePolicy
-	Region          string
-	ArtifactRoot    string
-	IncludeData     bool
-	PlanIncludeData bool
-	CheckpointRoot  string
-	Progress        func(model.ProgressEvent)
-	Source          *Source
-	Ledger          *captureledger.Store
-	LedgerSource    captureledger.SourceIdentity
+	Project        config.Project
+	Profile        string
+	Governance     *governance.EffectivePolicy
+	Region         string
+	ArtifactRoot   string
+	Mode           captureMode
+	CheckpointRoot string
+	Progress       func(model.ProgressEvent)
+	Source         *Source
+	Ledger         *captureledger.Store
+	LedgerSource   captureledger.SourceIdentity
 }
 
 func (a *Application) capture(ctx context.Context, req captureRequest) (captureResult, error) {
@@ -111,7 +122,7 @@ func (a *Application) capture(ctx context.Context, req captureRequest) (captureR
 	result := Plan{Source: model.SourceMetadata{AccountID: source.Identity.AccountID, Region: region}, RequiredIAMActions: []string{"sts:GetCallerIdentity"}, Governance: governanceAuditForPolicy(policy)}
 	var selections []catalog.Selection
 	for _, adapter := range source.Registry.All() {
-		contribution := adapter.Plan(p, req.IncludeData || req.PlanIncludeData)
+		contribution := adapter.Plan(p, req.Mode.plansData())
 		selections = append(selections, contribution.Selections...)
 		result.RequiredIAMActions = append(result.RequiredIAMActions, contribution.RequiredIAMActions...)
 	}
@@ -143,16 +154,8 @@ func (a *Application) capture(ctx context.Context, req captureRequest) (captureR
 		deps := adapter.Dependencies(snapshot)
 		result.Dependencies = append(result.Dependencies, deps...)
 		dependenciesBySnapshot[i] = deps
-		for _, art := range snapshot.Data {
+		for _, art := range bundle.ArtifactRefs(*snapshot) {
 			result.EstimatedBytes += art.Size
-		}
-		if snapshot.Dataset != nil {
-			for _, chunk := range snapshot.Dataset.Chunks {
-				result.EstimatedBytes += chunk.Data.Size
-				if chunk.Index != nil {
-					result.EstimatedBytes += chunk.Index.Size
-				}
-			}
 		}
 		snapshots = append(snapshots, *snapshot)
 		if outcomes[i].resource != nil {
@@ -234,7 +237,7 @@ func buildCaptureJobs(req captureRequest, source Source, selections []catalog.Se
 		options.Governance = policy
 		options.GovernanceAudit = governance.NewAudit()
 		options.AllowPartialData = req.Project.Capture.AllowPartialData
-		if req.IncludeData {
+		if req.Mode.capturesData() {
 			options.ArtifactDirectory = req.ArtifactRoot
 			if req.CheckpointRoot != "" {
 				sum := sha256.Sum256([]byte(selection.Resource.Service + "\x00" + selection.Resource.ID))
@@ -245,7 +248,7 @@ func buildCaptureJobs(req captureRequest, source Source, selections []catalog.Se
 			options.IncludeData = false
 		}
 		job := captureJob{adapter: adapter, options: options}
-		if req.IncludeData && req.Ledger != nil {
+		if req.Mode.capturesData() && req.Ledger != nil {
 			job.attachLedgerCandidate(req.Ledger, req.LedgerSource, selection.Resource)
 		}
 		jobs[i] = job
@@ -257,24 +260,17 @@ func buildCaptureJobs(req captureRequest, source Source, selections []catalog.Se
 // resource so a ReusableAdapter can prove freshness before materializing.
 func (job *captureJob) attachLedgerCandidate(ledger *captureledger.Store, source captureledger.SourceIdentity, resource model.ResourceRef) {
 	descriptor := captureledger.ResourceDescriptor{Service: resource.Service, Type: resource.Type, ID: resource.ID}
-	generation, loadErr := ledger.LoadCandidates(source, descriptor)
+	candidate, loadErr := ledger.LoadCandidates(source, descriptor)
 	if loadErr != nil {
 		job.invalidReason, _ = captureledger.InvalidationReason(loadErr)
 		return
 	}
-	job.generationID = generation.ID
-	for _, candidate := range generation.Resources {
-		if candidate.Descriptor != descriptor {
-			continue
+	job.generationID = candidate.GenerationID
+	job.candidate = &candidate.Resource
+	for _, unit := range candidate.Resource.Units {
+		if unit.Outcome == captureledger.UnitOutcomeInvalidated && job.invalidReason == "" {
+			job.invalidReason = unit.Reason
 		}
-		value := candidate
-		job.candidate = &value
-		for _, unit := range candidate.Units {
-			if unit.Outcome == captureledger.UnitOutcomeInvalidated && job.invalidReason == "" {
-				job.invalidReason = unit.Reason
-			}
-		}
-		return
 	}
 }
 
@@ -410,8 +406,8 @@ func governanceAuditForPolicy(policy *governance.EffectivePolicy) *model.Governa
 	if policy == nil {
 		return nil
 	}
-	audit := &model.GovernanceAudit{Profile: policy.Profile, PolicyIdentity: policy.Identity}
-	for _, rule := range policy.Rules {
+	audit := &model.GovernanceAudit{Profile: policy.Profile(), PolicyIdentity: policy.Identity()}
+	for _, rule := range policy.Rules() {
 		audit.Rules = append(audit.Rules, model.GovernanceRuleAudit{RuleID: rule.ID, Action: string(rule.Action), Count: model.CountBucketZero})
 		if rule.KeyID != "" {
 			audit.KeyIDs = append(audit.KeyIDs, rule.KeyID)
@@ -420,12 +416,12 @@ func governanceAuditForPolicy(policy *governance.EffectivePolicy) *model.Governa
 			audit.Algorithms = append(audit.Algorithms, rule.Algorithm)
 		}
 	}
-	for _, cohort := range policy.Cohorts {
+	for _, cohort := range policy.Cohorts() {
 		audit.KeyIDs = append(audit.KeyIDs, cohort.KeyID)
 		audit.Algorithms = append(audit.Algorithms, cohort.Algorithm)
 	}
-	if len(policy.Cohorts) != 0 {
-		digest := sha256.Sum256([]byte("floceed/governance/cohorts/v1\x00" + policy.Identity))
+	if len(policy.Cohorts()) != 0 {
+		digest := sha256.Sum256([]byte("floceed/governance/cohorts/v1\x00" + policy.Identity()))
 		audit.CohortIdentity = hex.EncodeToString(digest[:])
 	}
 	sort.Strings(audit.KeyIDs)
@@ -436,8 +432,9 @@ func governanceAuditForPolicy(policy *governance.EffectivePolicy) *model.Governa
 }
 
 func appendGovernanceAudit(destination *model.GovernanceAudit, policy *governance.EffectivePolicy, source governance.AuditSnapshot) {
-	actions := make(map[string]string, len(policy.Rules))
-	for _, rule := range policy.Rules {
+	rules := policy.Rules()
+	actions := make(map[string]string, len(rules))
+	for _, rule := range rules {
 		actions[rule.ID] = string(rule.Action)
 	}
 	for _, rule := range source.Rules {

@@ -4,6 +4,7 @@ package stepfunctions
 
 import (
 	"context"
+	"fmt"
 	"sort"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -26,11 +27,7 @@ type Adapter struct {
 
 var _ catalog.Adapter = (*Adapter)(nil)
 
-func New(client ...Client) *Adapter {
-	var c Client
-	if len(client) > 0 {
-		c = client[0]
-	}
+func New(c Client) *Adapter {
 	return &Adapter{
 		Base: structureonly.New(structureonly.Descriptor{
 			ServiceName:  "stepfunctions",
@@ -49,8 +46,11 @@ func (a *Adapter) Capture(ctx context.Context, _ model.SourceScope, ref model.Re
 	if err := a.CheckStructureOnly(opts); err != nil {
 		return nil, err
 	}
+	if a.client == nil {
+		return nil, fmt.Errorf("Step Functions capture requires a client: %w", model.ErrValidation)
+	}
 	structure := map[string]any{"name": ref.ID, "arn": ref.ARN, "tags": []map[string]string{}}
-	if a.client != nil {
+	{
 		description, err := a.client.DescribeStateMachine(ctx, &awsSfn.DescribeStateMachineInput{StateMachineArn: aws.String(ref.ARN)})
 		if err != nil {
 			return nil, err

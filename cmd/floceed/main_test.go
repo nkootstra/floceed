@@ -77,6 +77,24 @@ func TestExecutePreservesTextInvocationError(t *testing.T) {
 	}
 }
 
+func TestExecuteUsesExecutedLeafForOutputMode(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	cmd := cli.New(cli.Options{Stdout: &stdout, Stderr: &stderr})
+	cmd.SetArgs([]string{"scan", "--output", "json"})
+	if code := execute(context.Background(), cmd, &stderr); code != 2 {
+		t.Fatalf("first exit code = %d, want 2", code)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	cmd.SetArgs([]string{"doctor"})
+	if code := execute(context.Background(), cmd, &stderr); code != 2 {
+		t.Fatalf("second exit code = %d, want 2", code)
+	}
+	if stdout.Len() != 0 || stderr.Len() == 0 {
+		t.Fatalf("stale JSON output after text invocation: stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+}
+
 func TestExecuteKeepsDoctorChecksOnStdoutAndSummaryOnStderr(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	cmd := &cobra.Command{

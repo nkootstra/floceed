@@ -3,6 +3,7 @@ package eventbridge
 
 import (
 	"context"
+	"fmt"
 	"sort"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -23,13 +24,30 @@ type Adapter struct {
 	client Client
 }
 
+type eventBusStructure struct {
+	Name  string      `json:"name"`
+	ARN   string      `json:"arn"`
+	Rules []eventRule `json:"rules"`
+}
+
+type eventRule struct {
+	Name         string        `json:"name"`
+	ARN          string        `json:"arn"`
+	State        string        `json:"state"`
+	EventPattern string        `json:"event_pattern"`
+	Description  string        `json:"description"`
+	Targets      []eventTarget `json:"targets"`
+}
+
+type eventTarget struct {
+	ID      string `json:"id"`
+	ARN     string `json:"arn"`
+	RoleARN string `json:"role_arn"`
+}
+
 var _ catalog.Adapter = (*Adapter)(nil)
 
-func New(client ...Client) *Adapter {
-	var c Client
-	if len(client) > 0 {
-		c = client[0]
-	}
+func New(c Client) *Adapter {
 	return &Adapter{
 		Base: structureonly.New(structureonly.Descriptor{
 			ServiceName:  "events",
@@ -48,9 +66,12 @@ func (a *Adapter) Capture(ctx context.Context, _ model.SourceScope, ref model.Re
 	if err := a.CheckStructureOnly(opts); err != nil {
 		return nil, err
 	}
-	structure := map[string]any{"name": ref.ID, "arn": ref.ARN, "rules": []any{}}
-	if a.client != nil {
-		var rules []map[string]any
+	if a.client == nil {
+		return nil, fmt.Errorf("EventBridge capture requires a client: %w", model.ErrValidation)
+	}
+	structure := eventBusStructure{Name: ref.ID, ARN: ref.ARN, Rules: make([]eventRule, 0)}
+	{
+		rules := make([]eventRule, 0)
 		var token *string
 		for {
 			out, err := a.client.ListRules(ctx, &awsEvents.ListRulesInput{EventBusName: aws.String(ref.ARN), NextToken: token})
@@ -58,8 +79,7 @@ func (a *Adapter) Capture(ctx context.Context, _ model.SourceScope, ref model.Re
 				return nil, err
 			}
 			for _, rule := range out.Rules {
-				entry := map[string]any{"name": aws.ToString(rule.Name), "arn": aws.ToString(rule.Arn), "state": string(rule.State), "event_pattern": aws.ToString(rule.EventPattern), "description": aws.ToString(rule.Description)}
-				var targets []map[string]string
+				entry := eventRule{Name: aws.ToString(rule.Name), ARN: aws.ToString(rule.Arn), State: string(rule.State), EventPattern: aws.ToString(rule.EventPattern), Description: aws.ToString(rule.Description), Targets: make([]eventTarget, 0)}
 				if rule.Name != nil {
 					var targetToken *string
 					for {
@@ -68,7 +88,7 @@ func (a *Adapter) Capture(ctx context.Context, _ model.SourceScope, ref model.Re
 							return nil, err
 						}
 						for _, target := range targetsOut.Targets {
-							targets = append(targets, map[string]string{"id": aws.ToString(target.Id), "arn": aws.ToString(target.Arn), "role_arn": aws.ToString(target.RoleArn)})
+							entry.Targets = append(entry.Targets, eventTarget{ID: aws.ToString(target.Id), ARN: aws.ToString(target.Arn), RoleARN: aws.ToString(target.RoleArn)})
 						}
 						if targetsOut.NextToken == nil || *targetsOut.NextToken == "" {
 							break
@@ -76,8 +96,7 @@ func (a *Adapter) Capture(ctx context.Context, _ model.SourceScope, ref model.Re
 						targetToken = targetsOut.NextToken
 					}
 				}
-				sort.Slice(targets, func(i, j int) bool { return targets[i]["id"] < targets[j]["id"] })
-				entry["targets"] = targets
+				sort.Slice(entry.Targets, func(i, j int) bool { return entry.Targets[i].ID < entry.Targets[j].ID })
 				rules = append(rules, entry)
 			}
 			if out.NextToken == nil || *out.NextToken == "" {
@@ -85,8 +104,8 @@ func (a *Adapter) Capture(ctx context.Context, _ model.SourceScope, ref model.Re
 			}
 			token = out.NextToken
 		}
-		sort.Slice(rules, func(i, j int) bool { return rules[i]["name"].(string) < rules[j]["name"].(string) })
-		structure["rules"] = rules
+		sort.Slice(rules, func(i, j int) bool { return rules[i].Name < rules[j].Name })
+		structure.Rules = rules
 	}
 	return a.Snapshot(ref, structure)
 }

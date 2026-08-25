@@ -25,6 +25,16 @@ import (
 	"github.com/nkootstra/floceed/internal/testutil"
 )
 
+func TestValidateCheckpointStateShapeRejectsMixedState(t *testing.T) {
+	cp := captureCheckpoint{LastKey: json.RawMessage(`{"id":{"S":"one"}}`), ProtectedState: &protectedStateRef{Path: "state"}}
+	if err := validateCheckpointStateShape(cp, true); err == nil {
+		t.Fatal("mixed checkpoint state accepted")
+	}
+	if err := validateCheckpointStateShape(captureCheckpoint{ProtectedState: &protectedStateRef{Path: "state"}}, false); err == nil {
+		t.Fatal("protected state accepted for plain capture")
+	}
+}
+
 func TestCompletedLedgerCandidateAlwaysRescansWithoutMaterializing(t *testing.T) {
 	root := t.TempDir()
 	client := &fakeClient{

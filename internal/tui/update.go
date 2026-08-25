@@ -39,6 +39,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case planFinishedMsg:
+		if msg.token != 0 && msg.token != m.planToken {
+			return m, nil
+		}
 		m.busy = false
 		honorResult := m.screen == m.pending
 		m.pending = ""
@@ -54,9 +57,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.screen, m.cursor = ScreenReview, 0
 		return m, nil
 	case pullFinishedMsg:
+		if msg.token != 0 && msg.token != m.pullToken {
+			return m, nil
+		}
 		m.busy, m.err, m.manifest, m.screen = false, msg.err, msg.manifest, ScreenResult
 		return m, nil
 	case pullProgressMsg:
+		if msg.token != 0 && msg.token != m.pullToken {
+			return m, nil
+		}
 		m.progress = msg.event
 		return m, waitPullUpdate(m.pullUpdates)
 	case tea.WindowSizeMsg:
@@ -218,8 +227,10 @@ func (m *Model) back() {
 	case ScreenResources:
 		m.screen = ScreenServices
 	case ScreenOptions:
+		m.planToken++
 		m.screen = ScreenResources
 	case ScreenReview:
+		m.planToken++
 		m.screen = ScreenOptions
 	case ScreenSummary:
 		m.screen = ScreenReview
@@ -242,8 +253,7 @@ func (m *Model) toggle() {
 			k := resourceKey(items[m.cursor].Ref)
 			if m.selected[k] {
 				delete(m.selected, k)
-				delete(m.dataEnabled, k)
-				delete(m.dataMode, k)
+				delete(m.dataChoice, k)
 			} else {
 				m.selected[k] = true
 			}
@@ -252,15 +262,13 @@ func (m *Model) toggle() {
 		items := m.selectedResources()
 		if m.cursor >= 0 && m.cursor < len(items) {
 			k := resourceKey(items[m.cursor].Ref)
-			switch m.dataMode[k] {
+			switch m.dataChoice[k] {
 			case "":
-				m.dataEnabled[k] = true
-				m.dataMode[k] = config.DataModeBounded
+				m.dataChoice[k] = config.DataModeBounded
 			case config.DataModeBounded:
-				m.dataMode[k] = config.DataModeFull
+				m.dataChoice[k] = config.DataModeFull
 			default:
-				m.dataEnabled[k] = false
-				delete(m.dataMode, k)
+				delete(m.dataChoice, k)
 			}
 		}
 	}

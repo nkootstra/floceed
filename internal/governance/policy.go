@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"sort"
 	"strings"
 )
@@ -76,23 +77,23 @@ type Cohort struct {
 // EffectivePolicy is the normalized runtime policy. Secret material is kept
 // private and is deliberately excluded from serialization.
 type EffectivePolicy struct {
-	Profile        string   `json:"profile"`
-	Rules          []Rule   `json:"rules,omitempty"`
-	Cohorts        []Cohort `json:"cohorts,omitempty"`
-	Identity       string   `json:"identity"`
+	profile        string
+	rules          []Rule
+	cohorts        []Cohort
+	identity       string
 	secretVerifier string
 	secret         []byte
 }
 
 func NewEffectivePolicy(profile string, rules []Rule, cohorts []Cohort, secret []byte) (*EffectivePolicy, error) {
-	p := &EffectivePolicy{Profile: strings.TrimSpace(profile), Rules: append([]Rule(nil), rules...), Cohorts: append([]Cohort(nil), cohorts...), secret: append([]byte(nil), secret...)}
-	for i := range p.Rules {
-		normalizeRule(&p.Rules[i])
+	p := &EffectivePolicy{profile: strings.TrimSpace(profile), rules: cloneRules(rules), cohorts: cloneCohorts(cohorts), secret: append([]byte(nil), secret...)}
+	for i := range p.rules {
+		normalizeRule(&p.rules[i])
 	}
-	for i := range p.Cohorts {
-		normalizeCohort(&p.Cohorts[i])
+	for i := range p.cohorts {
+		normalizeCohort(&p.cohorts[i])
 	}
-	for _, rule := range p.Rules {
+	for _, rule := range p.rules {
 		switch rule.Action {
 		case ActionHash:
 			if rule.Algorithm != HashAlgorithm {
@@ -110,18 +111,18 @@ func NewEffectivePolicy(profile string, rules []Rule, cohorts []Cohort, secret [
 			return nil, fmt.Errorf("invalid governance action %q", rule.Action)
 		}
 	}
-	for _, cohort := range p.Cohorts {
+	for _, cohort := range p.cohorts {
 		if cohort.Algorithm != CohortRankAlgorithm {
 			return nil, fmt.Errorf("invalid cohort algorithm")
 		}
 	}
-	sort.Slice(p.Rules, func(i, j int) bool { return ruleSortKey(p.Rules[i]) < ruleSortKey(p.Rules[j]) })
-	sort.Slice(p.Cohorts, func(i, j int) bool { return p.Cohorts[i].Resource < p.Cohorts[j].Resource })
+	sort.Slice(p.rules, func(i, j int) bool { return ruleSortKey(p.rules[i]) < ruleSortKey(p.rules[j]) })
+	sort.Slice(p.cohorts, func(i, j int) bool { return p.cohorts[i].Resource < p.cohorts[j].Resource })
 	payload, err := json.Marshal(struct {
 		Profile string   `json:"profile"`
 		Rules   []Rule   `json:"rules"`
 		Cohorts []Cohort `json:"cohorts"`
-	}{p.Profile, p.Rules, p.Cohorts})
+	}{p.profile, p.rules, p.cohorts})
 	if err != nil {
 		return nil, fmt.Errorf("encode governance policy: %w", err)
 	}
@@ -132,8 +133,113 @@ func NewEffectivePolicy(profile string, rules []Rule, cohorts []Cohort, secret [
 	identityInput := append(append([]byte(nil), payload...), 0)
 	identityInput = append(identityInput, p.secretVerifier...)
 	digest := sha256.Sum256(identityInput)
-	p.Identity = hex.EncodeToString(digest[:])
+	p.identity = hex.EncodeToString(digest[:])
 	return p, nil
+}
+
+func (p *EffectivePolicy) Profile() string {
+	if p == nil {
+		return ""
+	}
+	return p.profile
+}
+func (p *EffectivePolicy) Identity() string {
+	if p == nil {
+		return ""
+	}
+	return p.identity
+}
+func (p *EffectivePolicy) Rules() []Rule {
+	if p == nil {
+		return nil
+	}
+	return cloneRules(p.rules)
+}
+func (p *EffectivePolicy) Cohorts() []Cohort {
+	if p == nil {
+		return nil
+	}
+	return cloneCohorts(p.cohorts)
+}
+
+func (p EffectivePolicy) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		Profile  string   `json:"profile"`
+		Rules    []Rule   `json:"rules,omitempty"`
+		Cohorts  []Cohort `json:"cohorts,omitempty"`
+		Identity string   `json:"identity"`
+	}{p.profile, p.rules, p.cohorts, p.identity})
+}
+
+func cloneRules(in []Rule) []Rule {
+	out := append([]Rule(nil), in...)
+	for i := range out {
+		out[i].ContentTypes = append([]string(nil), in[i].ContentTypes...)
+	}
+	return out
+}
+
+func cloneCohorts(in []Cohort) []Cohort {
+	out := append([]Cohort(nil), in...)
+	for i := range out {
+		out[i].KeyPaths = append([]string(nil), in[i].KeyPaths...)
+		out[i].Predicates = append([]Predicate(nil), in[i].Predicates...)
+		for j := range out[i].Predicates {
+			out[i].Predicates[j].Value = cloneValue(in[i].Predicates[j].Value)
+		}
+	}
+	return out
+}
+
+func cloneValue(value any) any {
+	if value == nil {
+		return nil
+	}
+	return cloneReflect(reflect.ValueOf(value)).Interface()
+}
+
+func cloneReflect(value reflect.Value) reflect.Value {
+	if !value.IsValid() {
+		return value
+	}
+	switch value.Kind() {
+	case reflect.Interface:
+		if value.IsNil() {
+			return reflect.Zero(value.Type())
+		}
+		clone := cloneReflect(value.Elem())
+		wrapped := reflect.New(value.Type()).Elem()
+		wrapped.Set(clone)
+		return wrapped
+	case reflect.Map:
+		if value.IsNil() {
+			return reflect.Zero(value.Type())
+		}
+		clone := reflect.MakeMapWithSize(value.Type(), value.Len())
+		iter := value.MapRange()
+		for iter.Next() {
+			clone.SetMapIndex(cloneReflect(iter.Key()), cloneReflect(iter.Value()))
+		}
+		return clone
+	case reflect.Slice:
+		if value.IsNil() {
+			return reflect.Zero(value.Type())
+		}
+		clone := reflect.MakeSlice(value.Type(), value.Len(), value.Len())
+		for i := 0; i < value.Len(); i++ {
+			clone.Index(i).Set(cloneReflect(value.Index(i)))
+		}
+		return clone
+	case reflect.Pointer:
+		if value.IsNil() {
+			return reflect.Zero(value.Type())
+		}
+		clone := reflect.New(value.Type().Elem())
+		clone.Elem().Set(cloneReflect(value.Elem()))
+		return clone
+	default:
+		return value
+	}
 }
 
 // IdentityOf returns the stable identity of policy, or an empty identity when
@@ -142,7 +248,7 @@ func IdentityOf(policy *EffectivePolicy) string {
 	if policy == nil {
 		return ""
 	}
-	return policy.Identity
+	return policy.Identity()
 }
 
 func (p *EffectivePolicy) Secret() []byte {

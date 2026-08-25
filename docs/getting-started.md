@@ -97,7 +97,7 @@ floceed pull --project examples/basic/floceed.yaml --fixture-profile share-safe 
 
 Keep the governance secret in your team's secret manager. Never put it in Git,
 the project file, or shell history. Read the [governed fixture profile
-guidance](README.md#governed-fixture-profiles) before capturing shareable data.
+guidance](compatibility.md#governed-fixture-profiles) before capturing shareable data.
 
 ## Try verification without AWS
 

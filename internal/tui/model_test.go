@@ -10,6 +10,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/nkootstra/floceed/internal/app"
 	"github.com/nkootstra/floceed/internal/awsconfig"
+	"github.com/nkootstra/floceed/internal/config"
 	"github.com/nkootstra/floceed/internal/model"
 )
 
@@ -138,6 +139,22 @@ func TestStaleScanResultDoesNotAffectNewServicesScan(t *testing.T) {
 	}
 }
 
+func TestStalePlanResultDoesNotAffectNewPlan(t *testing.T) {
+	m := NewModel(fakeBackend{}, Options{})
+	m.screen, m.pending, m.busy = ScreenOptions, ScreenOptions, true
+	first := m.makePlan()
+	firstMsg := first().(planFinishedMsg)
+	second := m.makePlan()
+	_ = second
+	if m.planToken != firstMsg.token+1 {
+		t.Fatalf("plan generation = %d, want %d", m.planToken, firstMsg.token+1)
+	}
+	m = update(t, m, firstMsg)
+	if !m.busy || m.Screen() != ScreenOptions {
+		t.Fatalf("stale plan changed state: screen %s, busy %t", m.Screen(), m.busy)
+	}
+}
+
 func TestMissingProfileRegionRequiresRegionEntry(t *testing.T) {
 	m := NewModel(fakeBackend{}, Options{})
 	m = update(t, m, profilesLoadedMsg{profiles: []Profile{{Name: "dev"}}})
@@ -220,8 +237,8 @@ func TestRescanDropsDeselectedServiceStateAndPreservesSelectedServiceResources(t
 	}
 	m.selected["s3/assets"] = true
 	m.selected["dynamodb/users"] = true
-	m.dataEnabled["s3/assets"] = true
-	m.dataEnabled["dynamodb/users"] = true
+	m.dataChoice["s3/assets"] = config.DataModeBounded
+	m.dataChoice["dynamodb/users"] = config.DataModeBounded
 
 	m.back()
 	m.cursor = 0 // s3
@@ -231,10 +248,10 @@ func TestRescanDropsDeselectedServiceStateAndPreservesSelectedServiceResources(t
 	if len(m.resources) != 1 || resourceKey(m.resources[0].Ref) != "dynamodb/users" {
 		t.Fatalf("resources = %#v, want only retained dynamodb resource", m.resources)
 	}
-	if m.selected["s3/assets"] || m.dataEnabled["s3/assets"] {
+	if m.selected["s3/assets"] || m.dataChoice["s3/assets"] != "" {
 		t.Fatal("deselected service retained selection or data state")
 	}
-	if !m.selected["dynamodb/users"] || !m.dataEnabled["dynamodb/users"] {
+	if !m.selected["dynamodb/users"] || m.dataChoice["dynamodb/users"] == "" {
 		t.Fatal("selected service state was lost during transient discovery failure")
 	}
 }

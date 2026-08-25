@@ -2,6 +2,7 @@ package s3
 
 import (
 	"archive/tar"
+	"bufio"
 	"bytes"
 	"compress/gzip"
 	"context"
@@ -28,6 +29,22 @@ import (
 	"github.com/nkootstra/floceed/internal/model"
 	"github.com/nkootstra/floceed/internal/storage"
 )
+
+func TestInventoryPackReaderUsesSharedCountBoundary(t *testing.T) {
+	var input strings.Builder
+	for i := 0; i < s3PackObjects+1; i++ {
+		fmt.Fprintf(&input, `{"key":"key-%d","path":"key-%d","size":1}`+"\n", i, i)
+	}
+	r := newInventoryPackReader(bufio.NewReader(strings.NewReader(input.String())))
+	first, _, err := r.Next()
+	if err != nil || len(first) != s3PackObjects {
+		t.Fatalf("first pack = %d entries, %v", len(first), err)
+	}
+	second, _, err := r.Next()
+	if err != nil || len(second) != 1 {
+		t.Fatalf("second pack = %d entries, %v", len(second), err)
+	}
+}
 
 func TestAdapterSupportsReusableCapture(t *testing.T) {
 	var _ catalog.ReusableAdapter = (*Adapter)(nil)
@@ -65,7 +82,7 @@ func TestReusableS3CaptureInventoriesButDoesNotDownloadUnchangedObjects(t *testi
 	secondSnapshot, _ := model.NewSnapshot(ref, "s3", Bucket{Name: ref.ID})
 	secondOptions := firstOptions
 	secondOptions.ArtifactDirectory, secondOptions.CheckpointDirectory = filepath.Join(secondRoot, "artifacts"), filepath.Join(secondRoot, "checkpoint")
-	second, err := adapter.captureObjectsReusable(context.Background(), scope, ref, &Bucket{Name: ref.ID}, secondSnapshot, secondOptions, catalog.ReuseRequest{Candidate: &loaded.Resources[0], Materialize: func(artifact captureledger.Artifact) error {
+	second, err := adapter.captureObjectsReusable(context.Background(), scope, ref, &Bucket{Name: ref.ID}, secondSnapshot, secondOptions, catalog.ReuseRequest{Candidate: &loaded.Resource, Materialize: func(artifact captureledger.Artifact) error {
 		return ledger.Materialize(artifact, secondOptions.ArtifactDirectory)
 	}})
 	if err != nil {
@@ -315,7 +332,7 @@ func TestReusableS3CaptureRefreshesWhenObjectMetadataChanges(t *testing.T) {
 	secondOptions := firstOptions
 	secondOptions.ArtifactDirectory, secondOptions.CheckpointDirectory = filepath.Join(secondRoot, "artifacts"), filepath.Join(secondRoot, "checkpoint")
 	secondSnapshot, _ := model.NewSnapshot(ref, "s3", Bucket{Name: ref.ID})
-	second, err := adapter.captureObjectsReusable(context.Background(), scope, ref, &Bucket{Name: ref.ID}, secondSnapshot, secondOptions, catalog.ReuseRequest{Candidate: &loaded.Resources[0], Materialize: func(captureledger.Artifact) error { return nil }})
+	second, err := adapter.captureObjectsReusable(context.Background(), scope, ref, &Bucket{Name: ref.ID}, secondSnapshot, secondOptions, catalog.ReuseRequest{Candidate: &loaded.Resource, Materialize: func(captureledger.Artifact) error { return nil }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -629,7 +646,7 @@ func TestGovernedS3CaptureSupportsEveryWholeBodyAction(t *testing.T) {
 				t.Fatal(err)
 			}
 			body, object := readOnlyPackedObject(t, opts.ArtifactDirectory, snapshot.Dataset.Chunks[0])
-			want, err := governance.NewEngine(policy.Profile, policy.Secret()).Apply(policy.Rules[0], []byte("protected"))
+			want, err := governance.NewEngine(policy.Profile(), policy.Secret()).Apply(policy.Rules()[0], []byte("protected"))
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -173,7 +173,7 @@ func (a *Application) PullWithOptions(ctx context.Context, p config.Project, pro
 		Governance:     policy,
 		Region:         region,
 		ArtifactRoot:   filepath.Join(tmp, "artifacts"),
-		IncludeData:    true,
+		Mode:           captureData,
 		CheckpointRoot: filepath.Join(tmp, "checkpoints"),
 		Progress:       report,
 		Source:         &source,

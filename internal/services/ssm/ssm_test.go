@@ -22,7 +22,7 @@ func (f fakeClient) DescribeParameters(ctx context.Context, in *awsSSM.DescribeP
 
 func TestPlanSelectsParametersWithIAMActions(t *testing.T) {
 	project := config.Project{Resources: config.Resources{Parameters: []config.ParameterResource{{Name: "/app/key", ARN: "arn:aws:ssm:eu-west-1:123456789012:parameter/app/key"}}}}
-	contribution := New().Plan(project, true)
+	contribution := New(nil).Plan(project, true)
 	if len(contribution.Selections) != 1 || contribution.Selections[0].Resource.Type != "parameter" {
 		t.Fatalf("selections = %#v", contribution.Selections)
 	}
@@ -50,7 +50,7 @@ func TestCaptureIsStructureOnlyAndNeverReadsValues(t *testing.T) {
 	if err := (model.Manifest{SchemaVersion: model.CurrentManifestSchemaVersion, Snapshots: []model.Snapshot{*snapshot}}).Validate(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := New().Capture(context.Background(), model.SourceScope{}, ref, model.CaptureOptions{IncludeData: true}); err == nil {
+	if _, err := New(nil).Capture(context.Background(), model.SourceScope{}, ref, model.CaptureOptions{IncludeData: true}); err == nil {
 		t.Fatal("data capture must be rejected")
 	}
 }

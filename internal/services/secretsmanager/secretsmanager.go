@@ -3,6 +3,7 @@ package secretsmanager
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsSecrets "github.com/aws/aws-sdk-go-v2/service/secretsmanager"
@@ -23,11 +24,7 @@ type Adapter struct {
 
 var _ catalog.Adapter = (*Adapter)(nil)
 
-func New(client ...Client) *Adapter {
-	var c Client
-	if len(client) > 0 {
-		c = client[0]
-	}
+func New(c Client) *Adapter {
 	return &Adapter{
 		Base: structureonly.New(structureonly.Descriptor{
 			ServiceName:  "secretsmanager",
@@ -46,8 +43,11 @@ func (a *Adapter) Capture(ctx context.Context, _ model.SourceScope, ref model.Re
 	if err := a.CheckStructureOnly(opts); err != nil {
 		return nil, err
 	}
+	if a.client == nil {
+		return nil, fmt.Errorf("Secrets Manager capture requires a client: %w", model.ErrValidation)
+	}
 	structure := map[string]any{"name": ref.ID, "arn": ref.ARN, "value_captured": false}
-	if a.client != nil {
+	{
 		out, err := a.client.DescribeSecret(ctx, &awsSecrets.DescribeSecretInput{SecretId: aws.String(ref.ID)})
 		if err != nil {
 			return nil, err

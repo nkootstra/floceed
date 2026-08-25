@@ -2,6 +2,7 @@ package eventbridge
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -13,6 +14,8 @@ import (
 
 type fakeClient struct{}
 
+type emptyClient struct{}
+
 func (fakeClient) ListRules(context.Context, *awsEvents.ListRulesInput, ...func(*awsEvents.Options)) (*awsEvents.ListRulesOutput, error) {
 	return &awsEvents.ListRulesOutput{Rules: []types.Rule{{
 		Name: aws.String("orders"), Arn: aws.String("arn:aws:events:eu-west-1:123456789012:rule/orders"),
@@ -21,6 +24,14 @@ func (fakeClient) ListRules(context.Context, *awsEvents.ListRulesInput, ...func(
 }
 func (fakeClient) ListTargetsByRule(context.Context, *awsEvents.ListTargetsByRuleInput, ...func(*awsEvents.Options)) (*awsEvents.ListTargetsByRuleOutput, error) {
 	return &awsEvents.ListTargetsByRuleOutput{Targets: []types.Target{{Id: aws.String("target-1"), Arn: aws.String("arn:aws:sqs:eu-west-1:123456789012:orders")}}}, nil
+}
+
+func (emptyClient) ListRules(context.Context, *awsEvents.ListRulesInput, ...func(*awsEvents.Options)) (*awsEvents.ListRulesOutput, error) {
+	return &awsEvents.ListRulesOutput{}, nil
+}
+
+func (emptyClient) ListTargetsByRule(context.Context, *awsEvents.ListTargetsByRuleInput, ...func(*awsEvents.Options)) (*awsEvents.ListTargetsByRuleOutput, error) {
+	return &awsEvents.ListTargetsByRuleOutput{}, nil
 }
 
 func TestPlanAndCaptureBusTopology(t *testing.T) {
@@ -37,5 +48,22 @@ func TestPlanAndCaptureBusTopology(t *testing.T) {
 	}
 	if err := (model.Manifest{SchemaVersion: model.CurrentManifestSchemaVersion, Snapshots: []model.Snapshot{*snapshot}}).Validate(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestCaptureEmptyBusTopologyUsesArrays(t *testing.T) {
+	ref := model.ResourceRef{Service: "events", Type: "event_bus", ID: "orders", ARN: "arn:aws:events:eu-west-1:123456789012:event-bus/orders"}
+	snapshot, err := New(emptyClient{}).Capture(context.Background(), model.SourceScope{}, ref, model.CaptureOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var structure struct {
+		Rules json.RawMessage `json:"rules"`
+	}
+	if err := json.Unmarshal(snapshot.Structure, &structure); err != nil {
+		t.Fatal(err)
+	}
+	if string(structure.Rules) != "[]" {
+		t.Fatalf("empty rules = %s, want []", structure.Rules)
 	}
 }

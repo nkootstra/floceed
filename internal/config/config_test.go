@@ -43,6 +43,25 @@ func TestValidateKinesisStreamARN(t *testing.T) {
 	}
 }
 
+func TestValidateKinesisFullDataRequiresExtendedTimeout(t *testing.T) {
+	project := Project{
+		SchemaVersion: CurrentSchemaVersion,
+		Source:        Source{Region: "eu-west-1"},
+		Resources: Resources{Kinesis: []KinesisResource{{
+			Name: "events",
+			ARN:  "arn:aws:kinesis:eu-west-1:123456789012:stream/events",
+			Data: &KinesisDataPolicy{Enabled: true, Mode: DataModeFull},
+		}}},
+	}
+	if err := project.Validate(); err == nil || !strings.Contains(err.Error(), "full data mode") {
+		t.Fatalf("full Kinesis data validation error = %v, want extended-timeout error", err)
+	}
+	project.Target.HookTimeoutSeconds = DefaultHookTimeoutSeconds + 1
+	if err := project.Validate(); err != nil {
+		t.Fatalf("full Kinesis data with extended timeout rejected: %v", err)
+	}
+}
+
 func TestValidateSecretsManagerARN(t *testing.T) {
 	valid := func(arn string) error {
 		project := Project{SchemaVersion: CurrentSchemaVersion, Source: Source{Region: "eu-west-1"}, Resources: Resources{Secrets: []SecretResource{{Name: "db", ARN: arn}}}}
@@ -314,8 +333,8 @@ func TestFixtureProfileAlgorithmsAreValidatedAndNormalized(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if policy.Rules[0].Algorithm != tt.want {
-				t.Fatalf("algorithm = %q, want %q", policy.Rules[0].Algorithm, tt.want)
+			if policy.Rules()[0].Algorithm != tt.want {
+				t.Fatalf("algorithm = %q, want %q", policy.Rules()[0].Algorithm, tt.want)
 			}
 		})
 	}
@@ -411,8 +430,8 @@ fixture_profiles:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if one.Identity != two.Identity {
-		t.Fatalf("identities differ: %q != %q", one.Identity, two.Identity)
+	if one.Identity() != two.Identity() {
+		t.Fatalf("identities differ: %q != %q", one.Identity(), two.Identity())
 	}
 	withoutSecret, err := first.ResolveFixtureProfile("safe", func(string) string { return "" })
 	if err == nil || withoutSecret != nil {

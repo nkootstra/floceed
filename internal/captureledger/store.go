@@ -42,6 +42,11 @@ type Store struct {
 	writeIndex func(string, []byte) error
 }
 
+type Candidate struct {
+	GenerationID string
+	Resource     Resource
+}
+
 func OpenStore(root string) (*Store, error) {
 	if strings.TrimSpace(root) == "" {
 		return nil, fmt.Errorf("ledger root is required")
@@ -109,8 +114,25 @@ func (s *Store) Load(source SourceIdentity, resource ResourceDescriptor) (Genera
 
 // LoadCandidates validates bounded ledger metadata. Adapters defer potentially
 // large blob verification until source freshness proves a candidate useful.
-func (s *Store) LoadCandidates(source SourceIdentity, resource ResourceDescriptor) (Generation, error) {
-	return s.loadGeneration(source, resource)
+func (s *Store) LoadCandidates(source SourceIdentity, resource ResourceDescriptor) (Candidate, error) {
+	generation, err := s.loadGeneration(source, resource)
+	if err != nil {
+		return Candidate{}, err
+	}
+	var match *Resource
+	for i := range generation.Resources {
+		if generation.Resources[i].Descriptor != resource {
+			continue
+		}
+		if match != nil {
+			return Candidate{}, &InvalidationError{Reason: ReasonFormatChanged, Err: fmt.Errorf("resource index contains multiple matching resources")}
+		}
+		match = &generation.Resources[i]
+	}
+	if match == nil {
+		return Candidate{}, &InvalidationError{Reason: ReasonFormatChanged, Err: fmt.Errorf("generation resource does not match partition")}
+	}
+	return Candidate{GenerationID: generation.ID, Resource: *match}, nil
 }
 
 func (s *Store) loadGeneration(source SourceIdentity, resource ResourceDescriptor) (Generation, error) {
@@ -133,13 +155,13 @@ func (s *Store) loadGeneration(source SourceIdentity, resource ResourceDescripto
 	if generation.Source != source {
 		return Generation{}, &InvalidationError{Reason: ReasonFormatChanged, Err: fmt.Errorf("generation source does not match partition")}
 	}
-	found := false
+	matched := 0
 	for _, candidate := range generation.Resources {
 		if candidate.Descriptor == resource {
-			found = true
+			matched++
 		}
 	}
-	if !found {
+	if matched != 1 {
 		return Generation{}, &InvalidationError{Reason: ReasonFormatChanged, Err: fmt.Errorf("generation resource does not match partition")}
 	}
 	return generation, nil

@@ -34,19 +34,15 @@ func Current(toolVersion string) Report {
 		SchemaVersion: SchemaVersion, ToolVersion: toolVersion, FlociVersion: config.DefaultFlociVersion,
 		ManifestSchemas:         manifestSchemas,
 		CompatibilityCommitment: "pre-1.0; schema and CLI contracts may evolve with release notes",
-		Services: []ServiceCapability{
-			{Service: "dynamodb", Support: "partial", DataModes: []string{"bounded", "full"}},
-			{Service: "kinesis", Support: "partial", DataModes: []string{"bounded", "full"}},
-			{Service: "s3", Support: "partial", DataModes: []string{"bounded", "full"}},
-			{Service: "sns", Support: "structure_only", DataModes: []string{"structure"}},
-			{Service: "sqs", Support: "partial", DataModes: []string{"bounded"}},
-			{Service: "events", Support: "structure_only", DataModes: []string{"structure"}},
-			{Service: "lambda", Support: "structure_only", DataModes: []string{"structure"}},
-			{Service: "secretsmanager", Support: "structure_only", DataModes: []string{"structure"}},
-			{Service: "ssm", Support: "structure_only", DataModes: []string{"structure"}},
-			{Service: "apigateway", Support: "structure_only", DataModes: []string{"structure"}},
-			{Service: "stepfunctions", Support: "structure_only", DataModes: []string{"structure"}},
-			{Service: "logs", Support: "structure_only", DataModes: []string{"structure"}},
-		},
+		Services:                serviceCapabilities(),
 	}
+}
+
+func serviceCapabilities() []ServiceCapability {
+	facts := model.SupportedServiceFacts()
+	out := make([]ServiceCapability, 0, len(facts))
+	for _, fact := range facts {
+		out = append(out, ServiceCapability{Service: fact.Name, Support: string(fact.Support), DataModes: append([]string(nil), fact.DataModes...)})
+	}
+	return out
 }

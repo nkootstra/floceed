@@ -24,33 +24,40 @@ func ProjectManifest(manifest model.Manifest) (Projection, error) {
 		Target:        TargetProjection{FlociVersion: manifest.Target.FlociVersion, Image: manifest.Target.Image},
 		Governance:    projectGovernance(manifest.Governance),
 	}
-	selected := make(map[string]bool, len(manifest.Selected))
-	refs := make(map[string]model.ResourceRef, len(manifest.Selected)+len(manifest.Snapshots))
+	resources := make(map[ResourceIdentity]*projectionResource, len(manifest.Selected)+len(manifest.Snapshots))
 	for _, ref := range manifest.Selected {
-		key := resourceKey(ref)
-		selected[key], refs[key] = true, ref
+		id := identity(ref)
+		state := resources[id]
+		if state == nil {
+			state = &projectionResource{ref: ref}
+			resources[id] = state
+		}
+		state.selected = true
 	}
-	structures := make(map[string]string, len(manifest.Snapshots))
-	datasets := make(map[string]string, len(manifest.Snapshots))
-	snapshotFindings := make(map[string][]Finding, len(manifest.Snapshots))
 	for _, snapshot := range manifest.Snapshots {
-		key := resourceKey(snapshot.Resource)
-		if _, exists := structures[key]; exists {
+		id := identity(snapshot.Resource)
+		state := resources[id]
+		if state != nil && state.structure != "" {
+			key := resourceKey(snapshot.Resource)
 			return Projection{}, fmt.Errorf("project manifest: duplicate snapshot %s", key)
 		}
-		refs[key] = snapshot.Resource
+		if state == nil {
+			state = &projectionResource{ref: snapshot.Resource}
+			resources[id] = state
+		}
+		key := resourceKey(snapshot.Resource)
 		structure, err := canonicalStructure(snapshot.Structure)
 		if err != nil {
 			return Projection{}, fmt.Errorf("project %s structure: %w", key, err)
 		}
-		structures[key] = digestBytes(structure)
-		snapshotFindings[key] = ProjectFindings(snapshot.Findings)
+		state.structure = digestBytes(structure)
+		state.findings = ProjectFindings(snapshot.Findings)
 		dataset, err := projectDataset(snapshot)
 		if err != nil {
 			return Projection{}, fmt.Errorf("project %s dataset: %w", key, err)
 		}
 		if dataset != nil {
-			datasets[key], err = digestValue(dataset)
+			state.dataset, err = digestValue(dataset)
 			if err != nil {
 				return Projection{}, err
 			}
@@ -76,16 +83,17 @@ func ProjectManifest(manifest model.Manifest) (Projection, error) {
 	if err != nil {
 		return Projection{}, err
 	}
-	keys := make([]string, 0, len(refs))
-	for key := range refs {
-		keys = append(keys, key)
+	ids := make([]ResourceIdentity, 0, len(resources))
+	for id := range resources {
+		ids = append(ids, id)
 	}
-	sort.Strings(keys)
-	for _, key := range keys {
-		ref := refs[key]
+	sort.Slice(ids, func(i, j int) bool { return resourceKey(resources[ids[i]].ref) < resourceKey(resources[ids[j]].ref) })
+	for _, id := range ids {
+		state := resources[id]
+		ref := state.ref
 		resourceOps := operationsByResource[ref.Service+"\x00"+ref.ID]
 		resourceFindings := append([]Finding(nil), findingsByResource[ref.ID]...)
-		resourceFindings = append(resourceFindings, snapshotFindings[key]...)
+		resourceFindings = append(resourceFindings, state.findings...)
 		sort.Slice(resourceFindings, func(i, j int) bool { return findingKey(resourceFindings[i]) < findingKey(resourceFindings[j]) })
 		operationsDigest, err := optionalDigest(resourceOps)
 		if err != nil {
@@ -96,24 +104,26 @@ func ProjectManifest(manifest model.Manifest) (Projection, error) {
 			return Projection{}, err
 		}
 		p.Resources = append(p.Resources, ProjectedResource{
-			Identity: identity(ref), Selected: selected[key], StructureDigest: structures[key], DatasetDigest: datasets[key],
+			Identity: id, Selected: state.selected, StructureDigest: state.structure, DatasetDigest: state.dataset,
 			GovernanceDigest: governanceDigest, OperationsDigest: operationsDigest, FindingsDigest: findingsDigest,
 		})
 	}
-	canonical, err := bundle.CanonicalJSON(struct {
-		SchemaVersion int                  `json:"schema_version"`
-		Source        SourceProjection     `json:"source"`
-		Target        TargetProjection     `json:"target"`
-		Resources     []ProjectedResource  `json:"resources"`
-		Operations    []ProjectedOperation `json:"operations,omitempty"`
-		Findings      []Finding            `json:"findings,omitempty"`
-		Governance    *GovernanceSummary   `json:"governance,omitempty"`
-	}{p.SchemaVersion, p.Source, p.Target, p.Resources, p.Operations, p.Findings, p.Governance})
+	canonicalProjection := p
+	canonicalProjection.Digest = ""
+	canonical, err := bundle.CanonicalJSON(canonicalProjection)
 	if err != nil {
 		return Projection{}, err
 	}
 	p.Digest = digestBytes(canonical)
 	return p, nil
+}
+
+type projectionResource struct {
+	ref       model.ResourceRef
+	selected  bool
+	structure string
+	dataset   string
+	findings  []Finding
 }
 
 type projectedDataset struct {

@@ -189,7 +189,7 @@ type TargetProjection struct {
 // identities and digests only, never raw resource structures or fixture data.
 type Projection struct {
 	SchemaVersion int                  `json:"schema_version"`
-	Digest        string               `json:"digest"`
+	Digest        string               `json:"digest,omitempty"`
 	Source        SourceProjection     `json:"source"`
 	Target        TargetProjection     `json:"target"`
 	Resources     []ProjectedResource  `json:"resources"`

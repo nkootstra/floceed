@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/nkootstra/floceed/internal/arnidentity"
 	"github.com/nkootstra/floceed/internal/governance"
 )
 
@@ -49,6 +50,29 @@ type ServiceDescriptor struct {
 	DisplayName string       `json:"display_name"`
 	Support     SupportState `json:"support"`
 }
+
+type ServiceFact struct {
+	ServiceDescriptor
+	DataModes []string
+}
+
+func SupportedServiceFacts() []ServiceFact {
+	return []ServiceFact{
+		{ServiceDescriptor: ServiceDescriptor{Name: "dynamodb", DisplayName: "DynamoDB", Support: SupportPartial}, DataModes: []string{"bounded", "full"}},
+		{ServiceDescriptor: ServiceDescriptor{Name: "kinesis", DisplayName: "Kinesis", Support: SupportPartial}, DataModes: []string{"bounded", "full"}},
+		{ServiceDescriptor: ServiceDescriptor{Name: "s3", DisplayName: "S3", Support: SupportPartial}, DataModes: []string{"bounded", "full"}},
+		{ServiceDescriptor: ServiceDescriptor{Name: "sns", DisplayName: "SNS", Support: SupportStructureOnly}, DataModes: []string{"structure"}},
+		{ServiceDescriptor: ServiceDescriptor{Name: "sqs", DisplayName: "SQS", Support: SupportPartial}, DataModes: []string{"bounded"}},
+		{ServiceDescriptor: ServiceDescriptor{Name: "events", DisplayName: "EventBridge", Support: SupportStructureOnly}, DataModes: []string{"structure"}},
+		{ServiceDescriptor: ServiceDescriptor{Name: "lambda", DisplayName: "Lambda", Support: SupportStructureOnly}, DataModes: []string{"structure"}},
+		{ServiceDescriptor: ServiceDescriptor{Name: "secretsmanager", DisplayName: "Secrets Manager", Support: SupportStructureOnly}, DataModes: []string{"structure"}},
+		{ServiceDescriptor: ServiceDescriptor{Name: "ssm", DisplayName: "SSM Parameter Store", Support: SupportStructureOnly}, DataModes: []string{"structure"}},
+		{ServiceDescriptor: ServiceDescriptor{Name: "apigateway", DisplayName: "API Gateway", Support: SupportStructureOnly}, DataModes: []string{"structure"}},
+		{ServiceDescriptor: ServiceDescriptor{Name: "stepfunctions", DisplayName: "Step Functions", Support: SupportStructureOnly}, DataModes: []string{"structure"}},
+		{ServiceDescriptor: ServiceDescriptor{Name: "logs", DisplayName: "CloudWatch Logs", Support: SupportStructureOnly}, DataModes: []string{"structure"}},
+	}
+}
+
 type SourceScope struct {
 	Profile   string `json:"-"`
 	AccountID string `json:"account_id,omitempty"`
@@ -111,12 +135,14 @@ type Snapshot struct {
 	Findings         []Finding       `json:"findings,omitempty"`
 }
 
-func NewSnapshot(resource ResourceRef, service string, structure any) (*Snapshot, error) {
+// NewSnapshot retains the legacy service argument for source compatibility;
+// the resource is the sole owner of the persisted service identity.
+func NewSnapshot(resource ResourceRef, _ string, structure any) (*Snapshot, error) {
 	payload, err := json.Marshal(structure)
 	if err != nil {
-		return nil, fmt.Errorf("encode %s snapshot structure: %w", service, err)
+		return nil, fmt.Errorf("encode %s snapshot structure: %w", resource.Service, err)
 	}
-	return &Snapshot{Resource: resource, Service: service, StructureVersion: CurrentSnapshotStructureVersion, Structure: payload}, nil
+	return &Snapshot{Resource: resource, Service: resource.Service, StructureVersion: CurrentSnapshotStructureVersion, Structure: payload}, nil
 }
 
 func DecodeStructure[T any](snapshot *Snapshot) (T, error) {
@@ -440,12 +466,12 @@ func validateSnapshot(snapshot Snapshot) error {
 		if err := json.Unmarshal(snapshot.Structure, &value); err != nil || value.ARN == "" {
 			return fmt.Errorf("%s structure requires arn: %w", snapshot.Service, ErrValidation)
 		}
-		parts := strings.Split(value.ARN, ":")
 		expectedName := snapshot.Resource.ID
 		if snapshot.Service == "events" {
 			expectedName = "event-bus/" + expectedName
 		}
-		if len(parts) != 6 || parts[0] != "arn" || parts[1] == "" || parts[2] != snapshot.Service || parts[3] == "" || !snapshotAccountID.MatchString(parts[4]) || parts[5] != expectedName {
+		identity, parseErr := arnidentity.Parse(value.ARN)
+		if parseErr != nil || identity.Service != snapshot.Service || identity.Region == "" || !snapshotAccountID.MatchString(identity.Account) || identity.Resource != expectedName {
 			return fmt.Errorf("%s structure ARN must match resource identity: %w", snapshot.Service, ErrValidation)
 		}
 		if snapshot.Resource.ARN != "" && snapshot.Resource.ARN != value.ARN {
@@ -458,8 +484,8 @@ func validateSnapshot(snapshot Snapshot) error {
 		if err := json.Unmarshal(snapshot.Structure, &value); err != nil || value.ARN == "" {
 			return fmt.Errorf("Kinesis structure requires arn: %w", ErrValidation)
 		}
-		parts := strings.Split(value.ARN, ":")
-		if len(parts) != 6 || parts[0] != "arn" || parts[1] == "" || parts[2] != "kinesis" || parts[3] == "" || !snapshotAccountID.MatchString(parts[4]) || parts[5] != "stream/"+snapshot.Resource.ID {
+		identity, parseErr := arnidentity.Parse(value.ARN)
+		if parseErr != nil || identity.Service != "kinesis" || identity.Region == "" || !snapshotAccountID.MatchString(identity.Account) || identity.Resource != "stream/"+snapshot.Resource.ID {
 			return fmt.Errorf("Kinesis structure ARN must match resource identity: %w", ErrValidation)
 		}
 		if snapshot.Resource.ARN != "" && snapshot.Resource.ARN != value.ARN {
@@ -472,8 +498,8 @@ func validateSnapshot(snapshot Snapshot) error {
 		if err := json.Unmarshal(snapshot.Structure, &value); err != nil || value.ARN == "" {
 			return fmt.Errorf("Lambda structure requires arn: %w", ErrValidation)
 		}
-		parts := strings.Split(value.ARN, ":")
-		if len(parts) != 7 || parts[0] != "arn" || parts[2] != "lambda" || parts[5] != "function" || parts[6] != snapshot.Resource.ID || !snapshotAccountID.MatchString(parts[4]) {
+		identity, parseErr := arnidentity.Parse(value.ARN)
+		if parseErr != nil || identity.Service != "lambda" || identity.Region == "" || !snapshotAccountID.MatchString(identity.Account) || identity.Resource != "function:"+snapshot.Resource.ID {
 			return fmt.Errorf("Lambda structure ARN must match resource identity: %w", ErrValidation)
 		}
 		if snapshot.Resource.ARN != "" && snapshot.Resource.ARN != value.ARN {
@@ -486,12 +512,14 @@ func validateSnapshot(snapshot Snapshot) error {
 		if err := json.Unmarshal(snapshot.Structure, &value); err != nil || value.ARN == "" {
 			return fmt.Errorf("%s structure requires arn: %w", snapshot.Service, ErrValidation)
 		}
-		parts := strings.Split(value.ARN, ":")
 		var valid bool
 		if snapshot.Service == "ssm" {
-			valid = len(parts) == 6 && parts[0] == "arn" && parts[2] == "ssm" && snapshotAccountID.MatchString(parts[4]) && parts[5] == "parameter"+snapshot.Resource.ID
+			identity, parseErr := arnidentity.Parse(value.ARN)
+			valid = parseErr == nil && identity.Service == "ssm" && identity.Region != "" && snapshotAccountID.MatchString(identity.Account) && identity.Resource == "parameter"+snapshot.Resource.ID
 		} else {
-			valid = len(parts) == 7 && parts[0] == "arn" && parts[2] == "secretsmanager" && snapshotAccountID.MatchString(parts[4]) && parts[5] == "secret" && secretResourceMatchesName(parts[6], snapshot.Resource.ID)
+			identity, parseErr := arnidentity.Parse(value.ARN)
+			resourcePart, ok := identity.ResourceName("secret:")
+			valid = parseErr == nil && identity.Service == "secretsmanager" && identity.Region != "" && snapshotAccountID.MatchString(identity.Account) && ok && secretResourceMatchesName(resourcePart, snapshot.Resource.ID)
 		}
 		if !valid {
 			return fmt.Errorf("%s structure ARN must match resource identity: %w", snapshot.Service, ErrValidation)
@@ -503,8 +531,12 @@ func validateSnapshot(snapshot Snapshot) error {
 		var value struct {
 			ARN string `json:"arn"`
 		}
-		if err := json.Unmarshal(snapshot.Structure, &value); err != nil || value.ARN == "" || !strings.Contains(value.ARN, ":apigateway:") {
+		if err := json.Unmarshal(snapshot.Structure, &value); err != nil || value.ARN == "" {
 			return fmt.Errorf("API Gateway structure requires arn: %w", ErrValidation)
+		}
+		identity, parseErr := arnidentity.Parse(value.ARN)
+		if parseErr != nil || identity.Service != "apigateway" || identity.Resource != "/apis/"+snapshot.Resource.ID {
+			return fmt.Errorf("API Gateway structure must match resource identity: %w", ErrValidation)
 		}
 		if snapshot.Resource.ARN != "" && snapshot.Resource.ARN != value.ARN {
 			return fmt.Errorf("API Gateway structure must match resource ARN: %w", ErrValidation)
@@ -516,8 +548,8 @@ func validateSnapshot(snapshot Snapshot) error {
 		if err := json.Unmarshal(snapshot.Structure, &value); err != nil || value.ARN == "" {
 			return fmt.Errorf("Step Functions structure requires arn: %w", ErrValidation)
 		}
-		parts := strings.Split(value.ARN, ":")
-		if len(parts) != 7 || parts[0] != "arn" || parts[2] != "states" || parts[5] != "stateMachine" || parts[6] != snapshot.Resource.ID || !snapshotAccountID.MatchString(parts[4]) {
+		identity, parseErr := arnidentity.Parse(value.ARN)
+		if parseErr != nil || identity.Service != "states" || identity.Region == "" || !snapshotAccountID.MatchString(identity.Account) || identity.Resource != "stateMachine:"+snapshot.Resource.ID {
 			return fmt.Errorf("Step Functions structure ARN must match resource identity: %w", ErrValidation)
 		}
 		if snapshot.Resource.ARN != "" && snapshot.Resource.ARN != value.ARN {
@@ -530,17 +562,17 @@ func validateSnapshot(snapshot Snapshot) error {
 		if err := json.Unmarshal(snapshot.Structure, &value); err != nil || value.ARN == "" {
 			return fmt.Errorf("CloudWatch Logs structure requires arn: %w", ErrValidation)
 		}
-		parts := strings.Split(value.ARN, ":")
+		identity, parseErr := arnidentity.Parse(value.ARN)
 		resourcePart := ""
-		if len(parts) >= 6 {
-			resourcePart = strings.TrimPrefix(strings.Join(parts[5:], ":"), "log-group:")
+		if parseErr == nil {
+			resourcePart = strings.TrimPrefix(identity.Resource, "log-group:")
 		}
 		// DescribeLogGroups returns the ARN with a trailing ":*" for log groups
 		// created after AWS's 2019 ARN format change; configured ARNs may or may
 		// not carry it. Trim it before the identity check so a different log
 		// group whose name merely shares a prefix cannot pass.
 		resourcePart = strings.TrimSuffix(resourcePart, ":*")
-		if len(parts) < 7 || parts[0] != "arn" || parts[2] != "logs" || !snapshotAccountID.MatchString(parts[4]) || resourcePart != snapshot.Resource.ID {
+		if parseErr != nil || identity.Service != "logs" || identity.Region == "" || !snapshotAccountID.MatchString(identity.Account) || resourcePart != snapshot.Resource.ID {
 			return fmt.Errorf("CloudWatch Logs structure ARN must match resource identity: %w", ErrValidation)
 		}
 		// A configured ARN may carry the optional ":*" suffix; compare identity

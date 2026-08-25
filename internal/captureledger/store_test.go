@@ -122,7 +122,7 @@ func TestLoadCandidatesDefersBlobVerificationUntilSelected(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	unit := loaded.Resources[0].Units[0]
+	unit := loaded.Resource.Units[0]
 	if unit.Outcome != UnitOutcomeReused || unit.Reason != ReasonReused {
 		t.Fatalf("candidate metadata changed before selection: %#v", unit)
 	}

@@ -133,10 +133,16 @@ func GenerateRepresentativeBundle(root string) error {
 }
 
 func representativeS3Artifacts(object []byte) ([]byte, []byte, error) {
+	return S3PackArtifacts(object, "fixtures/hello.txt", "fixtures/hello.txt")
+}
+
+// S3PackArtifacts emits the production replay pack and compressed NDJSON
+// index shape used by both deterministic and integration fixtures.
+func S3PackArtifacts(object []byte, key, entryPath string) ([]byte, []byte, error) {
 	var pack bytes.Buffer
 	gz := gzip.NewWriter(&pack)
 	tarWriter := tar.NewWriter(gz)
-	if err := tarWriter.WriteHeader(&tar.Header{Name: "fixtures/hello.txt", Mode: 0o600, Size: int64(len(object)), ModTime: time.Unix(0, 0)}); err != nil {
+	if err := tarWriter.WriteHeader(&tar.Header{Name: entryPath, Mode: 0o600, Size: int64(len(object)), ModTime: time.Unix(0, 0)}); err != nil {
 		return nil, nil, err
 	}
 	if _, err := tarWriter.Write(object); err != nil {
@@ -149,7 +155,7 @@ func representativeS3Artifacts(object []byte) ([]byte, []byte, error) {
 		return nil, nil, err
 	}
 	digest := sha256.Sum256(object)
-	entry := map[string]any{"key": "fixtures/hello.txt", "path": "fixtures/hello.txt", "size": len(object), "sha256": hex.EncodeToString(digest[:]), "content_type": "text/plain", "overwrite": "if-different"}
+	entry := map[string]any{"key": key, "path": entryPath, "size": len(object), "sha256": hex.EncodeToString(digest[:]), "content_type": "text/plain", "overwrite": "if-different"}
 	encoded, err := json.Marshal(entry)
 	if err != nil {
 		return nil, nil, err

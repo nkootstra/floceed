@@ -289,7 +289,7 @@ func VerifyFixture(root string) (model.VerificationResult, error) {
 		return result, verificationError(VerificationUnsupportedSchema, "manifest.json", err)
 	}
 	for _, snap := range manifest.Snapshots {
-		for _, artifact := range append(append([]model.ArtifactRef(nil), snap.Data...), snapshotDatasetArtifacts(snap)...) {
+		for _, artifact := range ArtifactRefs(snap) {
 			if err := ValidateRelativePath(artifact.Path); err != nil {
 				return result, verificationError(VerificationUnsafePath, artifact.Path, err)
 			}
@@ -319,11 +319,13 @@ func VerifyFixture(root string) (model.VerificationResult, error) {
 	return result, nil
 }
 
-func snapshotDatasetArtifacts(snapshot model.Snapshot) []model.ArtifactRef {
+// ArtifactRefs returns all artifacts referenced by a snapshot in manifest order.
+func ArtifactRefs(snapshot model.Snapshot) []model.ArtifactRef {
+	out := append([]model.ArtifactRef(nil), snapshot.Data...)
 	if snapshot.Dataset == nil {
-		return nil
+		return out
 	}
-	out := make([]model.ArtifactRef, 0, len(snapshot.Dataset.Chunks)*2)
+	out = append(out, make([]model.ArtifactRef, 0, len(snapshot.Dataset.Chunks)*2)...)
 	for _, chunk := range snapshot.Dataset.Chunks {
 		out = append(out, chunk.Data)
 		if chunk.Index != nil {
