@@ -29,7 +29,7 @@ func (f fakeClient) ListEventSourceMappings(context.Context, *awsLambda.ListEven
 
 func TestPlanSelectsFunctionsWithIAMActions(t *testing.T) {
 	project := config.Project{Resources: config.Resources{Lambda: []config.LambdaResource{{Name: "worker", ARN: "arn:aws:lambda:eu-west-1:123456789012:function:worker"}}}}
-	contribution := New().Plan(project, true)
+	contribution := New(nil).Plan(project, true)
 	if len(contribution.Selections) != 1 || contribution.Selections[0].Resource.Type != "function" {
 		t.Fatalf("selections = %#v", contribution.Selections)
 	}
@@ -66,7 +66,7 @@ func TestCaptureIsStructureOnlyAndBuildsSnapshot(t *testing.T) {
 	if err := (model.Manifest{SchemaVersion: model.CurrentManifestSchemaVersion, Snapshots: []model.Snapshot{*snapshot}}).Validate(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := New().Capture(context.Background(), model.SourceScope{}, ref, model.CaptureOptions{IncludeData: true}); err == nil {
+	if _, err := New(nil).Capture(context.Background(), model.SourceScope{}, ref, model.CaptureOptions{IncludeData: true}); err == nil {
 		t.Fatal("data capture must be rejected")
 	}
 }

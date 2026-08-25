@@ -71,7 +71,7 @@ go run ./internal/testfixture/cmd/generate-bundle \
 - Fixture admission can be enforced by repository policy.
 
 Review the [least-privilege IAM policy](docs/iam-policy.md) and the
-[governed fixture profile guidance](docs/README.md#governed-fixture-profiles)
+[governed fixture profile guidance](docs/compatibility.md#governed-fixture-profiles)
 before capturing or sharing data.
 
 ## Supported services

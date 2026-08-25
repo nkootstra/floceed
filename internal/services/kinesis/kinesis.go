@@ -210,6 +210,7 @@ func captureRecords(ctx context.Context, client RecordClient, ref model.Resource
 	if err != nil {
 		return model.ArtifactRef{}, 0, 0, err
 	}
+	defer writer.Abort()
 	var records, sourceBytes int64
 	maxRecords, maxBytes := int64(opts.Limits.MaxItems), opts.Limits.MaxTotalBytes
 	limitReached := false

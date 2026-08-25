@@ -2,6 +2,7 @@ package secretsmanager
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -21,7 +22,7 @@ func (f fakeClient) DescribeSecret(ctx context.Context, in *awsSecrets.DescribeS
 
 func TestPlanSelectsSecretsWithIAMActions(t *testing.T) {
 	project := config.Project{Resources: config.Resources{Secrets: []config.SecretResource{{Name: "db", ARN: "arn:aws:secretsmanager:eu-west-1:123456789012:secret:db"}}}}
-	contribution := New().Plan(project, true)
+	contribution := New(nil).Plan(project, true)
 	if len(contribution.Selections) != 1 || contribution.Selections[0].Resource.Type != "secret" {
 		t.Fatalf("selections = %#v", contribution.Selections)
 	}
@@ -49,7 +50,7 @@ func TestCaptureIsStructureOnlyAndNeverReadsValues(t *testing.T) {
 	if err := (model.Manifest{SchemaVersion: model.CurrentManifestSchemaVersion, Snapshots: []model.Snapshot{*snapshot}}).Validate(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := New().Capture(context.Background(), model.SourceScope{}, ref, model.CaptureOptions{IncludeData: true}); err == nil {
+	if _, err := New(nil).Capture(context.Background(), model.SourceScope{}, ref, model.CaptureOptions{}); err == nil || !errors.Is(err, model.ErrValidation) {
 		t.Fatal("data capture must be rejected")
 	}
 }

@@ -86,10 +86,10 @@ func (p *EffectivePolicy) unprotectCheckpoint(captureIdentity, authenticatedIden
 }
 
 func (p *EffectivePolicy) checkpointAEAD(captureIdentity string) (cipher.AEAD, error) {
-	if p == nil || len(p.secret) < 32 || p.Identity == "" || captureIdentity == "" {
+	if p == nil || len(p.secret) < 32 || p.Identity() == "" || captureIdentity == "" {
 		return nil, ErrCheckpointProtection
 	}
-	reader := hkdf.New(func() hash.Hash { return sha256.New() }, p.secret, []byte("floceed/governance/checkpoint-aead/v1\x00"+p.Identity), []byte(captureIdentity))
+	reader := hkdf.New(func() hash.Hash { return sha256.New() }, p.secret, []byte("floceed/governance/checkpoint-aead/v1\x00"+p.Identity()), []byte(captureIdentity))
 	key := make([]byte, 32)
 	if _, err := io.ReadFull(reader, key); err != nil {
 		return nil, ErrCheckpointProtection

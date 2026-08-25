@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"slices"
 
 	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/textinput"
@@ -54,8 +55,7 @@ type Model struct {
 	serviceSelected  map[string]bool
 	resources        []model.ResourceSummary
 	selected         map[string]bool
-	dataEnabled      map[string]bool
-	dataMode         map[string]config.DataMode
+	dataChoice       map[string]config.DataMode
 	findings         []model.Finding
 	permissionChecks []app.Check
 	plan             app.Plan
@@ -68,6 +68,8 @@ type Model struct {
 	spinner          spinner.Model
 	scanCancel       context.CancelFunc
 	scanToken        uint64
+	planToken        uint64
+	pullToken        uint64
 	err              error
 	progress         model.ProgressEvent
 	pullUpdates      chan tea.Msg
@@ -90,12 +92,17 @@ type planFinishedMsg struct {
 	plan        app.Plan
 	permissions app.PermissionResult
 	err         error
+	token       uint64
 }
 type pullFinishedMsg struct {
 	manifest model.Manifest
 	err      error
+	token    uint64
 }
-type pullProgressMsg struct{ event model.ProgressEvent }
+type pullProgressMsg struct {
+	event model.ProgressEvent
+	token uint64
+}
 
 func NewModel(backend Backend, opts Options) Model {
 	if opts.ProjectFile == "" {
@@ -118,21 +125,29 @@ func NewModel(backend Backend, opts Options) Model {
 	ctx, cancel := context.WithCancel(context.Background())
 	return Model{
 		ctx: ctx, cancel: cancel, backend: backend, opts: opts, screen: ScreenLoading,
-		profile: opts.Profile, region: opts.Region, services: []model.ServiceDescriptor{
-			{Name: "s3", DisplayName: "Amazon S3", Support: model.SupportPartial},
-			{Name: "dynamodb", DisplayName: "Amazon DynamoDB", Support: model.SupportPartial},
-			{Name: "kinesis", DisplayName: "Amazon Kinesis", Support: model.SupportStructureOnly},
-			{Name: "events", DisplayName: "Amazon EventBridge", Support: model.SupportStructureOnly},
-			{Name: "lambda", DisplayName: "AWS Lambda", Support: model.SupportStructureOnly},
-			{Name: "secretsmanager", DisplayName: "AWS Secrets Manager", Support: model.SupportStructureOnly},
-			{Name: "ssm", DisplayName: "AWS SSM Parameter Store", Support: model.SupportStructureOnly},
-			{Name: "apigateway", DisplayName: "Amazon API Gateway", Support: model.SupportStructureOnly},
-			{Name: "stepfunctions", DisplayName: "AWS Step Functions", Support: model.SupportStructureOnly},
-			{Name: "logs", DisplayName: "CloudWatch Logs", Support: model.SupportStructureOnly},
-		},
-		serviceSelected: map[string]bool{"s3": true, "dynamodb": true, "kinesis": false, "events": false, "lambda": false, "secretsmanager": false, "ssm": false, "apigateway": false, "stepfunctions": false, "logs": false}, selected: map[string]bool{},
-		dataEnabled: map[string]bool{}, dataMode: map[string]config.DataMode{}, filter: filter, regionInput: region, spinner: progressSpinner,
+		profile: opts.Profile, region: opts.Region, services: defaultServiceDescriptors(),
+		serviceSelected: map[string]bool{"s3": true, "dynamodb": true, "kinesis": false, "sns": false, "sqs": false, "events": false, "lambda": false, "secretsmanager": false, "ssm": false, "apigateway": false, "stepfunctions": false, "logs": false}, selected: map[string]bool{},
+		dataChoice: map[string]config.DataMode{}, filter: filter, regionInput: region, spinner: progressSpinner,
 	}
+}
+
+func defaultServiceDescriptors() []model.ServiceDescriptor {
+	facts := model.SupportedServiceFacts()
+	preferred := []string{"s3", "dynamodb"}
+	services := make([]model.ServiceDescriptor, 0, len(facts))
+	for _, name := range preferred {
+		for _, fact := range facts {
+			if fact.Name == name {
+				services = append(services, fact.ServiceDescriptor)
+			}
+		}
+	}
+	for _, fact := range facts {
+		if !slices.Contains(preferred, fact.Name) {
+			services = append(services, fact.ServiceDescriptor)
+		}
+	}
+	return services
 }
 
 func (m Model) Screen() Screen { return m.screen }
@@ -173,23 +188,27 @@ func (m *Model) scan() tea.Cmd {
 		return scanFinishedMsg{result: r, err: err, token: token}
 	}
 }
-func (m Model) makePlan() tea.Cmd {
+func (m *Model) makePlan() tea.Cmd {
+	m.planToken++
+	token := m.planToken
 	req := m.request()
 	return func() tea.Msg {
 		p, err := m.backend.Plan(m.ctx, req)
 		if err != nil {
-			return planFinishedMsg{plan: p, err: err}
+			return planFinishedMsg{plan: p, err: err, token: token}
 		}
 		permissions, err := m.backend.Preflight(m.ctx, req)
-		return planFinishedMsg{plan: p, permissions: permissions, err: err}
+		return planFinishedMsg{plan: p, permissions: permissions, err: err, token: token}
 	}
 }
 func (m *Model) pull() tea.Cmd {
+	m.pullToken++
+	token := m.pullToken
 	m.pullUpdates = make(chan tea.Msg, 16)
 	req := m.request()
 	req.Progress = func(event model.ProgressEvent) {
 		select {
-		case m.pullUpdates <- pullProgressMsg{event}:
+		case m.pullUpdates <- pullProgressMsg{event: event, token: token}:
 		case <-m.ctx.Done():
 		}
 	}
@@ -197,7 +216,7 @@ func (m *Model) pull() tea.Cmd {
 	go func() {
 		result, err := m.backend.SaveAndPull(m.ctx, req)
 		select {
-		case updates <- pullFinishedMsg{result, err}:
+		case updates <- pullFinishedMsg{manifest: result, err: err, token: token}:
 		case <-m.ctx.Done():
 		}
 		close(updates)

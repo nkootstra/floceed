@@ -446,36 +446,18 @@ def object_matches(s3, bucket: str, value: dict) -> bool:
 def seed_bucket(s3, bucket: dict) -> None:
     name = bucket["name"]
     for value in bucket.get("objects", []):
-        policy = value.get("overwrite", "if-different")
-        if policy == "never":
-            try:
-                s3.head_object(Bucket=name, Key=value["key"])
-            except ClientError as error:
-                if not missing(error, "404", "NoSuchKey", "NotFound"):
-                    raise
-            else:
-                continue
-        elif policy == "if-different":
-            if object_matches(s3, name, value):
-                continue
-        elif policy != "always":
-            fail(f"unsupported S3 overwrite policy {policy!r}")
-        request = {"Bucket": name, "Key": value["key"], "Body": safe_path(value["path"]).open("rb")}
-        for source, target in (("content_type", "ContentType"), ("content_encoding", "ContentEncoding"), ("cache_control", "CacheControl")):
-            if value.get(source):
-                request[target] = value[source]
-        if value.get("metadata"):
-            request["Metadata"] = value["metadata"]
-        if value.get("tags"):
-            from urllib.parse import urlencode
-            request["Tagging"] = urlencode([(item["key"], item["value"]) for item in value["tags"]])
+        body = safe_path(value["path"]).open("rb")
         try:
-            s3.put_object(**request)
+            put_object(s3, name, value, body)
         finally:
-            request["Body"].close()
+            body.close()
 
 
 def put_object_from_pack(s3, bucket: str, value: dict, body) -> None:
+    put_object(s3, bucket, value, body, value["size"])
+
+
+def put_object(s3, bucket: str, value: dict, body, content_length: int | None = None) -> None:
     policy = value.get("overwrite", "if-different")
     if policy == "never":
         try:
@@ -485,11 +467,14 @@ def put_object_from_pack(s3, bucket: str, value: dict, body) -> None:
                 raise
         else:
             return
-    elif policy == "if-different" and object_matches(s3, bucket, value):
-        return
-    elif policy not in {"always", "if-different"}:
+    elif policy == "if-different":
+        if object_matches(s3, bucket, value):
+            return
+    elif policy != "always":
         fail(f"unsupported S3 overwrite policy {policy!r}")
-    request = {"Bucket": bucket, "Key": value["key"], "Body": body, "ContentLength": value["size"]}
+    request = {"Bucket": bucket, "Key": value["key"], "Body": body}
+    if content_length is not None:
+        request["ContentLength"] = content_length
     for source, target in (("content_type", "ContentType"), ("content_encoding", "ContentEncoding"), ("cache_control", "CacheControl")):
         if value.get(source):
             request[target] = value[source]
@@ -517,7 +502,10 @@ def seed_bucket_chunk(s3, bucket: dict, chunk: dict) -> int:
             body = archive.extractfile(member)
             if body is None:
                 fail(f"S3 pack entry missing for {value['key']!r}")
-            put_object_from_pack(s3, bucket["name"], value, body)
+            try:
+                put_object_from_pack(s3, bucket["name"], value, body)
+            finally:
+                body.close()
             completed += 1
     return completed
 

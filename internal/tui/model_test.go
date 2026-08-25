@@ -10,6 +10,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/nkootstra/floceed/internal/app"
 	"github.com/nkootstra/floceed/internal/awsconfig"
+	"github.com/nkootstra/floceed/internal/config"
 	"github.com/nkootstra/floceed/internal/model"
 )
 
@@ -138,6 +139,22 @@ func TestStaleScanResultDoesNotAffectNewServicesScan(t *testing.T) {
 	}
 }
 
+func TestStalePlanResultDoesNotAffectNewPlan(t *testing.T) {
+	m := NewModel(fakeBackend{}, Options{})
+	m.screen, m.pending, m.busy = ScreenOptions, ScreenOptions, true
+	first := m.makePlan()
+	firstMsg := first().(planFinishedMsg)
+	second := m.makePlan()
+	_ = second
+	if m.planToken != firstMsg.token+1 {
+		t.Fatalf("plan generation = %d, want %d", m.planToken, firstMsg.token+1)
+	}
+	m = update(t, m, firstMsg)
+	if !m.busy || m.Screen() != ScreenOptions {
+		t.Fatalf("stale plan changed state: screen %s, busy %t", m.Screen(), m.busy)
+	}
+}
+
 func TestMissingProfileRegionRequiresRegionEntry(t *testing.T) {
 	m := NewModel(fakeBackend{}, Options{})
 	m = update(t, m, profilesLoadedMsg{profiles: []Profile{{Name: "dev"}}})
@@ -220,8 +237,8 @@ func TestRescanDropsDeselectedServiceStateAndPreservesSelectedServiceResources(t
 	}
 	m.selected["s3/assets"] = true
 	m.selected["dynamodb/users"] = true
-	m.dataEnabled["s3/assets"] = true
-	m.dataEnabled["dynamodb/users"] = true
+	m.dataChoice["s3/assets"] = config.DataModeBounded
+	m.dataChoice["dynamodb/users"] = config.DataModeBounded
 
 	m.back()
 	m.cursor = 0 // s3
@@ -231,10 +248,10 @@ func TestRescanDropsDeselectedServiceStateAndPreservesSelectedServiceResources(t
 	if len(m.resources) != 1 || resourceKey(m.resources[0].Ref) != "dynamodb/users" {
 		t.Fatalf("resources = %#v, want only retained dynamodb resource", m.resources)
 	}
-	if m.selected["s3/assets"] || m.dataEnabled["s3/assets"] {
+	if m.selected["s3/assets"] || m.dataChoice["s3/assets"] != "" {
 		t.Fatal("deselected service retained selection or data state")
 	}
-	if !m.selected["dynamodb/users"] || !m.dataEnabled["dynamodb/users"] {
+	if !m.selected["dynamodb/users"] || m.dataChoice["dynamodb/users"] == "" {
 		t.Fatal("selected service state was lost during transient discovery failure")
 	}
 }
@@ -348,6 +365,68 @@ func TestSafeDataDefaultsAndFinalConfirmation(t *testing.T) {
 	if m.Screen() != ScreenProgress {
 		t.Fatalf("confirmation did not start generation: screen=%s", m.Screen())
 	}
+}
+
+func TestDataChoiceCyclingFollowsServiceSupport(t *testing.T) {
+	m := NewModel(fakeBackend{}, Options{})
+	m.screen = ScreenResources
+	m.resources = []model.ResourceSummary{
+		{Ref: model.ResourceRef{Service: "s3", ID: "assets"}, Name: "assets"},
+		{Ref: model.ResourceRef{Service: "dynamodb", ID: "users"}, Name: "users"},
+		{Ref: model.ResourceRef{Service: "sqs", ID: "jobs"}, Name: "jobs"},
+		{Ref: model.ResourceRef{Service: "sns", ID: "events"}, Name: "events"},
+	}
+	for _, resource := range m.resources {
+		m.selected[resourceKey(resource.Ref)] = true
+	}
+	// A stale choice from an older model must not survive into the options screen.
+	m.dataChoice["sns/events"] = config.DataModeFull
+	m = press(t, m, "enter")
+	if m.dataChoice["sns/events"] != "" {
+		t.Fatal("unsupported SNS data choice was not removed")
+	}
+
+	// S3 and DynamoDB cycle through bounded, full, and structure-only.
+	for _, key := range []string{"s3/assets", "dynamodb/users"} {
+		m.cursor = indexOfSelectedResource(m, key)
+		m = press(t, m, " ")
+		if m.dataChoice[key] != config.DataModeBounded {
+			t.Fatalf("%s first choice = %q, want bounded", key, m.dataChoice[key])
+		}
+		m = press(t, m, " ")
+		if m.dataChoice[key] != config.DataModeFull {
+			t.Fatalf("%s second choice = %q, want full", key, m.dataChoice[key])
+		}
+		m = press(t, m, " ")
+		if m.dataChoice[key] != "" {
+			t.Fatalf("%s third choice = %q, want structure-only", key, m.dataChoice[key])
+		}
+	}
+
+	// SQS supports bounded data only; SNS never offers a data choice.
+	m.cursor = indexOfSelectedResource(m, "sqs/jobs")
+	m = press(t, m, " ")
+	if m.dataChoice["sqs/jobs"] != config.DataModeBounded {
+		t.Fatalf("SQS first choice = %q, want bounded", m.dataChoice["sqs/jobs"])
+	}
+	m = press(t, m, " ")
+	if m.dataChoice["sqs/jobs"] != "" {
+		t.Fatalf("SQS second choice = %q, want structure-only", m.dataChoice["sqs/jobs"])
+	}
+	m.cursor = indexOfSelectedResource(m, "sns/events")
+	m = press(t, m, " ")
+	if m.dataChoice["sns/events"] != "" {
+		t.Fatalf("SNS choice = %q, want structure-only", m.dataChoice["sns/events"])
+	}
+}
+
+func indexOfSelectedResource(m Model, key string) int {
+	for i, resource := range m.selectedResources() {
+		if resourceKey(resource.Ref) == key {
+			return i
+		}
+	}
+	return -1
 }
 
 func TestFixtureProfileOptionReachesPlanFromInteractiveFlow(t *testing.T) {

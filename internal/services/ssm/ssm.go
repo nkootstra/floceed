@@ -25,11 +25,7 @@ type Adapter struct {
 
 var _ catalog.Adapter = (*Adapter)(nil)
 
-func New(client ...Client) *Adapter {
-	var c Client
-	if len(client) > 0 {
-		c = client[0]
-	}
+func New(c Client) *Adapter {
 	return &Adapter{
 		Base: structureonly.New(structureonly.Descriptor{
 			ServiceName:  "ssm",
@@ -48,8 +44,11 @@ func (a *Adapter) Capture(ctx context.Context, _ model.SourceScope, ref model.Re
 	if err := a.CheckStructureOnly(opts); err != nil {
 		return nil, err
 	}
+	if a.client == nil {
+		return nil, fmt.Errorf("SSM capture requires a client: %w", model.ErrValidation)
+	}
 	structure := map[string]any{"name": ref.ID, "arn": ref.ARN, "value_captured": false}
-	if a.client != nil {
+	{
 		out, err := a.client.DescribeParameters(ctx, &awsSSM.DescribeParametersInput{ParameterFilters: []types.ParameterStringFilter{{Key: aws.String("Name"), Values: []string{ref.ID}}}})
 		if err != nil {
 			return nil, err

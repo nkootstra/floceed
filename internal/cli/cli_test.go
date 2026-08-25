@@ -60,7 +60,7 @@ func TestInitRefusesOverwriteUnlessForced(t *testing.T) {
 	}
 	cmd := New(Options{Stdout: &bytes.Buffer{}, Stderr: &bytes.Buffer{}})
 	cmd.SetArgs([]string{"init", "--project", path, "--region", "eu-west-1"})
-	err := cmd.ExecuteContext(context.Background())
+	_, err := cmd.ExecuteContextC(context.Background())
 	if err == nil || ExitCode(err) != 6 || !strings.Contains(err.Error(), "file exists") {
 		t.Fatalf("overwrite error = %v", err)
 	}
@@ -357,11 +357,11 @@ func TestInspectJSONInvalidBundleUsesStableErrorEnvelopeAndExitCode(t *testing.T
 	var out bytes.Buffer
 	cmd := New(Options{Stdout: &out, Stderr: &bytes.Buffer{}, App: fake})
 	cmd.SetArgs([]string{"inspect", "--project", writeProject(t), "--output", "json"})
-	err := cmd.ExecuteContext(context.Background())
+	executed, err := cmd.ExecuteContextC(context.Background())
 	if err == nil || ExitCode(err) != 6 || out.Len() != 0 {
 		t.Fatalf("Execute() = %v, output %q", err, out.String())
 	}
-	written, writeErr := WriteInvocationError(cmd, err)
+	written, writeErr := WriteInvocationError(executed, err)
 	if !written || writeErr != nil {
 		t.Fatalf("WriteInvocationError() = %t, %v", written, writeErr)
 	}
@@ -605,14 +605,14 @@ func TestDoctorJSONFailureDoesNotEmitSuccessEnvelope(t *testing.T) {
 	cmd := New(Options{Stdout: &out, Stderr: &bytes.Buffer{}, App: fake})
 	cmd.SetArgs([]string{"doctor", "--project", writeProject(t), "--output", "json"})
 
-	err := cmd.ExecuteContext(context.Background())
+	executed, err := cmd.ExecuteContextC(context.Background())
 	if err == nil || ExitCode(err) != 7 {
 		t.Fatalf("got %v", err)
 	}
 	if out.Len() != 0 {
 		t.Fatalf("doctor emitted output before returning its error: %s", out.String())
 	}
-	written, writeErr := WriteInvocationError(cmd, err)
+	written, writeErr := WriteInvocationError(executed, err)
 	if !written || writeErr != nil {
 		t.Fatalf("WriteInvocationError() = (%t, %v)", written, writeErr)
 	}

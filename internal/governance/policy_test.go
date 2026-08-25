@@ -22,10 +22,10 @@ func TestNewEffectivePolicyCanonicalizesRuleOrder(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if first.Identity == "" || first.Identity != second.Identity {
-		t.Fatalf("identities = %q and %q, want equal non-empty identities", first.Identity, second.Identity)
+	if first.Identity() == "" || first.Identity() != second.Identity() {
+		t.Fatalf("identities = %q and %q, want equal non-empty identities", first.Identity(), second.Identity())
 	}
-	if got := first.Rules[0].ID; got != "a-rule" {
+	if got := first.Rules()[0].ID; got != "a-rule" {
 		t.Fatalf("first canonical rule = %q, want a-rule", got)
 	}
 }
@@ -40,7 +40,7 @@ func TestNewEffectivePolicySecretRotationChangesIdentityWithoutSerializingSecret
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first.Identity == second.Identity || first.secretVerifier == second.secretVerifier {
+	if first.Identity() == second.Identity() || first.secretVerifier == second.secretVerifier {
 		t.Fatal("secret rotation must change both policy identity and verifier")
 	}
 	payload, err := json.Marshal(first)
@@ -65,5 +65,27 @@ func TestNewEffectivePolicyRejectsAlgorithmsOutsideActionContract(t *testing.T) 
 	}
 	if _, err := NewEffectivePolicy("safe", nil, []Cohort{{Resource: "orders", KeyID: "key-1", Algorithm: "rank/v2", Limit: 1}}, bytes.Repeat([]byte{1}, 32)); err == nil {
 		t.Fatal("accepted invalid cohort algorithm")
+	}
+}
+
+func TestNewEffectivePolicyDoesNotAliasNestedInputs(t *testing.T) {
+	rules := []Rule{{ID: "rule", Service: ServiceS3, ContentTypes: []string{"text/plain"}, Action: ActionOmit}}
+	cohorts := []Cohort{{Resource: "assets", KeyPaths: []string{"user.id"}, Predicates: []Predicate{{Attribute: "tier", Value: map[string]any{"name": "gold"}}}, Algorithm: CohortRankAlgorithm}}
+	policy, err := NewEffectivePolicy("safe", rules, cohorts, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rules[0].ContentTypes[0] = "application/json"
+	cohorts[0].KeyPaths[0] = "changed"
+	cohorts[0].Predicates[0].Value.(map[string]any)["name"] = "tampered"
+	if policy.Rules()[0].ContentTypes[0] != "text/plain" || policy.Cohorts()[0].KeyPaths[0] != "user.id" || policy.Cohorts()[0].Predicates[0].Value.(map[string]any)["name"] != "gold" {
+		t.Fatalf("policy aliases constructor inputs: %#v", policy)
+	}
+	returnedRules := policy.Rules()
+	returnedRules[0].ContentTypes[0] = "tampered"
+	returnedCohorts := policy.Cohorts()
+	returnedCohorts[0].KeyPaths[0] = "tampered"
+	if policy.Rules()[0].ContentTypes[0] != "text/plain" || policy.Cohorts()[0].KeyPaths[0] != "user.id" {
+		t.Fatal("policy accessors expose mutable internal state")
 	}
 }

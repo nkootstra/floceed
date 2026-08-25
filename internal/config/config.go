@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/nkootstra/floceed/internal/arnidentity"
 	"github.com/nkootstra/floceed/internal/governance"
 	"go.yaml.in/yaml/v3"
 )
@@ -558,8 +559,8 @@ func validateKinesisResources(resources []KinesisResource) error {
 		if !validDependencyName(resource.Name, 128) || strings.HasSuffix(resource.Name, ".fifo") {
 			return fmt.Errorf("Kinesis resource %q has invalid name: %w", resource.Name, ErrValidation)
 		}
-		parts := strings.Split(resource.ARN, ":")
-		if len(parts) != 6 || parts[0] != "arn" || !arnPartition.MatchString(parts[1]) || parts[2] != "kinesis" || parts[3] == "" || !accountID.MatchString(parts[4]) || parts[5] != "stream/"+resource.Name {
+		identity, err := arnidentity.Parse(resource.ARN)
+		if err != nil || !arnPartition.MatchString(identity.Partition) || identity.Service != "kinesis" || identity.Region == "" || !accountID.MatchString(identity.Account) || identity.Resource != "stream/"+resource.Name {
 			return fmt.Errorf("Kinesis resource %q: ARN %q does not match stream name: %w", resource.Name, resource.ARN, ErrValidation)
 		}
 		if resource.Data != nil {
@@ -581,8 +582,8 @@ func validateEventBridgeResources(resources []EventBridgeResource) error {
 		if !validDependencyName(resource.Name, 256) || resource.Name == "default" {
 			return fmt.Errorf("EventBridge resource %q has invalid name: %w", resource.Name, ErrValidation)
 		}
-		parts := strings.Split(resource.ARN, ":")
-		if len(parts) != 6 || parts[0] != "arn" || !arnPartition.MatchString(parts[1]) || parts[2] != "events" || parts[3] == "" || !accountID.MatchString(parts[4]) || parts[5] != "event-bus/"+resource.Name {
+		identity, err := arnidentity.Parse(resource.ARN)
+		if err != nil || !arnPartition.MatchString(identity.Partition) || identity.Service != "events" || identity.Region == "" || !accountID.MatchString(identity.Account) || identity.Resource != "event-bus/"+resource.Name {
 			return fmt.Errorf("EventBridge resource %q: ARN %q does not match event bus name: %w", resource.Name, resource.ARN, ErrValidation)
 		}
 	}
@@ -596,8 +597,8 @@ func validateLambdaResources(resources []LambdaResource) error {
 		if !validDependencyName(resource.Name, 64) {
 			return fmt.Errorf("Lambda resource %q has invalid name: %w", resource.Name, ErrValidation)
 		}
-		parts := strings.Split(resource.ARN, ":")
-		if len(parts) != 7 || parts[0] != "arn" || !arnPartition.MatchString(parts[1]) || parts[2] != "lambda" || parts[3] == "" || !accountID.MatchString(parts[4]) || parts[5] != "function" || parts[6] != resource.Name {
+		identity, err := arnidentity.Parse(resource.ARN)
+		if err != nil || !arnPartition.MatchString(identity.Partition) || identity.Service != "lambda" || identity.Region == "" || !accountID.MatchString(identity.Account) || identity.Resource != "function:"+resource.Name {
 			return fmt.Errorf("Lambda resource %q: ARN %q does not match function name: %w", resource.Name, resource.ARN, ErrValidation)
 		}
 	}
@@ -611,13 +612,14 @@ func validateSecretResources(resources []SecretResource) error {
 		if resource.Name == "" || len(resource.Name) > 512 {
 			return fmt.Errorf("Secrets Manager resource %q has invalid name: %w", resource.Name, ErrValidation)
 		}
-		parts := strings.Split(resource.ARN, ":")
 		// Secrets Manager ARNs carry the resource as `secret:<name>-<suffix>`,
 		// which splits into two segments: "secret" and the name with its random
 		// suffix. Accept only the bare name or the name plus AWS's fixed
 		// `-XXXXXX` suffix, so a different secret whose name merely starts with
 		// this one cannot pass.
-		if len(parts) != 7 || parts[0] != "arn" || !arnPartition.MatchString(parts[1]) || parts[2] != "secretsmanager" || parts[3] == "" || !accountID.MatchString(parts[4]) || parts[5] != "secret" || !secretResourceMatchesName(parts[6], resource.Name) {
+		identity, err := arnidentity.Parse(resource.ARN)
+		resourcePart, ok := identity.ResourceName("secret:")
+		if err != nil || !arnPartition.MatchString(identity.Partition) || identity.Service != "secretsmanager" || identity.Region == "" || !accountID.MatchString(identity.Account) || !ok || !secretResourceMatchesName(resourcePart, resource.Name) {
 			return fmt.Errorf("Secrets Manager resource %q has invalid ARN: %w", resource.Name, ErrValidation)
 		}
 	}
@@ -658,8 +660,8 @@ func validateParameterResources(resources []ParameterResource) error {
 		if resource.Name == "" || len(resource.Name) > 2048 || !strings.HasPrefix(resource.Name, "/") {
 			return fmt.Errorf("SSM parameter %q has invalid name: %w", resource.Name, ErrValidation)
 		}
-		parts := strings.Split(resource.ARN, ":")
-		if len(parts) != 6 || parts[2] != "ssm" || parts[5] != "parameter"+resource.Name || !accountID.MatchString(parts[4]) {
+		identity, err := arnidentity.Parse(resource.ARN)
+		if err != nil || identity.Service != "ssm" || identity.Region == "" || !accountID.MatchString(identity.Account) || identity.Resource != "parameter"+resource.Name {
 			return fmt.Errorf("SSM parameter %q has invalid ARN: %w", resource.Name, ErrValidation)
 		}
 	}
@@ -673,7 +675,8 @@ func validateAPIResources(resources []APIResource) error {
 		if resource.Name == "" || len(resource.Name) > 128 {
 			return fmt.Errorf("API Gateway resource %q has invalid name: %w", resource.Name, ErrValidation)
 		}
-		if resource.ARN == "" || !strings.Contains(resource.ARN, ":apigateway:") {
+		identity, err := arnidentity.Parse(resource.ARN)
+		if err != nil || identity.Service != "apigateway" || identity.Resource != "/apis/"+resource.Name {
 			return fmt.Errorf("API Gateway resource %q has invalid ARN: %w", resource.Name, ErrValidation)
 		}
 	}
@@ -687,7 +690,8 @@ func validateStateMachineResources(resources []StateMachineResource) error {
 		if resource.Name == "" || len(resource.Name) > 80 {
 			return fmt.Errorf("Step Functions resource %q has invalid name: %w", resource.Name, ErrValidation)
 		}
-		if resource.ARN == "" || !strings.Contains(resource.ARN, ":states:") || !strings.Contains(resource.ARN, ":stateMachine:") {
+		identity, err := arnidentity.Parse(resource.ARN)
+		if err != nil || identity.Service != "states" || identity.Resource != "stateMachine:"+resource.Name || !accountID.MatchString(identity.Account) {
 			return fmt.Errorf("Step Functions resource %q has invalid ARN: %w", resource.Name, ErrValidation)
 		}
 	}
@@ -701,7 +705,8 @@ func validateLogGroupResources(resources []LogGroupResource) error {
 		if resource.Name == "" || len(resource.Name) > 512 {
 			return fmt.Errorf("CloudWatch Logs resource %q has invalid name: %w", resource.Name, ErrValidation)
 		}
-		if resource.ARN == "" || !strings.Contains(resource.ARN, ":logs:") || !strings.Contains(resource.ARN, ":log-group:") {
+		identity, err := arnidentity.Parse(resource.ARN)
+		if err != nil || identity.Service != "logs" || strings.TrimSuffix(identity.Resource, ":*") != "log-group:"+resource.Name || !accountID.MatchString(identity.Account) {
 			return fmt.Errorf("CloudWatch Logs resource %q has invalid ARN: %w", resource.Name, ErrValidation)
 		}
 	}
@@ -850,16 +855,33 @@ func supportedPredicateValue(value any) bool {
 
 func hasFullData(p Project) bool {
 	for _, r := range p.Resources.S3 {
-		if r.Data != nil && r.Data.Enabled && r.Data.Mode == DataModeFull {
+		if r.Data.enabledFull() {
 			return true
 		}
 	}
 	for _, r := range p.Resources.DynamoDB {
-		if r.Data != nil && r.Data.Enabled && r.Data.Mode == DataModeFull {
+		if r.Data.enabledFull() {
+			return true
+		}
+	}
+	for _, r := range p.Resources.Kinesis {
+		if r.Data.enabledFull() {
 			return true
 		}
 	}
 	return false
+}
+
+func (p *S3DataPolicy) enabledFull() bool {
+	return p != nil && p.Enabled && p.Mode == DataModeFull
+}
+
+func (p *DynamoDBDataPolicy) enabledFull() bool {
+	return p != nil && p.Enabled && p.Mode == DataModeFull
+}
+
+func (p *KinesisDataPolicy) enabledFull() bool {
+	return p != nil && p.Enabled && p.Mode == DataModeFull
 }
 
 func (p OverwritePolicy) valid() bool {

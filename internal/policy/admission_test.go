@@ -75,6 +75,32 @@ func TestEvaluateRequiresExactTrustedProducerBinding(t *testing.T) {
 	}
 }
 
+func TestEvaluateAllowFlagsMapToTheirFindingCodes(t *testing.T) {
+	manifest := model.Manifest{Source: model.SourceMetadata{AccountID: "123456789012"}, Findings: []model.Finding{
+		{Code: "DATA_CAPTURE_PARTIAL"},
+		{Code: "S3_DATA_LIMIT_REACHED"},
+		{Code: "DYNAMODB_DATA_LIMIT_REACHED"},
+	}}
+	for _, test := range []struct {
+		name string
+		yaml string
+		want bool
+	}{
+		{"partial only", "allow_partial: true", false},
+		{"partial and truncation", "allow_partial: true\nallow_truncated: true", true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			p, err := Load([]byte("schema_version: 1\nallowed_accounts: [123456789012]\n" + test.yaml + "\n"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := p.Evaluate(Facts{Manifest: manifest}, time.Unix(0, 0).UTC()).Allowed; got != test.want {
+				t.Fatalf("allowed = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
 func TestTrustedProducerFromEnvironment(t *testing.T) {
 	t.Setenv("FLOCEED_TRUSTED_PRODUCER_REPOSITORY", "nkootstra/floceed")
 	t.Setenv("FLOCEED_TRUSTED_PRODUCER_WORKFLOW", "CI")

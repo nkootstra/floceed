@@ -3,6 +3,7 @@ package sns
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsSNS "github.com/aws/aws-sdk-go-v2/service/sns"
@@ -21,13 +22,22 @@ type Adapter struct {
 	client Client
 }
 
+type topicStructure struct {
+	Name          string          `json:"name"`
+	ARN           string          `json:"arn"`
+	Subscriptions *[]subscription `json:"subscriptions,omitempty"`
+}
+
+type subscription struct {
+	ARN      string `json:"arn"`
+	Protocol string `json:"protocol"`
+	Endpoint string `json:"endpoint"`
+	TopicARN string `json:"topic_arn"`
+}
+
 var _ catalog.Adapter = (*Adapter)(nil)
 
-func New(client ...Client) *Adapter {
-	var c Client
-	if len(client) > 0 {
-		c = client[0]
-	}
+func New(c Client) *Adapter {
 	return &Adapter{
 		Base: structureonly.New(structureonly.Descriptor{
 			ServiceName:  "sns",
@@ -46,24 +56,27 @@ func (a *Adapter) Capture(ctx context.Context, _ model.SourceScope, ref model.Re
 	if err := a.CheckStructureOnly(opts); err != nil {
 		return nil, err
 	}
-	structure := map[string]any{"name": ref.ID, "arn": ref.ARN}
-	if a.client != nil {
-		var subscriptions []map[string]string
+	if a.client == nil {
+		return nil, fmt.Errorf("SNS capture requires a client: %w", model.ErrValidation)
+	}
+	structure := topicStructure{Name: ref.ID, ARN: ref.ARN}
+	{
+		subscriptions := make([]subscription, 0)
 		var token *string
 		for {
 			out, err := a.client.ListSubscriptionsByTopic(ctx, &awsSNS.ListSubscriptionsByTopicInput{TopicArn: &ref.ARN, NextToken: token})
 			if err != nil {
 				return nil, err
 			}
-			for _, subscription := range out.Subscriptions {
-				subscriptions = append(subscriptions, map[string]string{"arn": aws.ToString(subscription.SubscriptionArn), "protocol": aws.ToString(subscription.Protocol), "endpoint": aws.ToString(subscription.Endpoint), "topic_arn": aws.ToString(subscription.TopicArn)})
+			for _, item := range out.Subscriptions {
+				subscriptions = append(subscriptions, subscription{ARN: aws.ToString(item.SubscriptionArn), Protocol: aws.ToString(item.Protocol), Endpoint: aws.ToString(item.Endpoint), TopicARN: aws.ToString(item.TopicArn)})
 			}
 			if out.NextToken == nil || *out.NextToken == "" {
 				break
 			}
 			token = out.NextToken
 		}
-		structure["subscriptions"] = subscriptions
+		structure.Subscriptions = &subscriptions
 	}
 	return a.Snapshot(ref, structure)
 }

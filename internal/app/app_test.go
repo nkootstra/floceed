@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	awsSNS "github.com/aws/aws-sdk-go-v2/service/sns"
 	"github.com/nkootstra/floceed/internal/awsconfig"
 	"github.com/nkootstra/floceed/internal/bundle"
 	"github.com/nkootstra/floceed/internal/captureledger"
@@ -118,7 +119,7 @@ func TestScanDiscoversServicesConcurrently(t *testing.T) {
 }
 
 func TestPlanIncludesExplicitEventDependencySelectionsWithoutIAM(t *testing.T) {
-	registry, err := catalog.New(sqsservice.New(), snsservice.New())
+	registry, err := catalog.New(sqsservice.New(), snsservice.New(planSNSClient{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,6 +144,12 @@ func TestPlanIncludesExplicitEventDependencySelectionsWithoutIAM(t *testing.T) {
 			t.Fatalf("structure-only SQS selection must not require %s: %#v", action, plan.RequiredIAMActions)
 		}
 	}
+}
+
+type planSNSClient struct{}
+
+func (planSNSClient) ListSubscriptionsByTopic(context.Context, *awsSNS.ListSubscriptionsByTopicInput, ...func(*awsSNS.Options)) (*awsSNS.ListSubscriptionsByTopicOutput, error) {
+	return &awsSNS.ListSubscriptionsByTopicOutput{}, nil
 }
 
 func TestScanSkipsDeselectedServices(t *testing.T) {
@@ -267,7 +274,7 @@ func TestPlanResolvesFixtureProfileBeforeOpeningSource(t *testing.T) {
 	if plan.Governance == nil || plan.Governance.Profile != "safe" || plan.Governance.PolicyIdentity == "" {
 		t.Fatalf("governance = %#v, want resolved safe profile", plan.Governance)
 	}
-	if f.adapter.lastOptions.Governance == nil || f.adapter.lastOptions.Governance.Identity != plan.Governance.PolicyIdentity {
+	if f.adapter.lastOptions.Governance == nil || f.adapter.lastOptions.Governance.Identity() != plan.Governance.PolicyIdentity {
 		t.Fatalf("adapter governance = %#v, want plan identity %q", f.adapter.lastOptions.Governance, plan.Governance.PolicyIdentity)
 	}
 }

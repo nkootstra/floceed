@@ -125,7 +125,7 @@ func (p Policy) Evaluate(f Facts, now time.Time) Decision {
 		deny("fixture_expired")
 	}
 	for _, finding := range append(append([]model.Finding(nil), f.Manifest.Findings...), snapshotFindings(f.Manifest.Snapshots)...) {
-		if contains(p.AllowedFindingCodes, finding.Code) || contains(p.AllowedSeverities, string(finding.Severity)) {
+		if p.allowsFinding(finding.Code) || contains(p.AllowedSeverities, string(finding.Severity)) {
 			continue
 		}
 		deny("finding_" + finding.Code)
@@ -136,6 +136,19 @@ func (p Policy) Evaluate(f Facts, now time.Time) Decision {
 	sort.Strings(d.Reasons)
 	d.Reasons = unique(d.Reasons)
 	return d
+}
+
+func (p Policy) allowsFinding(code string) bool {
+	if contains(p.AllowedFindingCodes, code) {
+		return true
+	}
+	if p.AllowPartial && code == "DATA_CAPTURE_PARTIAL" {
+		return true
+	}
+	if p.AllowTruncated && (code == "S3_DATA_LIMIT_REACHED" || code == "DYNAMODB_DATA_LIMIT_REACHED") {
+		return true
+	}
+	return false
 }
 
 func matchesProducer(expected ProducerBinding, actual *ProducerBinding) bool {

@@ -3,9 +3,6 @@
 package integration_test
 
 import (
-	"archive/tar"
-	"bytes"
-	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -33,6 +30,7 @@ import (
 	"github.com/nkootstra/floceed/internal/compose"
 	"github.com/nkootstra/floceed/internal/config"
 	"github.com/nkootstra/floceed/internal/model"
+	"github.com/nkootstra/floceed/internal/testfixture"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
 )
@@ -208,35 +206,12 @@ func renderSyntheticBundle(t *testing.T, ctx context.Context, fixture replayFixt
 	packPath := "bundle/data/s3/pack-000001.tar.gz"
 	indexPath := "bundle/data/s3/pack-000001.index.ndjson.gz"
 	entryName := "object.bin"
-	var pack bytes.Buffer
-	packGzip := gzip.NewWriter(&pack)
-	packGzip.Header.ModTime = time.Unix(0, 0)
-	archive := tar.NewWriter(packGzip)
-	if err := archive.WriteHeader(&tar.Header{Name: entryName, Mode: 0o600, Size: int64(len(object)), ModTime: time.Unix(0, 0)}); err != nil {
+	pack, index, err := testfixture.S3PackArtifacts(object, "fixtures/hello.txt", entryName)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := archive.Write(object); err != nil {
-		t.Fatal(err)
-	}
-	if err := archive.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if err := packGzip.Close(); err != nil {
-		t.Fatal(err)
-	}
-	objectDigest := sha256.Sum256(object)
-	indexRecord := map[string]any{"key": "fixtures/hello.txt", "path": entryName, "size": len(object), "sha256": hex.EncodeToString(objectDigest[:]), "content_type": "text/plain", "overwrite": "if-different"}
-	var index bytes.Buffer
-	indexGzip := gzip.NewWriter(&index)
-	indexGzip.Header.ModTime = time.Unix(0, 0)
-	if err := json.NewEncoder(indexGzip).Encode(indexRecord); err != nil {
-		t.Fatal(err)
-	}
-	if err := indexGzip.Close(); err != nil {
-		t.Fatal(err)
-	}
-	packRef := writeArtifact(t, artifacts, packPath, pack.Bytes(), "application/gzip")
-	indexRef := writeArtifact(t, artifacts, indexPath, index.Bytes(), "application/gzip")
+	packRef := writeArtifact(t, artifacts, packPath, pack, "application/gzip")
+	indexRef := writeArtifact(t, artifacts, indexPath, index, "application/gzip")
 	itemRef := writeArtifact(t, artifacts, itemPath, item, "application/x-ndjson")
 	dynamoSnapshot := testSnapshot(t, model.Snapshot{Resource: model.ResourceRef{Service: "dynamodb", Type: "table", ID: table}, Service: "dynamodb"}, map[string]any{"name": table, "attribute_definitions": []map[string]any{{"name": "id", "type": "S"}}, "key_schema": []map[string]any{{"name": "id", "type": "HASH"}}, "billing_mode": "PAY_PER_REQUEST", "source_billing_mode": "PAY_PER_REQUEST", "stream": map[string]any{"enabled": false}, "ttl": map[string]any{"enabled": false}, "tags": []map[string]any{{"key": "floceed", "value": "integration"}}}, nil)
 	dynamoSnapshot.Dataset = &model.Dataset{Format: "dynamodb-ndjson-v1", Records: 1, SourceBytes: int64(len(item)), Consistency: "best_effort", Chunks: []model.DataChunk{{Data: itemRef, Records: 1, SourceBytes: int64(len(item))}}}

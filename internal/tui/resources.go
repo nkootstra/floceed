@@ -27,11 +27,10 @@ func (m *Model) mergeResources(in []model.ResourceSummary) {
 			delete(m.selected, key)
 		}
 	}
-	for key := range m.dataEnabled {
+	for key := range m.dataChoice {
 		service, _, _ := strings.Cut(key, "/")
 		if !m.serviceSelected[service] {
-			delete(m.dataEnabled, key)
-			delete(m.dataMode, key)
+			delete(m.dataChoice, key)
 		}
 	}
 	m.resources = m.resources[:0]
@@ -90,7 +89,7 @@ var projectBuilders = map[string]func(p *config.Project, m Model, r model.Resour
 		entry := config.S3Resource{Name: r.Ref.ID}
 		if data {
 			entry.Data = config.NewS3DataPolicy()
-			entry.Data.Mode = m.dataMode[resourceKey(r.Ref)]
+			entry.Data.Mode = m.dataChoice[resourceKey(r.Ref)]
 			if entry.Data.Mode == config.DataModeFull {
 				entry.Data.MaxObjects = 0
 				entry.Data.MaxObjectBytes = 0
@@ -104,7 +103,7 @@ var projectBuilders = map[string]func(p *config.Project, m Model, r model.Resour
 		entry := config.DynamoDBResource{Name: r.Ref.ID}
 		if data {
 			entry.Data = config.NewDynamoDBDataPolicy()
-			entry.Data.Mode = m.dataMode[resourceKey(r.Ref)]
+			entry.Data.Mode = m.dataChoice[resourceKey(r.Ref)]
 			if entry.Data.Mode == config.DataModeFull {
 				entry.Data.MaxItems = 0
 				entry.Data.MaxPages = 0
@@ -112,6 +111,16 @@ var projectBuilders = map[string]func(p *config.Project, m Model, r model.Resour
 			}
 		}
 		p.Resources.DynamoDB = append(p.Resources.DynamoDB, entry)
+	},
+	"sns": func(p *config.Project, _ Model, r model.ResourceSummary, _ bool) {
+		p.Resources.SNS = append(p.Resources.SNS, config.SNSResource{Name: r.Ref.ID, ARN: r.Ref.ARN})
+	},
+	"sqs": func(p *config.Project, m Model, r model.ResourceSummary, data bool) {
+		entry := config.SQSResource{Name: r.Ref.ID, ARN: r.Ref.ARN}
+		if data {
+			entry.Data = config.NewSQSDataPolicy()
+		}
+		p.Resources.SQS = append(p.Resources.SQS, entry)
 	},
 	"kinesis": func(p *config.Project, _ Model, r model.ResourceSummary, _ bool) {
 		p.Resources.Kinesis = append(p.Resources.Kinesis, config.KinesisResource{Name: r.Ref.ID, ARN: r.Ref.ARN})
@@ -145,7 +154,7 @@ func (m Model) Project() config.Project {
 	for _, r := range m.selectedResources() {
 		key := resourceKey(r.Ref)
 		if builder, ok := projectBuilders[r.Ref.Service]; ok {
-			builder(&p, m, r, m.dataEnabled[key])
+			builder(&p, m, r, m.dataChoice[key] != "")
 		}
 	}
 	return p

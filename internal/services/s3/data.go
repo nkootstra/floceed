@@ -74,8 +74,8 @@ func newCaptureGovernance(bucket string, policy *governance.EffectivePolicy) *ca
 	if policy == nil {
 		return compiled
 	}
-	compiled.engine = governance.NewEngine(policy.Profile, policy.Secret())
-	for _, rule := range policy.Rules {
+	compiled.engine = governance.NewEngine(policy.Profile(), policy.Secret())
+	for _, rule := range policy.Rules() {
 		if rule.Service != governance.ServiceS3 || rule.Resource != bucket {
 			continue
 		}
@@ -205,7 +205,6 @@ func (a *Adapter) captureObjectsReusable(ctx context.Context, scope model.Source
 	if opts.Progress != nil {
 		opts.Progress(model.ProgressEvent{Operation: "pull", Phase: "capture", Service: "s3", Resource: bucket, CompletedRecords: cp.ProcessedRecords, TotalRecords: cp.Records, CompletedBytes: chunkBytes(cp.Chunks), TotalBytes: cp.SourceBytes, TotalPrecision: "exact", Resumed: resumed})
 	}
-	dataset := model.Dataset{Format: "s3-tar-gzip-v1", Records: cp.ProcessedRecords, SourceBytes: cp.SourceBytes, Consistency: "best_effort", Resumed: resumed, Chunks: append([]model.DataChunk(nil), cp.Chunks...)}
 	inv, err := os.Open(invPath)
 	if err != nil {
 		return nil, err
@@ -248,39 +247,16 @@ func (a *Adapter) captureObjectsReusable(ctx context.Context, scope model.Source
 		return nil, err
 	}
 	reader := bufio.NewReaderSize(inv, 1<<20)
+	packReader := newInventoryPackReader(reader)
 	for cp.ProcessedRecords < cp.Records {
-		var entries []inventoryEntry
-		var linesBytes, packBytes int64
-		for len(entries) < s3PackObjects {
-			line, e := reader.ReadBytes('\n')
-			if e != nil && e != io.EOF {
-				return nil, e
-			}
-			if len(line) == 0 {
-				break
-			}
-			var entry inventoryEntry
-			if err := json.Unmarshal(line, &entry); err != nil {
-				return nil, err
-			}
-			if len(entries) > 0 && packBytes+entry.Size > s3PackBytes {
-				if _, err := inv.Seek(cp.ProcessedOffset+linesBytes, io.SeekStart); err != nil {
-					return nil, err
-				}
-				reader.Reset(inv)
-				break
-			}
-			entries = append(entries, entry)
-			linesBytes += int64(len(line))
-			packBytes += entry.Size
-			if e == io.EOF {
-				break
-			}
+		entries, linesBytes, readErr := packReader.Next()
+		if readErr != nil {
+			return nil, readErr
 		}
 		if len(entries) == 0 {
 			break
 		}
-		number := len(dataset.Chunks) + 1
+		number := len(cp.Chunks) + 1
 		unitID := fmt.Sprintf("pack-%06d", number)
 		freshness := s3PackFreshness(entries)
 		unit, found := candidateUnits[unitID]
@@ -332,8 +308,6 @@ func (a *Adapter) captureObjectsReusable(ctx context.Context, scope model.Source
 		if err := saveS3Checkpoint(cpPath, cp); err != nil {
 			return nil, err
 		}
-		dataset.Chunks = append(dataset.Chunks, chunk)
-		dataset.Records = cp.ProcessedRecords
 		if opts.Progress != nil {
 			opts.Progress(model.ProgressEvent{Operation: "pull", Phase: "capture", Service: "s3", Resource: bucket, CompletedRecords: cp.ProcessedRecords, TotalRecords: cp.Records, CompletedBytes: chunkBytes(cp.Chunks), TotalBytes: cp.SourceBytes, CompletedChunks: int64(len(cp.Chunks)), TotalPrecision: "exact", Resumed: resumed})
 		}
@@ -345,8 +319,15 @@ func (a *Adapter) captureObjectsReusable(ctx context.Context, scope model.Source
 		sort.Slice(resource.Units, func(i, j int) bool { return resource.Units[i].ID < resource.Units[j].ID })
 	}
 	b.Objects = nil
-	snap.Dataset = &dataset
+	snap.Dataset = datasetFromS3Checkpoint(cp, resumed)
 	return resource, nil
+}
+
+func datasetFromS3Checkpoint(cp s3Checkpoint, resumed bool) *model.Dataset {
+	return &model.Dataset{
+		Format: "s3-tar-gzip-v1", Records: cp.ProcessedRecords, SourceBytes: cp.SourceBytes,
+		Consistency: "best_effort", Resumed: resumed, Chunks: append([]model.DataChunk(nil), cp.Chunks...),
+	}
 }
 
 func missingS3Units(candidate captureledger.Resource, currentRecords int64) []captureledger.Unit {
@@ -377,11 +358,16 @@ func scanS3InventoryPacks(path string, maxPacks int, visit func(int, []inventory
 		return err
 	}
 	defer f.Close()
-	reader := bufio.NewReaderSize(f, 1<<20)
-	var entries []inventoryEntry
-	var packBytes int64
+	reader := newInventoryPackReader(bufio.NewReaderSize(f, 1<<20))
 	number := 1
-	flush := func() error {
+	for {
+		if number > maxPacks {
+			return nil
+		}
+		entries, _, err := reader.Next()
+		if err != nil {
+			return err
+		}
 		if len(entries) == 0 {
 			return nil
 		}
@@ -389,34 +375,50 @@ func scanS3InventoryPacks(path string, maxPacks int, visit func(int, []inventory
 			return err
 		}
 		number++
-		entries, packBytes = nil, 0
-		return nil
 	}
-	for {
-		if number > maxPacks {
-			return nil
+}
+
+type inventoryPackReader struct {
+	reader  *bufio.Reader
+	pending []byte
+}
+
+func newInventoryPackReader(reader *bufio.Reader) *inventoryPackReader {
+	return &inventoryPackReader{reader: reader}
+}
+
+func (r *inventoryPackReader) Next() ([]inventoryEntry, int64, error) {
+	entries := make([]inventoryEntry, 0, s3PackObjects)
+	var consumed, packBytes int64
+	for len(entries) < s3PackObjects {
+		line := r.pending
+		r.pending = nil
+		readErr := error(nil)
+		if line == nil {
+			line, readErr = r.reader.ReadBytes('\n')
 		}
-		line, readErr := reader.ReadBytes('\n')
 		if readErr != nil && readErr != io.EOF {
-			return readErr
+			return nil, 0, readErr
 		}
-		if len(line) != 0 {
-			var entry inventoryEntry
-			if err := json.Unmarshal(line, &entry); err != nil {
-				return err
-			}
-			if len(entries) >= s3PackObjects || (len(entries) > 0 && packBytes+entry.Size > s3PackBytes) {
-				if err := flush(); err != nil {
-					return err
-				}
-			}
-			entries = append(entries, entry)
-			packBytes += entry.Size
+		if len(line) == 0 {
+			break
 		}
+		var entry inventoryEntry
+		if err := json.Unmarshal(line, &entry); err != nil {
+			return nil, 0, err
+		}
+		if len(entries) > 0 && packBytes+entry.Size > s3PackBytes {
+			r.pending = line
+			break
+		}
+		entries = append(entries, entry)
+		consumed += int64(len(line))
+		packBytes += entry.Size
 		if readErr == io.EOF {
-			return flush()
+			break
 		}
 	}
+	return entries, consumed, nil
 }
 
 func s3UnitArtifacts(unit captureledger.Unit) (captureledger.Artifact, captureledger.Artifact, error) {

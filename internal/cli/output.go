@@ -141,10 +141,5 @@ func jsonOutputCommand(cmd *cobra.Command) (string, bool) {
 	if flag := cmd.Flags().Lookup("output"); flag != nil && flag.Changed && flag.Value.String() == "json" {
 		return cmd.Name(), true
 	}
-	for _, child := range cmd.Commands() {
-		if name, ok := jsonOutputCommand(child); ok {
-			return name, true
-		}
-	}
 	return "", false
 }

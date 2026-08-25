@@ -170,16 +170,7 @@ func linkOrCopyFileWith(dst, src string, link func(string, string) error) error 
 }
 
 func snapshotArtifacts(snapshot model.Snapshot) []model.ArtifactRef {
-	out := append([]model.ArtifactRef(nil), snapshot.Data...)
-	if snapshot.Dataset != nil {
-		for _, chunk := range snapshot.Dataset.Chunks {
-			out = append(out, chunk.Data)
-			if chunk.Index != nil {
-				out = append(out, *chunk.Index)
-			}
-		}
-	}
-	return out
+	return ArtifactRefs(snapshot)
 }
 
 func sortManifest(m *model.Manifest) {

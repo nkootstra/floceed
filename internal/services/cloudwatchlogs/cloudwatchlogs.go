@@ -27,11 +27,7 @@ type Adapter struct {
 
 var _ catalog.Adapter = (*Adapter)(nil)
 
-func New(client ...Client) *Adapter {
-	var c Client
-	if len(client) > 0 {
-		c = client[0]
-	}
+func New(c Client) *Adapter {
 	return &Adapter{
 		Base: structureonly.New(structureonly.Descriptor{
 			ServiceName:  "logs",
@@ -50,8 +46,11 @@ func (a *Adapter) Capture(ctx context.Context, _ model.SourceScope, ref model.Re
 	if err := a.CheckStructureOnly(opts); err != nil {
 		return nil, err
 	}
+	if a.client == nil {
+		return nil, fmt.Errorf("CloudWatch Logs capture requires a client: %w", model.ErrValidation)
+	}
 	structure := map[string]any{"name": ref.ID, "arn": ref.ARN, "tags": map[string]string{}}
-	if a.client != nil {
+	{
 		group, err := a.findGroup(ctx, ref.ID)
 		if err != nil {
 			return nil, err

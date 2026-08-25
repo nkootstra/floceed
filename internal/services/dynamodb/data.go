@@ -128,11 +128,12 @@ type DataResult struct {
 	Truncated        bool
 }
 
-// captureCheckpointVersion 4 records the capture definition, bounded-run
-// truncation, progress, and the governance identity. A checkpoint
-// can therefore only be resumed by a run with identical capture options while
+// captureCheckpointVersion 6 records the capture definition and an exclusive
+// plain-or-protected state shape. Older v5 checkpoints require an explicit
+// restart because their overlapping state fields cannot be resumed safely.
+// Checkpoints can only be resumed by a run with identical capture options while
 // preserving the final result classification.
-const captureCheckpointVersion = 5
+const captureCheckpointVersion = 6
 
 type captureCheckpoint struct {
 	Version            int                               `json:"version"`
@@ -192,9 +193,10 @@ func (a *Adapter) captureData(ctx context.Context, table string, opts model.Capt
 	}
 	var cohort *governance.Cohort
 	if opts.Governance != nil {
-		for i := range opts.Governance.Cohorts {
-			if opts.Governance.Cohorts[i].Resource == table {
-				cohort = &opts.Governance.Cohorts[i]
+		cohorts := opts.Governance.Cohorts()
+		for i := range cohorts {
+			if cohorts[i].Resource == table {
+				cohort = &cohorts[i]
 				break
 			}
 		}
@@ -289,18 +291,18 @@ func (a *Adapter) captureData(ctx context.Context, table string, opts model.Capt
 	var compiledRules []compiledDynamoRule
 	var engine *governance.Engine
 	if opts.Governance != nil {
-		for _, rule := range opts.Governance.Rules {
+		for _, rule := range opts.Governance.Rules() {
 			if rule.Service == governance.ServiceDynamoDB && rule.Resource == table {
 				rules = append(rules, rule)
 			}
 		}
-		engine = governance.NewEngine(opts.Governance.Profile, opts.Governance.Secret())
+		engine = governance.NewEngine(opts.Governance.Profile(), opts.Governance.Secret())
 		compiledRules = compileDynamoRules(rules)
 	}
 	var ranker *governance.CohortRanker
 	var selection *governance.CohortSelection
 	if cohort != nil {
-		ranker, err = governance.NewCohortRanker(opts.Governance.Profile, opts.Governance.Secret(), *cohort)
+		ranker, err = governance.NewCohortRanker(opts.Governance.Profile(), opts.Governance.Secret(), *cohort)
 		if err != nil {
 			return r, err
 		}
@@ -683,6 +685,9 @@ func loadCheckpoint(path, table string, opts model.CaptureOptions) (captureCheck
 	if cp.Version != captureCheckpointVersion || cp.Table != table || !captureIdentityMatches(cp, opts) {
 		return cp, false, ErrCheckpointIncompatible
 	}
+	if err := validateCheckpointStateShape(cp, opts.Governance != nil); err != nil {
+		return cp, false, fmt.Errorf("%w: %v", ErrCheckpointCorrupt, err)
+	}
 	for _, run := range cp.Runs {
 		if info, e := os.Stat(run.Path); e != nil || !info.Mode().IsRegular() {
 			return cp, false, ErrCheckpointCorrupt
@@ -698,6 +703,18 @@ func loadCheckpoint(path, table string, opts model.CaptureOptions) (captureCheck
 		}
 	}
 	return cp, true, nil
+}
+
+func validateCheckpointStateShape(cp captureCheckpoint, governed bool) error {
+	plain := len(cp.LastKey) != 0 || len(cp.ProtectedLastKey) != 0 || cp.ScanComplete || len(cp.Runs) != 0 || len(cp.CohortSelection) != 0 || cp.Items != 0 || cp.Pages != 0 || cp.Truncated || cp.SourceBytes != 0 || cp.ConsumedCapacity != 0 || len(cp.GovernanceCounts) != 0 || cp.ScannedItems != 0
+	protected := cp.ProtectedState != nil
+	if plain && protected {
+		return fmt.Errorf("checkpoint mixes plain and protected state")
+	}
+	if governed != protected {
+		return fmt.Errorf("checkpoint state does not match governance mode")
+	}
+	return nil
 }
 
 const governedStateMagic = "FLCGST1\n"
@@ -892,7 +909,7 @@ func validateGovernedState(state governedResumeState, selection []governance.Coh
 		return err
 	}
 	knownRules := make(map[string]bool)
-	for _, rule := range opts.Governance.Rules {
+	for _, rule := range opts.Governance.Rules() {
 		if rule.Service == governance.ServiceDynamoDB && rule.Resource == cp.Table {
 			knownRules[rule.ID] = true
 		}
@@ -903,9 +920,10 @@ func validateGovernedState(state governedResumeState, selection []governance.Coh
 		}
 	}
 	var cohort *governance.Cohort
-	for i := range opts.Governance.Cohorts {
-		if opts.Governance.Cohorts[i].Resource == cp.Table {
-			cohort = &opts.Governance.Cohorts[i]
+	cohorts := opts.Governance.Cohorts()
+	for i := range cohorts {
+		if cohorts[i].Resource == cp.Table {
+			cohort = &cohorts[i]
 			break
 		}
 	}
@@ -942,9 +960,10 @@ func checkpointProtectionIdentity(cp captureCheckpoint) string {
 
 func validateCohortCheckpoint(cp captureCheckpoint, opts model.CaptureOptions) error {
 	var cohort *governance.Cohort
-	for i := range opts.Governance.Cohorts {
-		if opts.Governance.Cohorts[i].Resource == cp.Table {
-			cohort = &opts.Governance.Cohorts[i]
+	cohorts := opts.Governance.Cohorts()
+	for i := range cohorts {
+		if cohorts[i].Resource == cp.Table {
+			cohort = &cohorts[i]
 			break
 		}
 	}

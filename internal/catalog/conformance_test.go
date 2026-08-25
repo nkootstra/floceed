@@ -5,6 +5,9 @@ import (
 
 	"github.com/nkootstra/floceed/internal/catalog"
 	"github.com/nkootstra/floceed/internal/config"
+	"github.com/nkootstra/floceed/internal/model"
+	apigateway "github.com/nkootstra/floceed/internal/services/apigateway"
+	logs "github.com/nkootstra/floceed/internal/services/cloudwatchlogs"
 	ddb "github.com/nkootstra/floceed/internal/services/dynamodb"
 	events "github.com/nkootstra/floceed/internal/services/eventbridge"
 	"github.com/nkootstra/floceed/internal/services/kinesis"
@@ -14,17 +17,18 @@ import (
 	"github.com/nkootstra/floceed/internal/services/sns"
 	"github.com/nkootstra/floceed/internal/services/sqs"
 	ssm "github.com/nkootstra/floceed/internal/services/ssm"
+	stepfunctions "github.com/nkootstra/floceed/internal/services/stepfunctions"
 )
 
 func TestAdaptersConformToStableContracts(t *testing.T) {
 	registry, err := catalog.New(
-		s3.New(nil), ddb.New(nil), kinesis.New(), sqs.New(), sns.New(), events.New(), lambda.New(), secrets.New(), ssm.New(),
+		s3.New(nil), ddb.New(nil), kinesis.New(), sqs.New(), sns.New(nil), events.New(nil), lambda.New(nil), secrets.New(nil), ssm.New(nil), apigateway.New(nil), stepfunctions.New(nil), logs.New(nil),
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	adapters := registry.All()
-	if len(adapters) != 9 {
+	if len(adapters) != len(model.SupportedServiceFacts()) {
 		t.Fatalf("adapter count = %d", len(adapters))
 	}
 	for _, adapter := range adapters {
@@ -34,6 +38,13 @@ func TestAdaptersConformToStableContracts(t *testing.T) {
 		}
 		if got := adapter.Plan(config.Project{}, false); len(got.Selections) != 0 || len(got.RequiredIAMActions) != 0 {
 			t.Fatalf("empty project plan for %s = %#v", descriptor.Name, got)
+		}
+	}
+	facts := model.SupportedServiceFacts()
+	for _, fact := range facts {
+		adapter, ok := registry.Get(fact.Name)
+		if !ok || adapter.Service().DisplayName != fact.DisplayName || adapter.Service().Support != fact.Support {
+			t.Fatalf("adapter metadata for %s = %#v, want %#v", fact.Name, adapter, fact.ServiceDescriptor)
 		}
 	}
 }

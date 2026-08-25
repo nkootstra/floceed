@@ -51,17 +51,19 @@ func main() {
 	})
 	// os.Exit does not run deferred functions, so deregister the signal
 	// handler explicitly before exiting.
-	code := execute(ctx, cmd, os.Stderr)
+	code := Execute(ctx, cmd, os.Stderr)
 	stop()
 	os.Exit(code)
 }
 
-func execute(ctx context.Context, cmd *cobra.Command, stderr io.Writer) int {
-	err := cmd.ExecuteContext(ctx)
+// Execute runs a configured Floceed command and translates its error into the
+// process exit code and user-facing output contract.
+func Execute(ctx context.Context, cmd *cobra.Command, stderr io.Writer) int {
+	executed, err := cmd.ExecuteContextC(ctx)
 	if err == nil {
 		return 0
 	}
-	jsonRequested, writeErr := cli.WriteInvocationError(cmd, err)
+	jsonRequested, writeErr := cli.WriteInvocationError(executed, err)
 	if jsonRequested {
 		if writeErr != nil {
 			fmt.Fprintln(stderr, cli.FormatError(writeErr))

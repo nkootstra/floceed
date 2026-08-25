@@ -137,15 +137,7 @@ func validateManifestArtifacts(manifest model.Manifest, sums Checksums) error {
 	}
 	var artifacts []model.ArtifactRef
 	for _, snapshot := range manifest.Snapshots {
-		artifacts = append(artifacts, snapshot.Data...)
-		if snapshot.Dataset != nil {
-			for _, chunk := range snapshot.Dataset.Chunks {
-				artifacts = append(artifacts, chunk.Data)
-				if chunk.Index != nil {
-					artifacts = append(artifacts, *chunk.Index)
-				}
-			}
-		}
+		artifacts = append(artifacts, ArtifactRefs(snapshot)...)
 	}
 	for _, artifact := range artifacts {
 		if err := ValidateRelativePath(artifact.Path); err != nil {

@@ -24,19 +24,12 @@ func (f fakeClient) ListTagsForResource(context.Context, *sfn.ListTagsForResourc
 
 func TestPlanAndCaptureAreStructureOnly(t *testing.T) {
 	project := config.Project{Resources: config.Resources{StateMachines: []config.StateMachineResource{{Name: "orders", ARN: "arn:aws:states:eu-west-1:123456789012:stateMachine:orders"}}}}
-	selection := New().Plan(project, true).Selections
+	selection := New(nil).Plan(project, true).Selections
 	if len(selection) != 1 || selection[0].Resource.Service != "stepfunctions" || selection[0].Resource.Type != "state_machine" {
 		t.Fatalf("selection = %#v", selection)
 	}
-	snapshot, err := New().Capture(context.Background(), model.SourceScope{}, selection[0].Resource, selection[0].Options)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if snapshot.Data != nil || snapshot.Dataset != nil {
-		t.Fatalf("capture contains data: %#v", snapshot)
-	}
-	if err := (model.Manifest{SchemaVersion: model.CurrentManifestSchemaVersion, Snapshots: []model.Snapshot{*snapshot}}).Validate(); err != nil {
-		t.Fatal(err)
+	if _, err := New(nil).Capture(context.Background(), model.SourceScope{}, selection[0].Resource, selection[0].Options); err == nil {
+		t.Fatal("expected clientless capture to fail")
 	}
 }
 
